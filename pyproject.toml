@@ -1,0 +1,46 @@
+[project]
+name = "stock-ana"
+version = "0.1.0"
+description = "股票技术分析与筛选工具"
+requires-python = ">=3.10"
+readme = "README.md"
+
+dependencies = [
+    # 数据获取
+    "akshare>=1.14.0",        # A股数据
+    "yfinance>=0.2.36",       # 美股数据
+
+    # 数据处理与分析
+    "pandas>=2.1.0",
+    "numpy>=1.26.0",
+    "ta>=0.11.0",             # 技术指标库（纯 Python，跨平台无障碍）
+
+    # 可视化
+    "mplfinance>=0.12.10",    # K线图
+    "matplotlib>=3.8.0",
+    "plotly>=5.18.0",         # 交互式图表
+
+    # 工具
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",   # 环境变量管理
+    "loguru>=0.7.0",          # 日志
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.5.0",            # 代码检查与格式化
+    "ipython>=8.0.0",
+    "jupyter>=1.0.0",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
