@@ -11,12 +11,12 @@ dependencies = [
     "yfinance>=0.2.36",       # 美股数据
 
     # 数据处理与分析
-    "pandas>=2.1.0",
-    "numpy>=1.26.0",
+    "pandas>=2.1.0,<3.0.0",
+    "numpy>=1.26.0,<2.5.0",
     "ta>=0.11.0",             # 技术指标库（纯 Python，跨平台无障碍）
 
     # 可视化
-    "mplfinance>=0.12.10",    # K线图
+    "mplfinance>=0.12.9b7",   # K线图（最新稳定版为 pre-release）
     "matplotlib>=3.8.0",
     "plotly>=5.18.0",         # 交互式图表
 
