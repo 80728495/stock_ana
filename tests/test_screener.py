@@ -1,5 +1,6 @@
 """screener 模块基础测试"""
 
+import asyncio
 import shutil
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from stock_ana.chart import (
     plot_vegas_touch_results,
     plot_ascending_triangle_results,
 )
+from stock_ana.gemini_analyst import analyze_screener_results, batch_analyze, rank_and_summarize
 
 _OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data" / "output"
 
@@ -322,4 +324,108 @@ def test_step5_run_all():
     print(f"\n{'='*60}")
     total = len(macd_hits) + len(vegas_hits) + len(tri_hits)
     print(f"全部扫描完成，共生成 {total} 张图表 → {_OUTPUT_DIR}")
+    print(f"{'='*60}")
+
+
+def test_step6_gemini_analyze_triangle():
+    """
+    步骤六：对收敛三角形/楔形筛选结果调用 Gemini 进行基本面分析
+    需要在浏览器中登录 https://gemini.google.com
+    运行：pytest tests/test_screener.py::test_step6_gemini_analyze_triangle -s
+    """
+    _clean_output()
+    data = load_all_ndx100_data()
+    assert len(data) > 0, "本地无数据！请先运行 test_step1_update_data"
+
+    # 先筛选
+    tri_hits = scan_ndx100_ascending_triangle(min_period=40, max_period=120)
+    print(f"\n{'='*60}")
+    print(f"共 {len(tri_hits)} 只股票呈现收敛形态，开始 Gemini 分析...")
+    print(f"{'='*60}")
+
+    if not tri_hits:
+        print("无筛选结果，跳过分析")
+        return
+
+    # 绘图
+    plot_ascending_triangle_results(tri_hits)
+
+    # Gemini 分析（async）
+    paths = asyncio.run(analyze_screener_results(tri_hits, delay=5.0))
+    print(f"\n{'='*60}")
+    print(f"Gemini 分析完成，共生成 {len(paths)} 份报告：")
+    for p in paths:
+        print(f"  📄 {p.name}")
+    print(f"输出目录：{_OUTPUT_DIR}")
+    print(f"{'='*60}")
+
+
+def test_step7_gemini_analyze_all():
+    """
+    步骤七：运行 Vegas + 三角形策略 + Gemini 分析 + 综合排序
+    运行：pytest tests/test_screener.py::test_step7_gemini_analyze_all -s
+    """
+    _clean_output()
+    data = load_all_ndx100_data()
+    assert len(data) > 0, "本地无数据！请先运行 test_step1_update_data"
+
+    all_hits = []
+
+    # 策略1：Vegas 通道回踩
+    vegas_hits = scan_ndx100_vegas_touch(lookback_days=5)
+    print(f"\n【策略1】Vegas 通道回踩：{len(vegas_hits)} 只")
+    plot_vegas_touch_results(vegas_hits)
+    all_hits.extend(vegas_hits)
+
+    # 策略2：收敛三角形/楔形
+    tri_hits = scan_ndx100_ascending_triangle(min_period=40, max_period=120)
+    print(f"【策略2】收敛三角形/楔形：{len(tri_hits)} 只")
+    plot_ascending_triangle_results(tri_hits)
+    all_hits.extend(tri_hits)
+
+    # 去重
+    unique_tickers = list(dict.fromkeys(h["ticker"] for h in all_hits))
+    print(f"\n{'='*60}")
+    print(f"全部策略共筛选出 {len(unique_tickers)} 只不重复股票，开始 Gemini 分析...")
+    print(f"{'='*60}")
+
+    if not unique_tickers:
+        print("无筛选结果，跳过分析")
+        return
+
+    paths = asyncio.run(batch_analyze(unique_tickers, delay=5.0))
+    print(f"\n{'='*60}")
+    print(f"Gemini 分析完成，共生成 {len(paths)} 份报告：")
+    for p in paths:
+        print(f"  📄 {p.name}")
+    print(f"{'='*60}")
+
+    # 第三步：综合排序
+    if paths:
+        print(f"\n开始综合排序...")
+        rank_path = asyncio.run(rank_and_summarize(paths))
+        print(f"📊 综合排序报告：{rank_path.name}")
+    print(f"输出目录：{_OUTPUT_DIR}")
+    print(f"{'='*60}")
+
+
+def test_step8_rank_existing_reports():
+    """
+    步骤八：对 output 目录中已有的分析报告进行综合排序
+    适用于已经完成 step6/step7 后，单独重新排序
+    运行：pytest tests/test_screener.py::test_step8_rank_existing_reports -s
+    """
+    reports = sorted(_OUTPUT_DIR.glob("*_analysis.docx"))
+    assert len(reports) > 0, f"未找到分析报告！请先运行 step6 或 step7 生成报告到 {_OUTPUT_DIR}"
+
+    print(f"\n{'='*60}")
+    print(f"找到 {len(reports)} 份分析报告：")
+    for p in reports:
+        print(f"  📄 {p.name}")
+    print(f"{'='*60}")
+
+    rank_path = asyncio.run(rank_and_summarize(reports))
+    print(f"\n{'='*60}")
+    print(f"📊 综合排序报告已生成：{rank_path.name}")
+    print(f"输出目录：{_OUTPUT_DIR}")
     print(f"{'='*60}")
