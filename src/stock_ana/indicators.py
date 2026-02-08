@@ -51,6 +51,13 @@ def add_obv(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_vegas_channel(df: pd.DataFrame) -> pd.DataFrame:
+    """添加 Vegas 长期通道（EMA144 + EMA169）"""
+    df["ema_144"] = EMAIndicator(close=df["close"], window=144).ema_indicator()
+    df["ema_169"] = EMAIndicator(close=df["close"], window=169).ema_indicator()
+    return df
+
+
 def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """添加全部常用技术指标"""
     df = add_ma(df)

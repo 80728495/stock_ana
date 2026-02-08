@@ -23,7 +23,7 @@ env/
 .env
 
 # 数据缓存（本地缓存不同步）
-data/cache/
+data/
 *.pkl
 *.h5
 

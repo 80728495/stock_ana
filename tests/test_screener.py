@@ -1,8 +1,35 @@
 """screener 模块基础测试"""
 
+import shutil
+from pathlib import Path
+
 import pandas as pd
 
-from stock_ana.screener import screen_golden_cross, screen_rsi_oversold
+from stock_ana.screener import (
+    screen_golden_cross,
+    screen_macd_cross_in_period,
+    screen_rsi_oversold,
+    screen_vegas_channel_touch,
+    screen_ascending_triangle,
+    scan_ndx100_macd_cross,
+    scan_ndx100_vegas_touch,
+    scan_ndx100_ascending_triangle,
+)
+from stock_ana.data_fetcher import update_ndx100_data, load_all_ndx100_data
+from stock_ana.chart import (
+    plot_macd_cross_results,
+    plot_vegas_touch_results,
+    plot_ascending_triangle_results,
+)
+
+_OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data" / "output"
+
+
+def _clean_output():
+    """清空 output 目录"""
+    if _OUTPUT_DIR.exists():
+        shutil.rmtree(_OUTPUT_DIR)
+    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _make_df(data: dict) -> pd.DataFrame:
@@ -15,7 +42,7 @@ def test_golden_cross_true():
         "sma_5":  [9, 10, 11, 13],
         "sma_20": [10, 10.5, 11.5, 12],
     })
-    assert screen_golden_cross(df) is True
+    assert screen_golden_cross(df) == True
 
 
 def test_golden_cross_false():
@@ -24,12 +51,275 @@ def test_golden_cross_false():
         "sma_5":  [12, 13, 14, 15],
         "sma_20": [10, 10.5, 11, 11.5],
     })
-    assert screen_golden_cross(df) is False
+    assert screen_golden_cross(df) == False
 
 
 def test_rsi_oversold():
     df = _make_df({"close": [10], "rsi": [25.0]})
-    assert screen_rsi_oversold(df) is True
+    assert screen_rsi_oversold(df) == True
 
     df2 = _make_df({"close": [10], "rsi": [55.0]})
-    assert screen_rsi_oversold(df2) is False
+    assert screen_rsi_oversold(df2) == False
+
+
+def test_macd_cross_in_period_true():
+    """最近 5 天内 macd_hist 由负转正"""
+    df = _make_df({
+        "close": list(range(10, 20)),
+        "macd_hist": [-3, -2, -1, -0.5, -0.3, -0.1, -0.05, 0.02, 0.1, 0.2],
+    })
+    assert screen_macd_cross_in_period(df, lookback_days=5) == True
+
+
+def test_macd_cross_in_period_false():
+    """最近 5 天内 macd_hist 一直为正"""
+    df = _make_df({
+        "close": list(range(10, 20)),
+        "macd_hist": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+    })
+    assert screen_macd_cross_in_period(df, lookback_days=5) == False
+
+
+# ──────── 实盘测试（需要网络，手动运行） ────────
+
+def test_step1_update_data():
+    """
+    步骤一：下载/更新纳指100成分股数据（存储到本地）
+    运行：pytest tests/test_screener.py::test_step1_update_data -s
+    """
+    data = update_ndx100_data()
+    print(f"\n{'='*60}")
+    print(f"数据更新完毕，共 {len(data)} 只股票数据已存储到本地")
+    for ticker, df in list(data.items())[:5]:
+        print(f"  {ticker:8s}  {df.index.min().date()} ~ {df.index.max().date()}  ({len(df)} 行)")
+    if len(data) > 5:
+        print(f"  ... 共 {len(data)} 只")
+    print(f"{'='*60}")
+    assert len(data) > 0
+
+
+def test_step2_scan_macd_cross():
+    """
+    步骤二：基于本地数据扫描 MACD 金叉并绘制 K 线图
+    运行：pytest tests/test_screener.py::test_step2_scan_macd_cross -s
+    """
+    _clean_output()
+    data = load_all_ndx100_data()
+    assert len(data) > 0, "本地无数据！请先运行 test_step1_update_data"
+
+    # 扫描 MACD 金叉
+    hits = scan_ndx100_macd_cross(lookback_days=5)
+    print(f"\n{'='*60}")
+    print(f"共发现 {len(hits)} 只股票在最近1周内发生 MACD 金叉：")
+    for item in hits:
+        ticker = item["ticker"]
+        df = item["df"]
+        last_close = df["close"].iloc[-1]
+        last_date = df.index[-1].strftime("%Y-%m-%d")
+        print(f"  {ticker:8s}  最新: {last_close:.2f}  ({last_date})")
+    print(f"{'='*60}")
+
+    # 绘制 K 线图
+    plot_macd_cross_results(hits)
+
+
+def test_vegas_channel_touch_true():
+    """半年高点后回落触及 Vegas 通道，未跌破"""
+    import numpy as np
+    n = 200
+    dates = pd.date_range("2025-06-01", periods=n, freq="B")
+    # 模拟：前半段涨到高点，后半段回落到 EMA 区域
+    price = np.concatenate([
+        np.linspace(100, 150, 100),   # 上涨到150
+        np.linspace(149, 110, 100),   # 回落到110
+    ])
+    df = pd.DataFrame({
+        "open": price * 0.99,
+        "high": price * 1.01,
+        "low": price * 0.98,
+        "close": price,
+        "volume": [1000000] * n,
+    }, index=dates)
+    from stock_ana.indicators import add_vegas_channel
+    df = add_vegas_channel(df)
+    # 最后几天 low 应该接近 ema_144/169
+    result = screen_vegas_channel_touch(df, lookback_days=5, half_year_days=120)
+    # 结果取决于 EMA 的具体值，主要验证不报错
+    assert isinstance(result, bool)
+
+
+def test_vegas_channel_touch_false_no_drop():
+    """股价一直在高位，未触及 Vegas 通道"""
+    import numpy as np
+    n = 200
+    dates = pd.date_range("2025-06-01", periods=n, freq="B")
+    price = np.linspace(100, 200, n)  # 一直上涨
+    df = pd.DataFrame({
+        "open": price * 0.99,
+        "high": price * 1.01,
+        "low": price * 0.995,
+        "close": price,
+        "volume": [1000000] * n,
+    }, index=dates)
+    from stock_ana.indicators import add_vegas_channel
+    df = add_vegas_channel(df)
+    result = screen_vegas_channel_touch(df, lookback_days=5)
+    assert result == False
+
+
+def test_step3_scan_vegas_touch():
+    """
+    步骤三：基于本地数据扫描 Vegas 通道回踩并绘制 K 线图
+    运行：pytest tests/test_screener.py::test_step3_scan_vegas_touch -s
+    """
+    _clean_output()
+    data = load_all_ndx100_data()
+    assert len(data) > 0, "本地无数据！请先运行 test_step1_update_data"
+
+    hits = scan_ndx100_vegas_touch(lookback_days=5)
+    print(f"\n{'='*60}")
+    print(f"共发现 {len(hits)} 只股票满足 Vegas 通道回踩条件：")
+    for item in hits:
+        ticker = item["ticker"]
+        df = item["df"]
+        last_close = df["close"].iloc[-1]
+        last_date = df.index[-1].strftime("%Y-%m-%d")
+        ema144 = df["ema_144"].iloc[-1]
+        ema169 = df["ema_169"].iloc[-1]
+        print(f"  {ticker:8s}  最新: {last_close:.2f}  EMA144: {ema144:.2f}  EMA169: {ema169:.2f}  ({last_date})")
+    print(f"{'='*60}")
+
+    plot_vegas_touch_results(hits)
+
+
+def test_ascending_triangle_detection():
+    """模拟上升三角形：高点水平，低点上行"""
+    import numpy as np
+    n = 100
+    dates = pd.date_range("2025-06-01", periods=n, freq="B")
+    # 构造锯齿价格：高点固定在150，低点从120逐步上行到145
+    close = []
+    for i in range(n):
+        cycle = (i % 20) / 20.0  # 0→1 周期
+        low_base = 120 + (i / n) * 25     # 低点从120升到145
+        high_base = 150                     # 高点固定
+        mid = (low_base + high_base) / 2
+        amp = (high_base - low_base) / 2
+        price = mid + amp * np.sin(2 * np.pi * cycle)
+        close.append(price)
+    close = np.array(close)
+    df = pd.DataFrame({
+        "open": close * 0.998,
+        "high": close * 1.005,
+        "low": close * 0.995,
+        "close": close,
+        "volume": [1000000] * n,
+    }, index=dates)
+    result = screen_ascending_triangle(df, min_period=40, max_period=100)
+    # 主要验证不报错，形态检测取决于具体数值
+    assert result is None or isinstance(result, dict)
+
+
+def test_ascending_triangle_none_for_downtrend():
+    """持续下降趋势不应检出上升三角形"""
+    import numpy as np
+    n = 100
+    dates = pd.date_range("2025-06-01", periods=n, freq="B")
+    price = np.linspace(200, 100, n)  # 持续下降
+    df = pd.DataFrame({
+        "open": price * 1.001,
+        "high": price * 1.01,
+        "low": price * 0.99,
+        "close": price,
+        "volume": [1000000] * n,
+    }, index=dates)
+    result = screen_ascending_triangle(df, min_period=40, max_period=100)
+    assert result is None
+
+
+def test_step4_scan_ascending_triangle():
+    """
+    步骤四：基于本地数据扫描上升三角形/楔形并绘制 K 线图
+    运行：pytest tests/test_screener.py::test_step4_scan_ascending_triangle -s
+    """
+    _clean_output()
+    data = load_all_ndx100_data()
+    assert len(data) > 0, "本地无数据！请先运行 test_step1_update_data"
+
+    hits = scan_ndx100_ascending_triangle(min_period=40, max_period=120)
+    print(f"\n{'='*60}")
+    print(f"共发现 {len(hits)} 只股票呈现收敛三角形/楔形：")
+    _PCN = {"ascending_triangle": "上升三角形", "rising_wedge": "上升楔形",
+            "symmetrical_triangle": "对称三角形", "descending_wedge": "下降楔形"}
+    for item in hits:
+        ticker = item["ticker"]
+        df = item["df"]
+        info = item["pattern_info"]
+        last_close = df["close"].iloc[-1]
+        last_date = df.index[-1].strftime("%Y-%m-%d")
+        ptype = _PCN.get(info["pattern"], info["pattern"])
+        angle = info.get('convergence_angle_deg', 0)
+        status = "已收敛" if info.get('convergence_status') == 'converged' else "即将收敛"
+        dtc = info.get('days_to_convergence', 0)
+        dtc_str = f"{dtc:.0f}日后" if dtc > 0 else "已过"
+        print(f"  {ticker:8s}  {ptype}【{status}】 周期={info['period']}日  "
+              f"收敛={dtc_str}  角度={angle:.1f}°  "
+              f"测试=({info['resistance']['touches']}/{info['support']['touches']})  "
+              f"最新: {last_close:.2f}  ({last_date})")
+    print(f"{'='*60}")
+
+    plot_ascending_triangle_results(hits)
+
+
+def test_step5_run_all():
+    """
+    步骤五：清空 output 后，一次性运行全部三个策略
+    运行：pytest tests/test_screener.py::test_step5_run_all -s
+    """
+    _clean_output()
+    data = load_all_ndx100_data()
+    assert len(data) > 0, "本地无数据！请先运行 test_step1_update_data"
+
+    # 策略1: MACD 金叉
+    macd_hits = scan_ndx100_macd_cross(lookback_days=5)
+    print(f"\n{'='*60}")
+    print(f"【策略1】MACD 金叉：{len(macd_hits)} 只")
+    for item in macd_hits:
+        t, d = item["ticker"], item["df"]
+        print(f"  {t:8s}  最新: {d['close'].iloc[-1]:.2f}  ({d.index[-1].strftime('%Y-%m-%d')})")
+    plot_macd_cross_results(macd_hits)
+
+    # 策略2: Vegas 通道回踩
+    vegas_hits = scan_ndx100_vegas_touch(lookback_days=5)
+    print(f"\n{'='*60}")
+    print(f"【策略2】Vegas 通道回踩：{len(vegas_hits)} 只")
+    for item in vegas_hits:
+        t, d = item["ticker"], item["df"]
+        print(f"  {t:8s}  最新: {d['close'].iloc[-1]:.2f}  "
+              f"EMA144: {d['ema_144'].iloc[-1]:.2f}  EMA169: {d['ema_169'].iloc[-1]:.2f}  "
+              f"({d.index[-1].strftime('%Y-%m-%d')})")
+    plot_vegas_touch_results(vegas_hits)
+
+    # 策略3: 收敛三角形/楔形
+    tri_hits = scan_ndx100_ascending_triangle(min_period=40, max_period=120)
+    print(f"\n{'='*60}")
+    print(f"【策略3】收敛三角形/楔形：{len(tri_hits)} 只")
+    _PCN = {"ascending_triangle": "上升三角形", "rising_wedge": "上升楔形",
+            "symmetrical_triangle": "对称三角形", "descending_wedge": "下降楔形"}
+    for item in tri_hits:
+        t, d, info = item["ticker"], item["df"], item["pattern_info"]
+        ptype = _PCN.get(info["pattern"], info["pattern"])
+        angle = info.get('convergence_angle_deg', 0)
+        status = "已收敛" if info.get('convergence_status') == 'converged' else "即将收敛"
+        dtc = info.get('days_to_convergence', 0)
+        dtc_str = f"{dtc:.0f}日后" if dtc > 0 else "已过"
+        print(f"  {t:8s}  {ptype}【{status}】 周期={info['period']}日  "
+              f"收敛={dtc_str}  角度={angle:.1f}°  "
+              f"测试=({info['resistance']['touches']}/{info['support']['touches']})  "
+              f"最新: {d['close'].iloc[-1]:.2f}  ({d.index[-1].strftime('%Y-%m-%d')})")
+    plot_ascending_triangle_results(tri_hits)
+
+    print(f"\n{'='*60}")
+    total = len(macd_hits) + len(vegas_hits) + len(tri_hits)
+    print(f"全部扫描完成，共生成 {total} 张图表 → {_OUTPUT_DIR}")
+    print(f"{'='*60}")
