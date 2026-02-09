@@ -371,8 +371,6 @@ def plot_backtest_signals(
     stock_data: dict[str, pd.DataFrame],
     strategy: str,
     output_dir: Path,
-    pre_days: int = 60,
-    post_days: int = 40,
 ) -> None:
     """
     为回测信号绘制 K 线图，含红圈标注信号日 + 各策略辅助线。
@@ -398,7 +396,7 @@ def plot_backtest_signals(
             continue
         full_df = stock_data[ticker]
 
-        # 找信号日期 & 确定显示范围
+        # 找信号日期 & 确定显示范围（完整过去一年）
         signal_dates = []
         for t in t_list:
             cut_date = pd.Timestamp(t["cutoff_date"])
@@ -409,8 +407,10 @@ def plot_backtest_signals(
 
         earliest = min(signal_dates)
         latest = max(signal_dates)
-        view_start = max(0, earliest - pre_days)
-        view_end = min(len(full_df), latest + post_days)
+        # 显示完整一年（251 交易日），确保信号日可见
+        year_start = max(0, latest - 251)
+        view_start = min(year_start, max(0, earliest - 10))
+        view_end = min(len(full_df), latest + 40)
         df_view = full_df.iloc[view_start:view_end].copy()
 
         if len(df_view) < 5:
@@ -842,11 +842,69 @@ def run_backtest(
             chart_dir = Path("data") / "backtest_charts"
             plot_backtest_signals(
                 deduped_trades, stock_data, strategy, chart_dir,
-                pre_days=60, post_days=40,
             )
 
     # ── 对比总结 ──
     print_cross_strategy_comparison(all_summaries)
+
+    # ── 未命中任何策略的股票 → others 文件夹（带 Vegas 通道线） ──
+    all_signaled_tickers: set[str] = set()
+    for strategy in strategies:
+        s = all_summaries.get(strategy, {})
+        all_signaled_tickers.update(s.get("tickers", []))
+
+    others_tickers = sorted(set(stock_data.keys()) - all_signaled_tickers)
+    if others_tickers:
+        chart_dir = Path("data") / "backtest_charts"
+        others_dir = chart_dir / "others"
+        others_dir.mkdir(parents=True, exist_ok=True)
+
+        for ticker in others_tickers:
+            full_df = stock_data[ticker]
+            if len(full_df) < 20:
+                continue
+
+            # 显示完整一年
+            view_start = max(0, len(full_df) - 251)
+            view_end = len(full_df)
+            df_view = full_df.iloc[view_start:view_end].copy()
+
+            if len(df_view) < 5:
+                continue
+
+            try:
+                add_plots = _build_vegas_overlays(
+                    df_view, full_df, view_start, view_end,
+                )
+            except Exception:
+                add_plots = []
+
+            style = mpf.make_mpf_style(
+                base_mpf_style="charles", rc={"font.size": 9},
+            )
+            title = f"{ticker} - No Strategy Match (Vegas Channel)"
+            save_path = others_dir / f"{ticker}_others.png"
+
+            try:
+                mpf.plot(
+                    df_view,
+                    type="candle",
+                    volume=True,
+                    title=title,
+                    style=style,
+                    figscale=1.5,
+                    figratio=(16, 9),
+                    addplot=add_plots if add_plots else None,
+                    savefig=str(save_path),
+                )
+                plt.close("all")
+            except Exception as e:
+                logger.debug(f"{ticker}: others 图绘制异常 {e}")
+
+        logger.info(
+            f"  已保存 {len(others_tickers)} 张 others 图 → {others_dir}"
+        )
+
     print()
 
 
