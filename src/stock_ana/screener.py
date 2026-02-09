@@ -764,3 +764,441 @@ def scan_ndx100_ascending_triangle(
         f"有效处理 {processed} 只，{len(hits)} 只呈现形态"
     )
     return hits
+
+
+# ──────── VCP（波动率收缩形态）+ 杯柄形态策略 ────────
+#
+# Mark Minervini "Trade Like a Stock Market Wizard" 核心选股形态
+#
+# VCP 要素：
+#   1) 前置上升趋势（Stage 2）
+#   2) 2~7 次连续收缩（T1→T2→T3…），每次幅度递减
+#   3) 成交量随收缩枯竭（最终收缩 < 50日均量的 50%）
+#   4) 基底周期 30~180 个交易日
+#
+# 杯柄（Cup & Handle）= VCP 的一种特例
+#   - 一次大幅 U 形底（杯身 12%~33%）
+#   - 杯身后跟随一次小幅回撤（柄部 <15%）靠近前高
+#   - 柄部成交量明显缩减
+
+
+def _find_contractions(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    swing_order: int = 5,
+) -> list[dict]:
+    """
+    在给定价格窗口中识别所有收缩段（从局部高点到后续低点）。
+
+    返回值中每个 contraction 为 dict:
+        {
+            "high_idx": int,   # 局部高点位置
+            "high_val": float, # 局部高点价格
+            "low_idx": int,    # 后续局部低点位置
+            "low_val": float,  # 局部低点价格
+            "depth_pct": float # 收缩幅度 = (high - low) / high * 100
+        }
+    """
+    n = len(highs)
+
+    # 找局部极大值（基于 highs）
+    local_max_idx = []
+    for i in range(swing_order, n - swing_order):
+        is_max = True
+        for j in range(1, swing_order + 1):
+            if highs[i - j] > highs[i] or highs[i + j] > highs[i]:
+                is_max = False
+                break
+        if is_max:
+            local_max_idx.append(i)
+
+    # 找局部极小值（基于 lows）
+    local_min_idx = []
+    for i in range(swing_order, n - swing_order):
+        is_min = True
+        for j in range(1, swing_order + 1):
+            if lows[i - j] < lows[i] or lows[i + j] < lows[i]:
+                is_min = False
+                break
+        if is_min:
+            local_min_idx.append(i)
+
+    local_max_idx = np.array(local_max_idx)
+    local_min_idx = np.array(local_min_idx)
+
+    if len(local_max_idx) == 0 or len(local_min_idx) == 0:
+        return []
+
+    contractions: list[dict] = []
+
+    for hi_idx in local_max_idx:
+        # 后续的局部低点里，选最深的那个（在下一个高点之前）
+        later_mins = local_min_idx[local_min_idx > hi_idx]
+        later_maxs = local_max_idx[local_max_idx > hi_idx]
+
+        if len(later_mins) == 0:
+            continue
+
+        # 截取到下一个高点之前的低点
+        if len(later_maxs) > 0:
+            boundary = later_maxs[0]
+            candidate_mins = later_mins[later_mins < boundary]
+        else:
+            candidate_mins = later_mins
+
+        if len(candidate_mins) == 0:
+            continue
+
+        # 找最深的低点
+        deepest_idx = candidate_mins[np.argmin(lows[candidate_mins])]
+        hi_val = highs[hi_idx]
+        lo_val = lows[deepest_idx]
+        depth_pct = (hi_val - lo_val) / hi_val * 100 if hi_val > 0 else 0
+
+        if depth_pct > 1.0:  # 忽略 <1% 的噪声
+            contractions.append({
+                "high_idx": int(hi_idx),
+                "high_val": float(hi_val),
+                "low_idx": int(deepest_idx),
+                "low_val": float(lo_val),
+                "depth_pct": round(depth_pct, 2),
+            })
+
+    return contractions
+
+
+def _is_u_shaped(closes: np.ndarray, start: int, end: int) -> bool:
+    """
+    判断 closes[start:end] 是否呈 U 形底部（而非 V 形）。
+
+    规则：底部 1/3 区域内的收盘价标准差 < 顶部 1/3 的 50%
+    （U 形底部平坦, V 形底部尖锐）
+    """
+    segment = closes[start:end + 1]
+    n = len(segment)
+    if n < 10:
+        return False  # 太短无法判断
+
+    bottom_val = np.min(segment)
+    top_val = np.max(segment)
+    rng = top_val - bottom_val
+    if rng < 1e-6:
+        return False
+
+    # 底部 1/3 价格范围
+    low_thresh = bottom_val + rng * 0.33
+    bottom_mask = segment <= low_thresh
+    bottom_count = np.sum(bottom_mask)
+
+    # U 形底部：至少 20% 的 K 线在底部 1/3 区域（说明底部平坦停留时间长）
+    if bottom_count < n * 0.15:
+        return False
+
+    # 额外检查：最低点不在收尾 15% 处（V 形的特征是尖底在中间瞬间触达后反弹）
+    min_pos = np.argmin(segment)
+    relative_pos = min_pos / n
+    # U 形底：底部区域宽，所以最低点位置可以在 15%-85% 之间
+    if relative_pos < 0.1 or relative_pos > 0.9:
+        return False
+
+    return True
+
+
+def screen_vcp(
+    df: pd.DataFrame,
+    min_base_days: int = 30,
+    max_base_days: int = 180,
+    min_t1_depth: float = 8.0,
+    max_t1_depth: float = 50.0,
+    min_contractions: int = 2,
+    max_contractions: int = 7,
+    vol_dry_ratio: float = 0.85,
+    near_pivot_pct: float = 15.0,
+) -> dict | None:
+    """
+    检测 VCP（波动率收缩形态）和杯柄形态。
+
+    改进的收缩递减检测：
+    - 从全部收缩中寻找最佳递减子序列（≥2 个，每次深度 ≤ 前次 × 0.85）
+    - 也检查后半段均值 < 前半段均值的整体趋势
+    - 最终收缩深度 < 最大收缩的 60%
+
+    Args:
+        df: 带有 OHLCV 的 DataFrame
+        min_base_days: 基底最短天数
+        max_base_days: 基底最长天数
+        min_t1_depth: T1 最小深度 %
+        max_t1_depth: T1 最大深度 %
+        min_contractions: 最少收缩次数（VCP 至少 2 次）
+        max_contractions: 最多收缩次数
+        vol_dry_ratio: 最终收缩区域成交量 / 50日均量的最大比率
+        near_pivot_pct: 当前价距离前高的最大距离 %
+
+    Returns:
+        VCP 信息 dict 或 None
+    """
+    if len(df) < max(min_base_days + 50, 200):
+        return None
+
+    closes = df["close"].values
+    highs = df["high"].values
+    lows = df["low"].values
+    volumes = df["volume"].values.astype(float)
+
+    if len(df) < 200:
+        return None
+
+    sma150 = pd.Series(closes).rolling(150).mean().values
+    sma200 = pd.Series(closes).rolling(200).mean().values
+
+    best_result = None
+    best_score = -1
+
+    for lookback in range(min_base_days, min(max_base_days + 1, len(df) - 50), 10):
+        window_start = len(df) - lookback
+        w_highs = highs[window_start:]
+        w_lows = lows[window_start:]
+        w_closes = closes[window_start:]
+        w_volumes = volumes[window_start:]
+
+        # 自适应 swing_order：窗口越大，需要更大的 order 过滤噪声
+        swing_order = max(3, min(8, lookback // 20))
+
+        contractions = _find_contractions(w_highs, w_lows, w_closes, swing_order)
+
+        if len(contractions) < min_contractions:
+            continue
+
+        # ─── 3. 寻找最佳递减子序列 ───
+        # 从所有收缩中提取最长的递减子序列
+        # 递减条件：后续收缩 ≤ 前次 × 0.85（允许 15% 的宽容度）
+        all_depths = [c["depth_pct"] for c in contractions]
+
+        # 方法A：寻找以 T1 开始的最长递减子序列
+        best_seq = None
+        best_seq_score = -1
+
+        for start_i in range(len(contractions)):
+            t1_d = all_depths[start_i]
+            if t1_d < min_t1_depth or t1_d > max_t1_depth:
+                continue
+
+            seq_indices = [start_i]
+            prev_d = t1_d
+
+            for j in range(start_i + 1, len(contractions)):
+                d = all_depths[j]
+                # 允许宽松递减：≤ 前次 × 0.85，或者绝对值足够小 (< 8%)
+                if d <= prev_d * 0.85 or (d < 8.0 and d < prev_d):
+                    seq_indices.append(j)
+                    prev_d = d
+
+            if len(seq_indices) >= min_contractions:
+                # 序列评分：越长越好，递减比越大越好
+                seq_depths = [all_depths[i] for i in seq_indices]
+                ratio = seq_depths[-1] / seq_depths[0] if seq_depths[0] > 0 else 1
+                s = len(seq_indices) * 10 + (1 - ratio) * 20
+                if s > best_seq_score:
+                    best_seq_score = s
+                    best_seq = seq_indices
+
+        # 方法B：整体趋势检查（后半段均值 < 前半段均值 × 0.7）
+        if best_seq is None and len(contractions) >= 3:
+            mid = len(all_depths) // 2
+            first_half_avg = np.mean(all_depths[:mid])
+            second_half_avg = np.mean(all_depths[mid:])
+
+            if second_half_avg < first_half_avg * 0.70:
+                # 整体递减趋势明显，取最大的作为 T1
+                max_depth_idx = int(np.argmax(all_depths[:mid + 1]))
+                t1_d = all_depths[max_depth_idx]
+                if min_t1_depth <= t1_d <= max_t1_depth:
+                    best_seq = list(range(max_depth_idx, len(contractions)))
+
+        if best_seq is None or len(best_seq) < min_contractions:
+            continue
+
+        # 按子序列筛选
+        contractions = [contractions[i] for i in best_seq]
+        if len(contractions) > max_contractions:
+            contractions = contractions[-max_contractions:]
+
+        depths = [c["depth_pct"] for c in contractions]
+        t1_depth = depths[0]
+        final_depth = depths[-1]
+
+        # 最终收缩应明显小于 T1（< 60% of T1，且 < 20%）
+        if final_depth > t1_depth * 0.65 or final_depth > 20.0:
+            continue
+
+        # ─── 4. 成交量枯竭检查 ───
+        pre_base_start = max(0, window_start - 50)
+        vol_50ma = np.mean(volumes[pre_base_start:window_start]) if window_start > 0 else np.mean(volumes[:50])
+
+        if vol_50ma < 1:
+            continue
+
+        # 最终收缩区域的量能检测
+        # 对大盘股：取最近 15 天内滚动 5 日均量的最小值，与基底前 50 日均量比较
+        # 这捕捉到了 VCP 紧缩处的短暂量能枯竭（大盘股通常不会持续缩量）
+        last_c = contractions[-1]
+        tail_days = min(20, len(w_volumes))
+        tail_vols = w_volumes[-tail_days:]
+        if len(tail_vols) >= 5:
+            rolling_5d = pd.Series(tail_vols).rolling(5).mean().dropna().values
+            min_5d_vol = float(np.min(rolling_5d)) if len(rolling_5d) > 0 else np.mean(tail_vols)
+        else:
+            min_5d_vol = np.mean(tail_vols)
+
+        vol_ratio = min_5d_vol / vol_50ma if vol_50ma > 0 else 1.0
+
+        if vol_ratio > vol_dry_ratio:
+            continue
+
+        # ─── 5. 前置上升趋势检查 ───
+        if window_start < 200:
+            continue
+
+        curr_price = closes[-1]
+        curr_sma150 = sma150[-1]
+        curr_sma200 = sma200[-1]
+
+        if np.isnan(curr_sma150) or np.isnan(curr_sma200):
+            continue
+        if curr_price < curr_sma200:
+            continue
+        if curr_sma150 < curr_sma200 * 0.97:
+            continue
+
+        # ─── 6. 当前价靠近枢轴点 ───
+        pivot_price = float(np.max(w_highs))
+        distance_to_pivot_pct = (pivot_price - curr_price) / pivot_price * 100
+
+        if distance_to_pivot_pct > near_pivot_pct:
+            continue
+
+        # ─── 7. 杯柄形态特例判断 ───
+        is_cup_handle = False
+        cup_info = None
+
+        if len(contractions) == 2:
+            main_c = contractions[0]
+            handle_c = contractions[1]
+            cup_depth = main_c["depth_pct"]
+            handle_depth = handle_c["depth_pct"]
+
+            if (10.0 <= cup_depth <= 40.0
+                    and handle_depth < 15.0
+                    and _is_u_shaped(w_closes, main_c["high_idx"], main_c["low_idx"])
+                    and handle_c["high_val"] >= main_c["high_val"] * 0.90):
+                is_cup_handle = True
+                cup_info = {
+                    "cup_depth_pct": cup_depth,
+                    "cup_start_idx": main_c["high_idx"],
+                    "cup_bottom_idx": main_c["low_idx"],
+                    "handle_depth_pct": handle_depth,
+                    "handle_start_idx": handle_c["high_idx"],
+                    "handle_bottom_idx": handle_c["low_idx"],
+                }
+
+        # ─── 8. 评分 ───
+        # 收缩次数越多越好（更多收缩→更紧实的VCP）
+        contraction_score = len(contractions) * 10
+        # 收缩递减比率越好（每次都明显缩小 → 得分更高）
+        ratio_scores = []
+        for k in range(1, len(depths)):
+            r = depths[k] / depths[k - 1] if depths[k - 1] > 0 else 1
+            ratio_scores.append(max(0, (1 - r)) * 20)
+        ratio_score = sum(ratio_scores)
+        # 成交量越枯竭越好
+        vol_score = max(0, (1 - vol_ratio)) * 30
+        # 距离枢轴点越近越好
+        pivot_score = max(0, (near_pivot_pct - distance_to_pivot_pct)) * 2
+        # 杯柄加分
+        cup_bonus = 15 if is_cup_handle else 0
+
+        total_score = contraction_score + ratio_score + vol_score + pivot_score + cup_bonus
+
+        if total_score > best_score:
+            best_score = total_score
+            pattern_type = "cup_and_handle" if is_cup_handle else "vcp"
+
+            best_result = {
+                "pattern": pattern_type,
+                "base_days": lookback,
+                "window_start": window_start,
+                "num_contractions": len(contractions),
+                "contractions": contractions,
+                "depths": depths,
+                "t1_depth_pct": t1_depth,
+                "final_depth_pct": final_depth,
+                "vol_ratio": round(vol_ratio, 3),
+                "pivot_price": round(pivot_price, 2),
+                "current_price": round(curr_price, 2),
+                "distance_to_pivot_pct": round(distance_to_pivot_pct, 2),
+                "score": round(total_score, 1),
+                "cup_handle_info": cup_info,
+            }
+
+    return best_result
+
+
+def scan_ndx100_vcp(
+    min_base_days: int = 30,
+    max_base_days: int = 180,
+) -> list[dict]:
+    """
+    扫描纳指100中呈现 VCP（波动率收缩形态）或杯柄形态的股票。
+
+    Args:
+        min_base_days: 基底最短天数
+        max_base_days: 基底最长天数
+
+    Returns:
+        [{"ticker": str, "df": DataFrame, "vcp_info": dict}, ...]
+    """
+    stock_data = load_all_ndx100_data()
+
+    if not stock_data:
+        logger.error("本地无数据！请先运行 update_ndx100_data() 下载数据")
+        return []
+
+    hits: list[dict] = []
+    processed = 0
+
+    _PATTERN_CN = {
+        "vcp": "VCP（波动率收缩）",
+        "cup_and_handle": "杯柄形态",
+    }
+
+    for ticker, df in stock_data.items():
+        try:
+            if len(df) < 200:
+                logger.debug(f"{ticker}: 数据不足（{len(df)} 行），需至少 200 行检测 VCP")
+                continue
+
+            processed += 1
+            result = screen_vcp(
+                df, min_base_days=min_base_days, max_base_days=max_base_days,
+            )
+            if result is not None:
+                ptype = _PATTERN_CN.get(result["pattern"], result["pattern"])
+                depths_str = "→".join(f"{d:.0f}%" for d in result["depths"])
+                logger.success(
+                    f"✅ {ticker} 呈现{ptype}"
+                    f"（基底 {result['base_days']} 日，"
+                    f"{result['num_contractions']} 次收缩 [{depths_str}]，"
+                    f"量缩比 {result['vol_ratio']:.0%}，"
+                    f"距前高 {result['distance_to_pivot_pct']:.1f}%）"
+                )
+                hits.append({"ticker": ticker, "df": df, "vcp_info": result})
+        except Exception as e:
+            logger.error(f"{ticker}: VCP 检测失败 - {e}")
+            continue
+
+    logger.info(
+        f"VCP 扫描完成：本地共 {len(stock_data)} 只股票，"
+        f"有效处理 {processed} 只，{len(hits)} 只呈现形态"
+    )
+    return hits

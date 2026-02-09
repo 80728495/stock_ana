@@ -12,15 +12,18 @@ from stock_ana.screener import (
     screen_rsi_oversold,
     screen_vegas_channel_touch,
     screen_ascending_triangle,
+    screen_vcp,
     scan_ndx100_macd_cross,
     scan_ndx100_vegas_touch,
     scan_ndx100_ascending_triangle,
+    scan_ndx100_vcp,
 )
 from stock_ana.data_fetcher import update_ndx100_data, load_all_ndx100_data
 from stock_ana.chart import (
     plot_macd_cross_results,
     plot_vegas_touch_results,
     plot_ascending_triangle_results,
+    plot_vcp_results,
 )
 from stock_ana.gemini_analyst import analyze_screener_results, batch_analyze, rank_and_summarize
 
@@ -383,6 +386,12 @@ def test_step7_gemini_analyze_all():
     plot_ascending_triangle_results(tri_hits)
     all_hits.extend(tri_hits)
 
+    # 策略3：VCP / 杯柄形态
+    vcp_hits = scan_ndx100_vcp(min_base_days=30, max_base_days=180)
+    print(f"【策略3】VCP / 杯柄形态：{len(vcp_hits)} 只")
+    plot_vcp_results(vcp_hits)
+    all_hits.extend(vcp_hits)
+
     # 去重
     unique_tickers = list(dict.fromkeys(h["ticker"] for h in all_hits))
     print(f"\n{'='*60}")
@@ -429,3 +438,32 @@ def test_step8_rank_existing_reports():
     print(f"📊 综合排序报告已生成：{rank_path.name}")
     print(f"输出目录：{_OUTPUT_DIR}")
     print(f"{'='*60}")
+
+
+def test_scan_vcp():
+    """
+    VCP + 杯柄形态扫描（独立测试）
+    运行：pytest tests/test_screener.py::test_scan_vcp -s
+    """
+    data = load_all_ndx100_data()
+    assert len(data) > 0, "本地无数据！请先运行 test_step1_update_data"
+
+    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    vcp_hits = scan_ndx100_vcp(min_base_days=30, max_base_days=180)
+
+    print(f"\n{'='*60}")
+    print(f"VCP / 杯柄扫描结果：共 {len(vcp_hits)} 只")
+    for h in vcp_hits:
+        info = h["vcp_info"]
+        depths = "→".join(f"{d:.0f}%" for d in info["depths"])
+        print(f"  ✅ {h['ticker']:6s} [{info['pattern']:15s}] "
+              f"基底 {info['base_days']:3d}日 "
+              f"收缩 {info['num_contractions']}次 [{depths}] "
+              f"量缩比 {info['vol_ratio']:.0%} "
+              f"距前高 {info['distance_to_pivot_pct']:.1f}%")
+    print(f"{'='*60}")
+
+    if vcp_hits:
+        plot_vcp_results(vcp_hits)
+        print(f"图表已保存到 {_OUTPUT_DIR}")

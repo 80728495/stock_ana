@@ -67,8 +67,8 @@ def step2_screen() -> list[dict]:
     logger.info("=" * 60)
 
     from stock_ana.data_fetcher import load_all_ndx100_data
-    from stock_ana.screener import scan_ndx100_vegas_touch, scan_ndx100_ascending_triangle
-    from stock_ana.chart import plot_vegas_touch_results, plot_ascending_triangle_results
+    from stock_ana.screener import scan_ndx100_vegas_touch, scan_ndx100_ascending_triangle, scan_ndx100_vcp
+    from stock_ana.chart import plot_vegas_touch_results, plot_ascending_triangle_results, plot_vcp_results
 
     data = load_all_ndx100_data()
     if not data:
@@ -90,6 +90,13 @@ def step2_screen() -> list[dict]:
     if tri_hits:
         plot_ascending_triangle_results(tri_hits)
     all_hits.extend(tri_hits)
+
+    # 策略3：VCP + 杯柄形态
+    vcp_hits = scan_ndx100_vcp(min_base_days=30, max_base_days=180)
+    logger.info(f"【策略3】VCP / 杯柄形态：{len(vcp_hits)} 只")
+    if vcp_hits:
+        plot_vcp_results(vcp_hits)
+    all_hits.extend(vcp_hits)
 
     # 去重保序
     unique_tickers = list(dict.fromkeys(h["ticker"] for h in all_hits))
@@ -117,7 +124,9 @@ def step3_analyze_and_rank(hits: list[dict] | None = None):
         tickers = list(dict.fromkeys(h["ticker"] for h in hits))
     else:
         # 从 output 目录的图表文件推断
-        chart_files = list(OUTPUT_DIR.glob("*_triangle.png")) + list(OUTPUT_DIR.glob("*_vegas.png"))
+        chart_files = (list(OUTPUT_DIR.glob("*_triangle.png"))
+                      + list(OUTPUT_DIR.glob("*_vegas*.png"))
+                      + list(OUTPUT_DIR.glob("*_vcp.png")))
         tickers = list(dict.fromkeys(p.stem.split("_")[0] for p in chart_files))
         if not tickers:
             logger.error(f"未找到筛选结果！请先运行 Step 2，或在 {OUTPUT_DIR} 中放入图表文件")

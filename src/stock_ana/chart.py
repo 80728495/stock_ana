@@ -306,3 +306,115 @@ def plot_ascending_triangle_results(
 
         mpf.plot(df, **kwargs)
         logger.info(f"已保存 {ticker} {pattern_name} 图 → {save_path}")
+
+
+def plot_vcp_results(
+    hits: list[dict],
+    output_dir: str | Path | None = None,
+) -> None:
+    """
+    为 VCP / 杯柄形态扫描结果绘制 K 线图（含收缩标注 + 成交量）。
+
+    Args:
+        hits: scan_ndx100_vcp 返回的结果列表
+        output_dir: 图片保存目录
+    """
+    if output_dir is None:
+        output_dir = Path(__file__).resolve().parent.parent.parent / "data" / "output"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not hits:
+        logger.warning("没有找到符合 VCP 条件的股票，无图可绘")
+        return
+
+    for item in hits:
+        ticker = item["ticker"]
+        info = item["vcp_info"]
+        df_full = item["df"].copy()
+
+        window_start = info["window_start"]
+
+        # 显示区间：形态开始前留 20 天上下文
+        chart_start = max(0, window_start - 20)
+        df = df_full.iloc[chart_start:]
+
+        # 计算 150-SMA 和 200-SMA 用于趋势展示
+        sma150 = pd.Series(df_full["close"].values).rolling(150).mean()
+        sma200 = pd.Series(df_full["close"].values).rolling(200).mean()
+        sma150_display = pd.Series(sma150.values[chart_start:], index=df.index)
+        sma200_display = pd.Series(sma200.values[chart_start:], index=df.index)
+
+        # 标注收缩段：每个收缩用水平线标记高点和低点
+        add_plots = [
+            mpf.make_addplot(sma150_display, panel=0, color="blue", width=1.0,
+                             linestyle="dashed", secondary_y=False),
+            mpf.make_addplot(sma200_display, panel=0, color="purple", width=1.0,
+                             linestyle="dashed", secondary_y=False),
+        ]
+
+        # 收缩区域标注：为每个收缩画高点水平线
+        contractions = info["contractions"]
+        offset = window_start - chart_start  # df 坐标中形态起点偏移
+
+        for ci, c in enumerate(contractions):
+            hi_pos = c["high_idx"] + offset
+            lo_pos = c["low_idx"] + offset
+            hi_val = c["high_val"]
+            lo_val = c["low_val"]
+
+            # 画收缩高点的水平线
+            hi_line = pd.Series(np.nan, index=df.index)
+            lo_line = pd.Series(np.nan, index=df.index)
+
+            start_pos = max(0, hi_pos)
+            end_pos = min(len(df) - 1, lo_pos + 5)
+
+            for i in range(start_pos, end_pos + 1):
+                if i < len(hi_line):
+                    hi_line.iloc[i] = hi_val
+                    lo_line.iloc[i] = lo_val
+
+            color = "red" if ci == 0 else ("orange" if ci == 1 else "gray")
+            add_plots.append(
+                mpf.make_addplot(hi_line, panel=0, color=color, width=1.2,
+                                 linestyle="dotted", secondary_y=False)
+            )
+            add_plots.append(
+                mpf.make_addplot(lo_line, panel=0, color=color, width=1.2,
+                                 linestyle="dotted", secondary_y=False)
+            )
+
+        # 枢轴点水平线（横跨整个窗口）
+        pivot_line = pd.Series(info["pivot_price"], index=df.index)
+        add_plots.append(
+            mpf.make_addplot(pivot_line, panel=0, color="magenta", width=1.5,
+                             linestyle="--", secondary_y=False)
+        )
+
+        _PATTERN_EN = {
+            "vcp": "VCP",
+            "cup_and_handle": "Cup & Handle",
+        }
+        pattern_name = _PATTERN_EN.get(info["pattern"], info["pattern"])
+        depths_str = "→".join(f"{d:.0f}%" for d in info["depths"])
+
+        style = mpf.make_mpf_style(base_mpf_style="charles")
+        save_path = output_dir / f"{ticker}_vcp.png"
+
+        kwargs = {
+            "type": "candle",
+            "volume": True,
+            "title": (f"{ticker} - {pattern_name} "
+                      f"(T: {depths_str}, "
+                      f"vol={info['vol_ratio']:.0%}, "
+                      f"pivot={info['pivot_price']:.1f})"),
+            "style": style,
+            "figscale": 1.5,
+            "figratio": (16, 9),
+            "addplot": add_plots,
+            "savefig": str(save_path),
+        }
+
+        mpf.plot(df, **kwargs)
+        logger.info(f"已保存 {ticker} {pattern_name} 图 → {save_path}")
