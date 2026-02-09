@@ -666,16 +666,14 @@ def screen_ascending_triangle(
         if curr_close < sup_val - margin or curr_close > res_val + margin:
             continue
 
-        # ---- 判断形态类型 ----
+        # ---- 判断形态类型（只保留看涨形态，排除下降/对称三角形） ----
         if abs(res_slope_pct) < 0.08 and sup_slope_pct > 0.03:
             pattern_type = "ascending_triangle"      # 上轨水平，下轨上倾
         elif res_slope_pct > 0 and sup_slope_pct > res_slope_pct:
             pattern_type = "rising_wedge"            # 两线都上倾，下轨更陡
-        elif res_slope_pct < -0.03 and sup_slope_pct > 0.03:
-            pattern_type = "symmetrical_triangle"    # 上轨下倾，下轨上倾
-        elif res_slope_pct < -0.03 and abs(sup_slope_pct) < 0.08:
-            pattern_type = "descending_wedge"        # 上轨下倾，下轨水平
         else:
+            # 跳过 descending_wedge（下降三角形）、symmetrical_triangle（对称三角形）
+            # 及其他非看涨模式
             continue
 
         # ---- 收敛时间估算 ----
