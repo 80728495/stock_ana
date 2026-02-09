@@ -208,8 +208,15 @@ def screen_vegas_channel_touch(df: pd.DataFrame, lookback_days: int = 5,
     条件：
     1. 股价在最近半年内达到最高点后开始波动下行
     2. 高点到触及通道之间，股价必须大部分时间在 Vegas 通道上方运行
-    3. 最近 lookback_days 个交易日内，价格触及 Vegas 通道
-    4. 没有有效跌破 EMA169
+       （确认是"从上方回踩"而非"从下方突破"）
+    3. 最近 lookback_days 个交易日内，价格触及 Vegas 通道（EMA144/EMA169 区域）
+    4. 没有有效跌破 EMA169：
+       - 从未跌破 EMA169，或
+       - 跌破后当日或次日收盘价收回 EMA169 上方
+    5. Vegas 通道必须保持上升趋势（EMA 中轨 90 天内上升）
+    6. 最近 90 个交易日收盘价必须全部在通道上沿之上，不能多次横穿
+       （多次穿越视为横盘无效）
+    7. 90 天内最多只有 2 次有效触碰通道，第 3 次视为弱势无效
 
     Args:
         df: 带有 close, low, high, ema_144, ema_169 列的 DataFrame
@@ -223,6 +230,61 @@ def screen_vegas_channel_touch(df: pd.DataFrame, lookback_days: int = 5,
     if not required.issubset(df.columns) or len(df) < half_year_days:
         return None
 
+    # ---- 条件5: Vegas 通道保持上升趋势 ----
+    # 比较 90 天前和当前的 EMA 中轨值，要求上升
+    trend_window = min(90, len(df) - 1)
+    ema_mid_now = (df["ema_144"].iloc[-1] + df["ema_169"].iloc[-1]) / 2
+    ema_mid_ago = (df["ema_144"].iloc[-trend_window] + df["ema_169"].iloc[-trend_window]) / 2
+    if ema_mid_now <= ema_mid_ago:
+        return None  # 通道平或向下，不是上升趋势
+
+    # ---- 条件6: 最近 90 天收盘价不能多次横穿通道 ----
+    # 统计从通道上方跌到下方的"下穿"次数，超过 1 次视为横盘
+    lookback_90 = min(90, len(df))
+    section_90 = df.iloc[-lookback_90:]
+    cross_below_count = 0
+    was_above = True  # 假设初始在上方
+
+    for _, row in section_90.iterrows():
+        ema_upper = max(row["ema_144"], row["ema_169"])
+        is_above = row["close"] > ema_upper
+        if was_above and not is_above:
+            cross_below_count += 1
+        was_above = is_above
+
+    if cross_below_count > 1:
+        return None  # 多次下穿通道 → 横盘，无效
+
+    # ---- 条件7: 90 天内最多 2 次触碰通道 ----
+    # 扫描 90 天内的触碰事件（low <= ema_upper），合并连续触碰为一次
+    touch_events = []
+    in_touch = False
+    for i in range(len(section_90)):
+        row = section_90.iloc[i]
+        ema_upper = max(row["ema_144"], row["ema_169"])
+        if row["low"] <= ema_upper:
+            if not in_touch:
+                touch_events.append(i)
+                in_touch = True
+        else:
+            # 需要离开通道区域至少 3 天才算结束一次触碰
+            if in_touch:
+                # 检查后续是否有 3 天连续在通道上方
+                still_away = True
+                for j in range(1, 4):
+                    if i + j < len(section_90):
+                        r2 = section_90.iloc[i + j]
+                        eu2 = max(r2["ema_144"], r2["ema_169"])
+                        if r2["low"] <= eu2:
+                            still_away = False
+                            break
+                if still_away:
+                    in_touch = False
+
+    if len(touch_events) >= 3:
+        return None  # 第 3 次触碰，弱势无效
+
+    # ---- 条件1: 半年内到达过高点，且当前已从高点回落 ----
     half_year = df.iloc[-half_year_days:]
     peak_idx = half_year["high"].idxmax()
     peak_price = half_year.loc[peak_idx, "high"]
@@ -285,6 +347,9 @@ def screen_vegas_channel_touch(df: pd.DataFrame, lookback_days: int = 5,
         "current_price": float(curr_close),
         "above_ratio": round(above_ratio, 2),
         "touch_date": str(touch_date) if touch_date else None,
+        "channel_trend_pct": round((ema_mid_now / ema_mid_ago - 1) * 100, 2),
+        "cross_below_count": cross_below_count,
+        "touch_events_90d": len(touch_events),
     }
 
 
