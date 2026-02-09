@@ -416,15 +416,25 @@ def plot_backtest_signals(
         if len(df_view) < 5:
             continue
 
-        # 红圈标记
-        marker_series = pd.Series(np.nan, index=df_view.index)
+        # 信号日红圈标记
+        marker_red = pd.Series(np.nan, index=df_view.index)
         for idx_pos in signal_dates:
             if view_start <= idx_pos < view_end:
                 date = full_df.index[idx_pos]
-                if date in marker_series.index:
-                    marker_series.loc[date] = full_df.loc[date, "close"]
+                if date in marker_red.index:
+                    marker_red.loc[date] = full_df.loc[date, "close"]
 
         last_trade = t_list[-1]
+        signal_info = last_trade.get("signal_info", {})
+
+        # VCP 起始日绿圈标记
+        marker_green = pd.Series(np.nan, index=df_view.index)
+        if strategy == "vcp":
+            ws = signal_info.get("window_start")
+            if ws is not None and view_start <= ws < view_end:
+                date = full_df.index[ws]
+                if date in marker_green.index:
+                    marker_green.loc[date] = full_df.loc[date, "close"]
 
         # ── 构建辅助线 ──
         add_plots = []
@@ -437,24 +447,37 @@ def plot_backtest_signals(
             elif strategy == "triangle":
                 add_plots.extend(
                     _build_triangle_overlays(
-                        df_view, last_trade.get("signal_info", {}),
+                        df_view, signal_info,
                         full_df, view_start, view_end,
                     )
                 )
             elif strategy == "vcp":
                 add_plots.extend(
                     _build_vcp_overlays(
-                        df_view, last_trade.get("signal_info", {}),
+                        df_view, signal_info,
                         full_df, view_start, view_end,
                     )
                 )
         except Exception as e:
             logger.debug(f"{ticker}: 辅助线绘制异常 {e}")
 
-        # 红圈标记
+        # 绿圈（VCP 起始）
+        if not marker_green.isna().all():
+            add_plots.append(
+                mpf.make_addplot(
+                    marker_green,
+                    type="scatter",
+                    markersize=200,
+                    marker="o",
+                    color="green",
+                    alpha=0.8,
+                ),
+            )
+
+        # 红圈（信号日）
         add_plots.append(
             mpf.make_addplot(
-                marker_series,
+                marker_red,
                 type="scatter",
                 markersize=200,
                 marker="o",
@@ -802,8 +825,8 @@ def run_backtest(
                 f"  基准 {label}: 平均 {avg_benchmark[key]['avg_return_pct']:+.2f}%"
             )
 
-    # ── 运行三策略 ──
-    strategies = ["vegas", "triangle", "vcp"]
+    # ── 运行策略（triangle 暂时屏蔽） ──
+    strategies = ["vegas", "vcp"]
     all_summaries = {}
 
     for strategy in strategies:
@@ -869,7 +892,7 @@ def run_backtest(
             view_end = len(full_df)
             df_view = full_df.iloc[view_start:view_end].copy()
 
-            if len(df_view) < 5:
+            if len(df_view) < 5 or df_view["close"].isna().all():
                 continue
 
             try:
