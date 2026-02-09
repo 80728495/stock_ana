@@ -1022,35 +1022,34 @@ def _find_best_decreasing_sequence(
 def screen_vcp(
     df: pd.DataFrame,
     min_base_weeks: int = 8,
-    max_base_weeks: int = 20,
-    max_distance_to_base_pct: float = 10.0,
+    max_base_weeks: int = 50,
     min_t1_depth: float = 8.0,
     max_t1_depth: float = 50.0,
     min_contractions: int = 2,
     vol_dry_factor: float = 0.50,
     min_green_red_gap_days: int = 15,
+    max_distance_to_pivot_pct: float = 15.0,
 ) -> dict | None:
     """
     严格检测 Mark Minervini VCP（波动率收缩形态）。
 
     算法流程：
-    1. 在 8~20 周窗口内确定 Base 结构（Base_Start = 窗口最高点）
-    2. 当前价必须在 Base_Start 的 max_distance_to_base_pct 以内
-    3. 在 Base 内找 swing highs/lows，配对为收缩段
-    4. 找严格递减子序列（≥2 次, depth(T1) > depth(T2) > …）
-    5. 最终收缩区成交量枯竭（存在 ≥1 天 vol < 50日MA × vol_dry_factor）
-    6. 前置上升趋势（price > SMA200）
-    7. 绿圈 = T1 高点，红圈 = 最终收缩高点
+    1. 在 8~50 周窗口内找 swing highs/lows
+    2. 配对为收缩段，找严格递减子序列（≥2 次）
+    3. 当前价在最终收缩高点（Pivot）附近（上下 15% 以内）
+    4. 最终收缩区成交量枯竭（存在 ≥1 天 vol < 50日MA × 50%）
+    5. 前置上升趋势（price > SMA200, SMA200 上升）
+    6. 绿圈 = T1 高点，红圈 = 最终收缩高点
 
     Args:
         df: 带有 OHLCV 的 DataFrame
         min_base_weeks / max_base_weeks: Base 窗口范围（周）
-        max_distance_to_base_pct: 当前价距离 Base 高点的最大距离 %
         min_t1_depth: T1 最小深度 %
         max_t1_depth: T1 最大深度 %
         min_contractions: 最少递减收缩次数
         vol_dry_factor: 量能枯竭阈值（相对 50日均量的倍数）
         min_green_red_gap_days: 绿圈到红圈的最小间距（交易日）
+        max_distance_to_pivot_pct: 当前价距 Pivot 的最大距离 %
 
     Returns:
         VCP 信息 dict 或 None
@@ -1058,7 +1057,7 @@ def screen_vcp(
     min_base_days = min_base_weeks * 5
     max_base_days = max_base_weeks * 5
 
-    if len(df) < max(max_base_days + 50, 200):
+    if len(df) < 200:
         return None
 
     closes = df["close"].values
@@ -1068,31 +1067,39 @@ def screen_vcp(
 
     sma200 = pd.Series(closes).rolling(200).mean().values
 
+    # ─── 前置上升趋势检查（只做一次） ───
+    curr_price = float(closes[-1])
+    curr_sma200 = sma200[-1]
+    if np.isnan(curr_sma200) or curr_price < curr_sma200:
+        return None
+    sma200_recent = sma200[-20:]
+    if np.any(np.isnan(sma200_recent)) or sma200_recent[-1] < sma200_recent[0]:
+        return None  # SMA200 下降，不是 Stage 2
+
     best_result = None
     best_score = -1
 
-    for lookback in range(min_base_days, min(max_base_days + 1, len(df) - 50), 5):
+    # 自适应步长：短周期步5天，长周期步10天
+    step = 5
+    for lookback in range(min_base_days, min(max_base_days + 1, len(df)), step):
         window_start = len(df) - lookback
         w_highs = highs[window_start:]
         w_lows = lows[window_start:]
         w_closes = closes[window_start:]
         w_volumes = volumes[window_start:]
-        n = len(w_highs)
 
-        # ─── 1. Base 结构：找窗口最高点 ───
-        base_high_rel = int(np.argmax(w_highs))
-        base_high_val = float(w_highs[base_high_rel])
+        is_long_base = lookback > 100  # 长周期 base（>20周）
 
-        # 当前价必须在 Base 高点的 max_distance_to_base_pct 以内
-        curr_price = float(w_closes[-1])
-        distance_pct = (base_high_val - curr_price) / base_high_val * 100
-        if distance_pct > max_distance_to_base_pct or distance_pct < -2.0:
-            continue  # 太远或已大幅突破
+        # ─── 1. 短周期先检查 base_high 距离（快速排除） ───
+        if not is_long_base:
+            base_high_rel = int(np.argmax(w_highs))
+            base_high_val = float(w_highs[base_high_rel])
+            dist_to_base = (base_high_val - curr_price) / base_high_val * 100
+            if dist_to_base > 10.0 or dist_to_base < -2.0:
+                continue
 
         # ─── 2. 找 swing highs/lows ───
-        # 自适应 swing_order：窗口越大用更大的 order 过滤噪声
-        swing_order = max(3, min(7, lookback // 15))
-
+        swing_order = max(3, min(8, lookback // 15))
         sw_highs, sw_lows = _find_swing_highs_lows(w_highs, w_lows, order=swing_order)
 
         if len(sw_highs) < 2 or len(sw_lows) < 1:
@@ -1101,11 +1108,14 @@ def screen_vcp(
         # ─── 3. 配对收缩段 ───
         contractions = _find_contractions_strict(sw_highs, sw_lows, w_highs, w_lows)
 
-        if len(contractions) < min_contractions:
+        # 长周期 base 要求更多收缩才可信
+        required_contractions = min_contractions if not is_long_base else max(min_contractions, 3)
+
+        if len(contractions) < required_contractions:
             continue
 
         # ─── 4. 找严格递减子序列 ───
-        dec_seq = _find_best_decreasing_sequence(contractions, min_count=min_contractions)
+        dec_seq = _find_best_decreasing_sequence(contractions, min_count=required_contractions)
 
         if dec_seq is None:
             continue
@@ -1113,31 +1123,48 @@ def screen_vcp(
         t1_depth = dec_seq[0]["depth_pct"]
         final_depth = dec_seq[-1]["depth_pct"]
 
-        # T1 深度约束
-        if t1_depth < min_t1_depth or t1_depth > max_t1_depth:
+        # T1 深度约束：长周期 base 要求 T1 更深（浅跌幅在长时间内无意义）
+        effective_min_t1 = min_t1_depth if not is_long_base else max(min_t1_depth, 12.0)
+        if t1_depth < effective_min_t1 or t1_depth > max_t1_depth:
             continue
 
         # 最终收缩必须明显小于 T1
         if final_depth >= t1_depth * 0.80:
             continue
 
-        # ─── 5. 绿圈到红圈间距检查 ───
-        green_idx = dec_seq[0]["high_idx"]      # T1 高点 (Base_Start)
+        # ─── 5. Pivot = 最终收缩的高点 ───
+        pivot_price = float(dec_seq[-1]["high_val"])
+        t1_high_val = float(dec_seq[0]["high_val"])
+        distance_to_pivot_pct = (pivot_price - curr_price) / pivot_price * 100
+
+        if is_long_base:
+            # 长周期：允许已突破（杯柄突破场景），但不能太远
+            if distance_to_pivot_pct > max_distance_to_pivot_pct:
+                continue
+            if distance_to_pivot_pct < -20.0:
+                continue
+        else:
+            # 短周期：Pivot 必须与 T1 高点在同一水平（确认同一个 base）
+            if pivot_price < t1_high_val * 0.85:
+                continue
+
+        # ─── 6. 绿圈到红圈间距检查 ───
+        green_idx = dec_seq[0]["high_idx"]      # T1 高点
         red_idx = dec_seq[-1]["high_idx"]        # 最终收缩高点 (Pivot)
         gap_days = red_idx - green_idx
-        if gap_days < min_green_red_gap_days:
-            continue  # 间距太短，可能是短期 pennant
+        # 长周期 base 要求更大间距
+        effective_gap = min_green_red_gap_days if not is_long_base else max(min_green_red_gap_days, lookback // 5)
+        if gap_days < effective_gap:
+            continue  # 间距太短
 
         # ─── 6. 成交量枯竭检查 ───
-        # 计算 base 之前 50 天的均量作为基准
         pre_base_start = max(0, window_start - 50)
         vol_50ma = float(np.mean(volumes[pre_base_start:window_start])) if window_start > 50 else float(np.mean(volumes[:50]))
 
         if vol_50ma < 1:
             continue
 
-        # 最终收缩区（从最后一个收缩的高点到窗口末尾）内
-        # 必须存在至少 1 天 volume < 50日均量 × vol_dry_factor
+        # 最终收缩区内必须存在至少 1 天 volume < 50日均量 × vol_dry_factor
         final_start = dec_seq[-1]["high_idx"]
         tail_vols = w_volumes[final_start:]
 
@@ -1148,42 +1175,15 @@ def screen_vcp(
         if not has_dry_up:
             continue
 
-        # 计算最终收缩区的均量比值（用于评分）
         vol_ratio = float(np.mean(tail_vols)) / vol_50ma if vol_50ma > 0 else 1.0
 
-        # ─── 7. 前置上升趋势检查 ───
-        curr_sma200 = sma200[-1]
-        if np.isnan(curr_sma200):
-            continue
-        if curr_price < curr_sma200:
-            continue  # 价格必须在 200 日均线之上
-
-        # SMA200 本身应该上升（最近 20 天）
-        sma200_recent = sma200[-20:]
-        if np.any(np.isnan(sma200_recent)):
-            continue
-        if sma200_recent[-1] < sma200_recent[0]:
-            continue  # SMA200 下降，不是 Stage 2
-
-        # ─── 8. Pivot 价格 ───
-        # 红圈处的高点价 = 突破枢轴价
-        pivot_price = float(dec_seq[-1]["high_val"])
-        distance_to_pivot_pct = (pivot_price - curr_price) / pivot_price * 100
-
-        # 枢轴价距离基底最高点不能太远（确认是同一个 base）
-        if pivot_price < base_high_val * 0.85:
-            continue
-
-        # ─── 9. 评分 ───
-        # 收缩次数越多越好
+        # ─── 7. 评分 ───
         contraction_score = len(dec_seq) * 10
-        # 递减比越大越好（T1→Tn 收缩幅度减少越多越好）
         ratio = final_depth / t1_depth if t1_depth > 0 else 1.0
         ratio_score = max(0, (1.0 - ratio)) * 30
-        # 量能越枯竭越好
         vol_score = max(0, (1.0 - vol_ratio)) * 20
-        # 距离枢轴越近越好（负值表示已突破）
-        proximity_score = max(0, (10.0 - abs(distance_to_pivot_pct))) * 3
+        # 距离 Pivot 越近越好（已突破也好，但不要太远）
+        proximity_score = max(0, (15.0 - abs(distance_to_pivot_pct))) * 2
         # base 时间越长越稳固
         base_score = lookback * 0.1
 
@@ -1216,7 +1216,6 @@ def screen_vcp(
                 "pivot_price": round(pivot_price, 2),
                 "current_price": round(curr_price, 2),
                 "distance_to_pivot_pct": round(distance_to_pivot_pct, 2),
-                "base_high_val": round(base_high_val, 2),
                 "green_idx_rel": green_idx,    # T1 高点，窗口内相对索引
                 "red_idx_rel": red_idx,        # 最终收缩高点，窗口内相对索引
                 "gap_days": gap_days,
@@ -1228,7 +1227,7 @@ def screen_vcp(
 
 def scan_ndx100_vcp(
     min_base_weeks: int = 8,
-    max_base_weeks: int = 20,
+    max_base_weeks: int = 50,
 ) -> list[dict]:
     """
     扫描纳指100中呈现 VCP（波动率收缩形态）的股票。
