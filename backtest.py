@@ -166,6 +166,8 @@ def backtest_single_cutoff(
                 "window_start": result.get("window_start"),
                 "base_days": result.get("base_days"),
                 "pivot_price": result.get("pivot_price"),
+                "green_idx_rel": result.get("green_idx_rel"),  # T1 高点(窗口内)
+                "red_idx_rel": result.get("red_idx_rel"),      # 最终收缩高点(窗口内)
             }
         elif strategy == "triangle":
             signal_info = {
@@ -427,14 +429,29 @@ def plot_backtest_signals(
         last_trade = t_list[-1]
         signal_info = last_trade.get("signal_info", {})
 
-        # VCP 起始日绿圈标记
+        # VCP 绿圈（T1 高点 = Base_Start）和红圈（最终收缩高点 = Pivot）
         marker_green = pd.Series(np.nan, index=df_view.index)
         if strategy == "vcp":
             ws = signal_info.get("window_start")
-            if ws is not None and view_start <= ws < view_end:
-                date = full_df.index[ws]
-                if date in marker_green.index:
-                    marker_green.loc[date] = full_df.loc[date, "close"]
+            green_rel = signal_info.get("green_idx_rel")
+            red_rel = signal_info.get("red_idx_rel")
+
+            # 绿圈：T1 高点
+            if ws is not None and green_rel is not None:
+                green_abs = ws + green_rel
+                if view_start <= green_abs < view_end:
+                    date = full_df.index[green_abs]
+                    if date in marker_green.index:
+                        marker_green.loc[date] = full_df.loc[date, "high"]
+
+            # 红圈：最终收缩高点（覆盖信号日红圈）
+            if ws is not None and red_rel is not None:
+                red_abs = ws + red_rel
+                if view_start <= red_abs < view_end:
+                    marker_red = pd.Series(np.nan, index=df_view.index)  # 重置
+                    date = full_df.index[red_abs]
+                    if date in marker_red.index:
+                        marker_red.loc[date] = full_df.loc[date, "high"]
 
         # ── 构建辅助线 ──
         add_plots = []
