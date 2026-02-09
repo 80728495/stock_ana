@@ -196,14 +196,16 @@ def scan_ndx100_macd_cross(lookback_days: int = 5) -> list[dict]:
 
 
 def screen_vegas_channel_touch(df: pd.DataFrame, lookback_days: int = 5,
-                                half_year_days: int = 120) -> bool:
+                                half_year_days: int = 120) -> dict | None:
     """
-    Vegas 长期通道回踩策略：
+    Vegas 长期通道回踩策略（从上方测试）：
 
     条件：
     1. 股价在最近半年（~120 个交易日）内达到最高点后开始波动下行
-    2. 最近 lookback_days 个交易日内，价格触及 Vegas 通道（EMA144/EMA169 区域）
-    3. 没有有效跌破 EMA169：
+    2. 高点到触及通道之间，股价必须大部分时间在 Vegas 通道上方运行
+       （确认是"从上方回踩"而非"从下方突破"）
+    3. 最近 lookback_days 个交易日内，价格触及 Vegas 通道（EMA144/EMA169 区域）
+    4. 没有有效跌破 EMA169：
        - 从未跌破 EMA169，或
        - 跌破后当日或次日收盘价收回 EMA169 上方
 
@@ -213,11 +215,11 @@ def screen_vegas_channel_touch(df: pd.DataFrame, lookback_days: int = 5,
         half_year_days: 半年的交易日数
 
     Returns:
-        True 如果满足 Vegas 通道回踩条件
+        形态信息 dict 或 None
     """
     required = {"close", "low", "high", "ema_144", "ema_169"}
     if not required.issubset(df.columns) or len(df) < half_year_days:
-        return False
+        return None
 
     # ---- 条件1: 半年内到达过高点，且当前已从高点回落 ----
     half_year = df.iloc[-half_year_days:]
@@ -227,28 +229,51 @@ def screen_vegas_channel_touch(df: pd.DataFrame, lookback_days: int = 5,
     # 高点不能在最近 lookback_days 内（必须已开始下行）
     recent_start = df.index[-lookback_days]
     if peak_idx >= recent_start:
-        return False
+        return None
 
     # 高点后价格确实下行：当前收盘 < 高点的 95%
     curr_close = df["close"].iloc[-1]
     if curr_close >= peak_price * 0.95:
-        return False
+        return None
 
-    # ---- 条件2: 最近 lookback_days 内触及 Vegas 通道 ----
+    # ---- 条件2: 从高点到触及通道之间，股价必须在通道上方运行 ----
+    # 确保这是"从上方回踩"而非"从下方靠近"
+    peak_iloc = df.index.get_loc(peak_idx)
+    touch_start = len(df) - lookback_days
+
+    # 从高点到触及区域之间的 K 线
+    between_section = df.iloc[peak_iloc:touch_start]
+    if len(between_section) < 3:
+        return None  # 高点和触及日太近，不算有效回踩
+
+    # 高点到触及之间，至少 70% 的收盘价在通道上沿之上
+    above_count = 0
+    for _, row in between_section.iterrows():
+        ema_upper = max(row["ema_144"], row["ema_169"])
+        if row["close"] > ema_upper:
+            above_count += 1
+
+    above_ratio = above_count / len(between_section) if len(between_section) > 0 else 0
+    if above_ratio < 0.70:
+        return None  # 之前大部分时间不在通道上方 → 不是从上方回踩
+
+    # ---- 条件3: 最近 lookback_days 内触及 Vegas 通道 ----
     recent = df.iloc[-lookback_days:]
     touched = False
-    for _, row in recent.iterrows():
+    touch_date = None
+    for idx_label, row in recent.iterrows():
         ema_upper = max(row["ema_144"], row["ema_169"])
         ema_lower = min(row["ema_144"], row["ema_169"])
         # 触及通道：最低价 <= 通道上沿（即价格下探到通道区域）
         if row["low"] <= ema_upper:
             touched = True
+            touch_date = idx_label
             break
 
     if not touched:
-        return False
+        return None
 
-    # ---- 条件3: 没有有效跌破 EMA169（通道下沿） ----
+    # ---- 条件4: 没有有效跌破 EMA169（通道下沿） ----
     # 检查最近 lookback_days：如果跌破 EMA169，当日或次日必须收回
     for i in range(len(df) - lookback_days, len(df)):
         row = df.iloc[i]
@@ -261,13 +286,17 @@ def screen_vegas_channel_touch(df: pd.DataFrame, lookback_days: int = 5,
                 next_row = df.iloc[i + 1]
                 next_ema_lower = min(next_row["ema_144"], next_row["ema_169"])
                 if next_row["close"] < next_ema_lower:
-                    return False  # 次日也没收回 → 有效跌破
+                    return None  # 次日也没收回 → 有效跌破
             else:
-                # 跌破发生在最后一天，没有次日数据 → 暂不算有效跌破
-                # 但收盘在通道下沿以下，风险大，保守过滤
-                return False
+                return None
 
-    return True
+    return {
+        "peak_price": float(peak_price),
+        "peak_date": str(peak_idx),
+        "current_price": float(curr_close),
+        "above_ratio": round(above_ratio, 2),
+        "touch_date": str(touch_date) if touch_date else None,
+    }
 
 
 def scan_ndx100_vegas_touch(lookback_days: int = 5) -> list[dict]:
@@ -297,8 +326,9 @@ def scan_ndx100_vegas_touch(lookback_days: int = 5) -> list[dict]:
 
             processed += 1
             df = add_vegas_channel(df.copy())
-            if screen_vegas_channel_touch(df, lookback_days=lookback_days):
-                logger.success(f"✅ {ticker} 在最近 {lookback_days} 个交易日触及 Vegas 通道回踩")
+            result = screen_vegas_channel_touch(df, lookback_days=lookback_days)
+            if result is not None:
+                logger.success(f"✅ {ticker} 在最近 {lookback_days} 个交易日触及 Vegas 通道回踩（从上方）")
                 hits.append({"ticker": ticker, "df": df})
         except Exception as e:
             logger.error(f"{ticker}: 处理失败 - {e}")
