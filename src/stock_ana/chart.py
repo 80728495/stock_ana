@@ -313,7 +313,7 @@ def plot_vcp_results(
     output_dir: str | Path | None = None,
 ) -> None:
     """
-    为 VCP / 杯柄形态扫描结果绘制 K 线图（含收缩标注 + 成交量）。
+    为 VCP 扫描结果绘制 K 线图（约 1 年数据，VCP 区域在右侧）。
 
     Args:
         hits: scan_ndx100_vcp 返回的结果列表
@@ -333,71 +333,105 @@ def plot_vcp_results(
         info = item["vcp_info"]
         df_full = item["df"].copy()
 
-        window_start = info["window_start"]
+        # 计算基底起点 iloc
+        current_iloc = len(df_full) - 1
+        base_high_iloc = current_iloc - info["base_days"]
 
-        # 显示区间：形态开始前留 20 天上下文
-        chart_start = max(0, window_start - 20)
-        df = df_full.iloc[chart_start:]
+        # 显示范围：基底前 ~200 天 + 信号后 5 天（约 1 年数据）
+        pre_days = 200
+        view_start = max(0, base_high_iloc - pre_days)
+        view_end = min(len(df_full), current_iloc + 5)
+        df = df_full.iloc[view_start:view_end].copy()
 
-        # 计算 150-SMA 和 200-SMA 用于趋势展示
-        sma150 = pd.Series(df_full["close"].values).rolling(150).mean()
-        sma200 = pd.Series(df_full["close"].values).rolling(200).mean()
-        sma150_display = pd.Series(sma150.values[chart_start:], index=df.index)
-        sma200_display = pd.Series(sma200.values[chart_start:], index=df.index)
+        if len(df) < 20:
+            continue
 
-        # 标注收缩段：每个收缩用水平线标记高点和低点
-        add_plots = [
-            mpf.make_addplot(sma150_display, panel=0, color="blue", width=1.0,
-                             linestyle="dashed", secondary_y=False),
-            mpf.make_addplot(sma200_display, panel=0, color="purple", width=1.0,
-                             linestyle="dashed", secondary_y=False),
-        ]
+        # SMA150 / SMA200（基于全量数据计算再截取）
+        sma150 = df_full["close"].rolling(150).mean().iloc[view_start:view_end]
+        sma200 = df_full["close"].rolling(200).mean().iloc[view_start:view_end]
 
-        # 收缩区域标注：为每个收缩画高点水平线
-        contractions = info["contractions"]
-        offset = window_start - chart_start  # df 坐标中形态起点偏移
-
-        for ci, c in enumerate(contractions):
-            hi_pos = c["high_idx"] + offset
-            lo_pos = c["low_idx"] + offset
-            hi_val = c["high_val"]
-            lo_val = c["low_val"]
-
-            # 画收缩高点的水平线
-            hi_line = pd.Series(np.nan, index=df.index)
-            lo_line = pd.Series(np.nan, index=df.index)
-
-            start_pos = max(0, hi_pos)
-            end_pos = min(len(df) - 1, lo_pos + 5)
-
-            for i in range(start_pos, end_pos + 1):
-                if i < len(hi_line):
-                    hi_line.iloc[i] = hi_val
-                    lo_line.iloc[i] = lo_val
-
-            color = "red" if ci == 0 else ("orange" if ci == 1 else "gray")
+        add_plots = []
+        if not sma150.isna().all():
             add_plots.append(
-                mpf.make_addplot(hi_line, panel=0, color=color, width=1.2,
-                                 linestyle="dotted", secondary_y=False)
+                mpf.make_addplot(sma150, panel=0, color="blue", width=1.0,
+                                 linestyle="dashed", secondary_y=False)
             )
+        if not sma200.isna().all():
             add_plots.append(
-                mpf.make_addplot(lo_line, panel=0, color=color, width=1.2,
-                                 linestyle="dotted", secondary_y=False)
+                mpf.make_addplot(sma200, panel=0, color="purple", width=1.0,
+                                 linestyle="dashed", secondary_y=False)
             )
 
-        # 枢轴点水平线（横跨整个窗口）
-        pivot_line = pd.Series(info["pivot_price"], index=df.index)
-        add_plots.append(
-            mpf.make_addplot(pivot_line, panel=0, color="magenta", width=1.5,
-                             linestyle="--", secondary_y=False)
-        )
+        # 收缩区域标注：为每个收缩画高低水平线
+        contractions = info.get("waves", [])
+        if isinstance(contractions, list) and contractions and isinstance(contractions[0], dict):
+            # waves 中的 idx 是相对 base_period (从 base_high_iloc 开始) 的偏移
+            for ci, c in enumerate(contractions):
+                hi_pos = base_high_iloc + c["high_idx"] - view_start
+                lo_pos = base_high_iloc + c["low_idx"] - view_start
+                hi_val = c["high_val"]
+                lo_val = c["low_val"]
 
-        _PATTERN_EN = {
-            "vcp": "VCP",
-            "cup_and_handle": "Cup & Handle",
-        }
-        pattern_name = _PATTERN_EN.get(info["pattern"], info["pattern"])
-        depths_str = "→".join(f"{d:.0f}%" for d in info["depths"])
+                hi_line = pd.Series(np.nan, index=df.index)
+                lo_line = pd.Series(np.nan, index=df.index)
+
+                start_pos = max(0, hi_pos)
+                end_pos = min(len(df) - 1, lo_pos + 5)
+
+                for i in range(start_pos, end_pos + 1):
+                    if i < len(hi_line):
+                        hi_line.iloc[i] = hi_val
+                        lo_line.iloc[i] = lo_val
+
+                color = "red" if ci == 0 else ("orange" if ci == 1 else "gray")
+                if hi_line.notna().any():
+                    add_plots.append(
+                        mpf.make_addplot(hi_line, panel=0, color=color, width=1.2,
+                                         linestyle="dotted", secondary_y=False)
+                    )
+                if lo_line.notna().any():
+                    add_plots.append(
+                        mpf.make_addplot(lo_line, panel=0, color=color, width=1.2,
+                                         linestyle="dotted", secondary_y=False)
+                    )
+
+        # Base High 水平参考线
+        base_high_val = info.get("base_high", 0)
+        if base_high_val > 0:
+            pivot_line = pd.Series(base_high_val, index=df.index)
+            add_plots.append(
+                mpf.make_addplot(pivot_line, panel=0, color="magenta", width=1.5,
+                                 linestyle="--", secondary_y=False)
+            )
+
+        # 绿色圆圈：VCP 起点（Base High）
+        start_marker = pd.Series(np.nan, index=df.index)
+        bh_view_pos = base_high_iloc - view_start
+        if 0 <= bh_view_pos < len(df):
+            start_marker.iloc[bh_view_pos] = df_full.iloc[base_high_iloc]["high"]
+        if start_marker.notna().any():
+            add_plots.append(
+                mpf.make_addplot(start_marker, type="scatter", markersize=200,
+                                 marker="o", color="lime", edgecolors="green",
+                                 linewidths=2, alpha=0.9)
+            )
+
+        # 红色圆圈：VCP 终点（当前信号日）
+        end_marker = pd.Series(np.nan, index=df.index)
+        sig_view_pos = current_iloc - view_start
+        if 0 <= sig_view_pos < len(df):
+            end_marker.iloc[sig_view_pos] = df_full.iloc[current_iloc]["close"]
+        if end_marker.notna().any():
+            add_plots.append(
+                mpf.make_addplot(end_marker, type="scatter", markersize=200,
+                                 marker="o", color="red", edgecolors="darkred",
+                                 linewidths=2, alpha=0.9)
+            )
+
+        # 标题
+        depths = info.get("depths", [])
+        depths_str = "→".join(f"{d:.0f}%" for d in depths) if depths else "N/A"
+        pattern_name = info.get("pattern", "VCP")
 
         style = mpf.make_mpf_style(base_mpf_style="charles")
         save_path = output_dir / f"{ticker}_vcp.png"
@@ -408,12 +442,13 @@ def plot_vcp_results(
             "title": (f"{ticker} - {pattern_name} "
                       f"(T: {depths_str}, "
                       f"vol={info['vol_ratio']:.0%}, "
-                      f"pivot={info['pivot_price']:.1f})"),
+                      f"base={info['base_days']}d)"),
             "style": style,
             "figscale": 1.5,
             "figratio": (16, 9),
             "addplot": add_plots,
             "savefig": str(save_path),
+            "warn_too_much_data": len(df) + 1,
         }
 
         mpf.plot(df, **kwargs)

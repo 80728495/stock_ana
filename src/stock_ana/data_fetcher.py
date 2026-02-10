@@ -243,7 +243,7 @@ def update_ndx100_data() -> dict[str, pd.DataFrame]:
     使用 akshare（新浪财经源）获取数据，无 Yahoo 限流风险。
 
     逻辑：
-    1. 对于尚无本地数据的股票 → 下载全量数据（取最近 1 年）
+    1. 对于尚无本地数据的股票 → 下载全量数据（取最近 3 年）
     2. 对于已有本地数据的股票 → 下载缺失日期的数据并合并
     3. 如果本地数据已是最新（与今天差距 ≤3 天），跳过
 
@@ -252,7 +252,7 @@ def update_ndx100_data() -> dict[str, pd.DataFrame]:
     """
     tickers = fetch_ndx100_tickers()
     today = pd.Timestamp.now().normalize()
-    one_year_ago = (today - timedelta(days=365)).strftime("%Y-%m-%d")
+    three_years_ago = (today - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
 
     # 分组：需要全量下载 / 需要增量更新 / 已最新
     need_full: list[str] = []
@@ -275,7 +275,7 @@ def update_ndx100_data() -> dict[str, pd.DataFrame]:
 
     # ── 全量下载 ──
     if need_full:
-        batch_data = _batch_download_akshare(need_full, start_date=one_year_ago)
+        batch_data = _batch_download_akshare(need_full, start_date=three_years_ago)
         for ticker, df in batch_data.items():
             save_local_data(ticker, df)
         failed = set(need_full) - set(batch_data.keys())
