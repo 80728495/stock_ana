@@ -1,0 +1,468 @@
+"""
+VCP的杯柄和锅底形态识别
+
+1. 经典杯柄形态 (Cup with Handle) —— VCP 的原型
+这是最标准、最容易识别的 VCP 形态。
+
+宏观形状： 像一个咖啡杯。
+
+左侧（杯身）： 经历一次明显的下跌（15%-35%），这里是“清洗”过程，把不坚定的筹码洗出去。杯底通常是圆弧状（U形），因为机构吸筹需要时间，不会是尖底（V形）。
+
+右侧（手柄）： 价格回到前高附近后，不再大跌，而是横向微调。这就是 VCP 的核心——波动率收缩。
+
+物理意义： 巨大的抛压（左侧）被消化后，只需微小的回撤（手柄）就能稳住价格。
+
+关键特征： 手柄必须位于杯身上半部分（Upper half），且必须极度惜售（缩量 + 窄幅）。
+
+2. 平底形态 / 碟形 (Flat Base / Saucer) —— 强势的 VCP
+这种形态比杯柄更强，因为它意味着回调幅度极浅。
+
+宏观形状： 像一个扁平的盘子或长方形盒子。
+
+特征： 股票在经过一波上涨后，拒绝大幅回调（通常跌幅 < 15%）。价格在一个水平区间内长时间（5-7周以上）横盘震荡。
+
+波动收缩的表现： 在这个扁平箱体内部，你会看到波浪越来越小。
+
+刚开始可能振幅 8%。
+
+中间变成 5%。
+
+最后变成 2% 的一条死线。
+
+物理意义： 机构买盘极其强劲，哪怕在大盘调整时，他们也在 50日均线附近托住了价格，不让它深跌。
+
+同时注意几个原则：
+1）杯身要平滑，不能宽幅震荡，否则吸筹不稳
+2）一定是从前部高点下跌，当前位置已经回到高点，经历完整周期。
+
+V6 核心改进：
+  1. 多项式拟合 + R² 平滑度（拒绝杂乱底部）
+  2. 底部停留时间（anti-V：低位必须盘整够久）
+  3. 三段结构分析（左降 / 底平 / 右升）
+  4. 路径效率比（anti-choppiness）
+  5. 分段波动率收缩验证
+"""
+
+import numpy as np
+import pandas as pd
+from loguru import logger
+from stock_ana.data_fetcher import load_all_ndx100_data
+
+
+# =============================================================================
+#  辅助组件
+# =============================================================================
+
+def _poly_smoothness(closes: np.ndarray, degree: int = 3) -> float:
+    """
+    用 degree 阶多项式拟合收盘价序列，返回 R²。
+    R² 越接近 1，形状越平滑（贴合一条光滑曲线）；
+    R² 很低说明价格上蹿下跳、路径杂乱。
+    """
+    n = len(closes)
+    if n < 10:
+        return 0.0
+    x = np.arange(n, dtype=float)
+    coeffs = np.polyfit(x, closes, degree)
+    fitted = np.polyval(coeffs, x)
+    ss_res = np.sum((closes - fitted) ** 2)
+    ss_tot = np.sum((closes - closes.mean()) ** 2)
+    if ss_tot == 0:
+        return 1.0
+    r_squared = 1.0 - ss_res / ss_tot
+    return float(r_squared)
+
+
+def _path_efficiency(closes: np.ndarray) -> float:
+    """
+    路径效率比 = |起点到终点的直线距离| / 实际路径长度。
+    值越接近 1 说明走势越"干净"；低值说明来回震荡严重。
+    """
+    if len(closes) < 3:
+        return 1.0
+    straight = abs(closes[-1] - closes[0])
+    steps = np.abs(np.diff(closes))
+    total_path = steps.sum()
+    if total_path == 0:
+        return 1.0
+    return float(straight / total_path)
+
+
+def _dwell_time_ratio(lows: np.ndarray, low_val: float, amplitude: float,
+                      threshold_pct: float = 0.10) -> float:
+    """
+    计算价格在"底部区域"停留的天数占总天数的比例。
+    底部区域定义：价格 <= low_val + amplitude * threshold_pct
+    U 形底部应有较高的停留比（>= 0.15）；V 形接近 0。
+    """
+    if amplitude <= 0 or len(lows) == 0:
+        return 0.0
+    bottom_threshold = low_val + amplitude * threshold_pct
+    days_in_bottom = np.sum(lows <= bottom_threshold)
+    return float(days_in_bottom / len(lows))
+
+
+def _segment_analysis(df_base: pd.DataFrame, low_iloc: int) -> dict:
+    """
+    将基底拆分为三段并分析各段特征：
+      - 左段（Left Descent）: 从左侧高点到低点
+      - 底段（Bottom Zone）: 低点前后各占 15% 的区间
+      - 右段（Right Ascent）: 从低点到当前
+    返回各段的斜率、波动率等指标。
+    """
+    n = len(df_base)
+    closes = df_base["close"].values.astype(float)
+
+    # 定义底部区域边界（低点前后各 15% 基底长度，但不超出范围）
+    margin = max(3, int(n * 0.15))
+    bottom_start = max(0, low_iloc - margin)
+    bottom_end = min(n, low_iloc + margin + 1)
+
+    left_seg = closes[:bottom_start] if bottom_start > 3 else closes[:low_iloc]
+    bottom_seg = closes[bottom_start:bottom_end]
+    right_seg = closes[bottom_end:] if bottom_end < n - 3 else closes[low_iloc:]
+
+    result = {
+        "left_len": len(left_seg),
+        "bottom_len": len(bottom_seg),
+        "right_len": len(right_seg),
+    }
+
+    # 各段斜率（归一化到每天的百分比变化）
+    def _slope(seg):
+        if len(seg) < 3:
+            return 0.0
+        x = np.arange(len(seg), dtype=float)
+        coeffs = np.polyfit(x, seg, 1)
+        daily_change = coeffs[0] / seg.mean() * 100 if seg.mean() != 0 else 0
+        return float(daily_change)
+
+    result["left_slope_pct_day"] = _slope(left_seg)    # 应为负（下跌）
+    result["bottom_slope_pct_day"] = _slope(bottom_seg) # 应接近 0
+    result["right_slope_pct_day"] = _slope(right_seg)   # 应为正（上升）
+
+    # 底段波动率（标准差 / 均值）
+    if len(bottom_seg) >= 3 and bottom_seg.mean() > 0:
+        result["bottom_cv"] = float(bottom_seg.std() / bottom_seg.mean() * 100)
+    else:
+        result["bottom_cv"] = 99.0
+
+    # 底段路径效率
+    result["bottom_path_eff"] = _path_efficiency(bottom_seg)
+
+    return result
+
+
+def _volatility_contraction_check(df_base: pd.DataFrame, num_segments: int = 3) -> dict:
+    """
+    将基底等分为 num_segments 段，计算每段的 high-low 振幅比例。
+    如果振幅逐段递减（或至少后半段明显小于前半段），则认为存在波动率收缩。
+    """
+    n = len(df_base)
+    if n < num_segments * 5:
+        return {"is_contracting": False, "segment_ranges": []}
+
+    seg_len = n // num_segments
+    ranges = []
+    for i in range(num_segments):
+        start = i * seg_len
+        end = start + seg_len if i < num_segments - 1 else n
+        seg = df_base.iloc[start:end]
+        seg_high = seg["high"].max()
+        seg_low = seg["low"].min()
+        seg_mid = (seg_high + seg_low) / 2
+        if seg_mid > 0:
+            ranges.append(round((seg_high - seg_low) / seg_mid * 100, 2))
+        else:
+            ranges.append(0.0)
+
+    # 收缩条件：最后一段振幅 < 第一段的 70%，且最后一段 < 倒数第二段
+    is_contracting = (
+        len(ranges) >= 2
+        and ranges[-1] < ranges[0] * 0.70
+        and ranges[-1] <= ranges[-2] * 1.05  # 允许微小抖动
+    )
+
+    return {"is_contracting": is_contracting, "segment_ranges": ranges}
+
+
+# =============================================================================
+#  V6 核心：综合平滑度与结构评估
+# =============================================================================
+
+def _evaluate_base_quality(
+    df_base: pd.DataFrame,
+    high_val: float,
+    low_val: float,
+    low_iloc_in_base: int,
+) -> dict:
+    """
+    综合评估基底质量，返回所有指标和最终判定。
+    """
+    n = len(df_base)
+    amplitude = high_val - low_val
+    closes = df_base["close"].values.astype(float)
+    lows = df_base["low"].values.astype(float)
+
+    # ---- 1. 多项式 R² 平滑度 ----
+    r_squared = _poly_smoothness(closes, degree=3)
+
+    # ---- 2. 底部停留时间 ----
+    dwell_ratio = _dwell_time_ratio(lows, low_val, amplitude, threshold_pct=0.10)
+
+    # ---- 3. 整体路径效率 ----
+    overall_path_eff = _path_efficiency(closes)
+
+    # ---- 4. 三段结构分析 ----
+    seg = _segment_analysis(df_base, low_iloc_in_base)
+
+    # ---- 5. 波动率收缩 ----
+    vc = _volatility_contraction_check(df_base, num_segments=3)
+
+    # ---- 6. 日均振幅（保留旧指标作为辅助） ----
+    daily_spreads = (df_base["high"] - df_base["low"]) / df_base["open"]
+    avg_volatility = float(daily_spreads.mean() * 100)
+
+    # ================================================================
+    #  综合判定逻辑
+    # ================================================================
+
+    reject_reasons = []
+
+    # R² 过滤：基底整体形状必须贴合一条光滑曲线
+    # 对于 Cup 形（深度 > 15%），R² >= 0.55 ；Flat（<= 15%），R² >= 0.45
+    depth_pct = amplitude / high_val * 100 if high_val > 0 else 0
+    min_r2 = 0.55 if depth_pct > 15 else 0.45
+    if r_squared < min_r2:
+        reject_reasons.append(f"R²={r_squared:.2f}<{min_r2}")
+
+    # Anti-V：底部停留时间必须 >= 12%（V 形通常 < 5%）
+    if dwell_ratio < 0.12:
+        reject_reasons.append(f"底部停留={dwell_ratio:.1%}<12%")
+
+    # 底段斜率必须近乎水平（|slope| < 0.15% per day）
+    if abs(seg["bottom_slope_pct_day"]) > 0.15:
+        reject_reasons.append(f"底段斜率={seg['bottom_slope_pct_day']:.3f}%/d过陡")
+
+    # 底段变异系数不能太大（CV < 4%）
+    if seg["bottom_cv"] > 4.0:
+        reject_reasons.append(f"底部CV={seg['bottom_cv']:.1f}%>4%")
+
+    # 左段必须下跌（斜率 < 0），右段必须上升（斜率 > 0）
+    if seg["left_slope_pct_day"] >= 0 and seg["left_len"] > 5:
+        reject_reasons.append("左段未呈下跌趋势")
+    if seg["right_slope_pct_day"] <= 0 and seg["right_len"] > 5:
+        reject_reasons.append("右段未呈上升趋势")
+
+    # 日均振幅辅助过滤
+    if avg_volatility > 3.0:
+        reject_reasons.append(f"日均振幅={avg_volatility:.1f}%>3.0%")
+
+    # 波动率收缩（推荐但非硬性）: 不作为硬性拒绝，只作为加分
+    has_contraction = vc["is_contracting"]
+
+    is_valid = len(reject_reasons) == 0
+
+    return {
+        "is_valid": is_valid,
+        "reject_reasons": reject_reasons,
+        "r_squared": round(r_squared, 3),
+        "dwell_ratio": round(dwell_ratio, 3),
+        "overall_path_eff": round(overall_path_eff, 3),
+        "avg_volatility": round(avg_volatility, 2),
+        "segment": seg,
+        "vol_contraction": vc,
+        "has_contraction": has_contraction,
+    }
+
+
+# =============================================================================
+#  V6 主函数
+# =============================================================================
+
+def screen_vcp(
+    df: pd.DataFrame,
+    min_base_days: int = 30,
+    max_base_days: int = 250,
+) -> dict | None:
+    """
+    VCP / Cup-with-Handle / Flat Base 识别 V6。
+    
+    改进点：
+      1. 多项式 R² 确保基底形状光滑
+      2. 底部停留时间 dwell_ratio 拒绝 V 形
+      3. 三段结构（左降 / 底平 / 右升）验证
+      4. 路径效率过滤极端震荡
+      5. 分段波动率收缩验证
+    """
+
+    # --- 0. 数据充分性 ---
+    if len(df) < 250:
+        return None
+
+    # --- 1. Stage 2 趋势模板 ---
+    curr_close = df["close"].iloc[-1]
+    ma_50 = df["close"].rolling(50).mean().iloc[-1]
+    ma_200 = df["close"].rolling(200).mean().iloc[-1]
+    ma_200_prev = df["close"].rolling(200).mean().iloc[-22]
+
+    if not (curr_close > ma_50 and ma_50 > ma_200):
+        return None
+    if ma_200 <= ma_200_prev:
+        return None
+
+    # --- 2. 定位左侧基底高点 ---
+    search_start = max(len(df) - max_base_days, 0)
+    search_end = len(df) - 15
+    lookback = df.iloc[search_start:search_end]
+    if len(lookback) < min_base_days:
+        return None
+
+    left_idx = lookback["high"].idxmax()
+    left_val = lookback.loc[left_idx, "high"]
+    left_iloc = df.index.get_loc(left_idx)
+
+    # --- 3. 定位基底最低点 ---
+    base_region = df.iloc[left_iloc:]
+    if len(base_region) < min_base_days:
+        return None
+
+    low_idx = base_region["low"].idxmin()
+    low_val = base_region.loc[low_idx, "low"]
+    low_iloc_in_base = base_region.index.get_loc(low_idx)
+    base_len = len(base_region)
+
+    # 低点位置约束（15%~80%，稍收紧右侧，确保恢复充分）
+    low_position = low_iloc_in_base / base_len if base_len > 0 else 0
+    if not (0.15 <= low_position <= 0.80):
+        return None
+
+    # --- 4. 深度分类 ---
+    depth_pct = (left_val - low_val) / left_val * 100
+    if 8.0 <= depth_pct <= 15.0:
+        pattern_type = "Flat Base"
+    elif 15.0 < depth_pct <= 35.0:
+        pattern_type = "Cup with Handle"
+    else:
+        return None
+
+    # --- 5. ★ V6 核心：基底质量综合评估 ★ ---
+    quality = _evaluate_base_quality(base_region, left_val, low_val, low_iloc_in_base)
+
+    if not quality["is_valid"]:
+        logger.debug(
+            f"基底质量不合格: {', '.join(quality['reject_reasons'])} | "
+            f"R²={quality['r_squared']} dwell={quality['dwell_ratio']}"
+        )
+        return None
+
+    # --- 6. 右侧恢复 + 手柄检查 ---
+    # 价格必须回到前高的 90% 以上
+    if curr_close < left_val * 0.90:
+        return None
+
+    # 手柄天数：基底的 10%-20%，5~30 天
+    handle_days = max(5, min(30, base_len // 6))
+    recent_df = df.iloc[-handle_days:]
+    handle_high = recent_df["high"].max()
+    handle_low = recent_df["low"].min()
+    handle_depth = (handle_high - handle_low) / handle_high * 100
+
+    max_handle_depth = 6.0 if "Flat" in pattern_type else 10.0
+    if handle_depth > max_handle_depth:
+        return None
+
+    # 手柄位置（必须在上半区）
+    if handle_low < left_val * 0.85:
+        return None
+
+    # 手柄内部必须缩量
+    vol_50 = df["volume"].rolling(50).mean().iloc[-1]
+    vol_handle = recent_df["volume"].mean()
+    vol_ratio = vol_handle / vol_50 if vol_50 > 0 else 1.0
+    if vol_ratio > 1.15:  # 从 1.25 收紧到 1.15
+        return None
+
+    # 手柄内振幅须极窄（日均 < 2%）
+    handle_daily_spread = ((recent_df["high"] - recent_df["low"]) / recent_df["open"]).mean() * 100
+    if handle_daily_spread > 2.5:
+        return None
+
+    # --- 7. 构造返回结果 ---
+    dist_to_pivot = (left_val - curr_close) / left_val * 100
+
+    return {
+        "pattern": pattern_type,
+        "base_days": base_len,
+        "base_high": float(left_val),
+        "base_depth_pct": round(depth_pct, 2),
+        "depths": [round(depth_pct, 2), round(handle_depth, 2)],
+        "wave_count": 2,
+        "num_contractions": 2,
+        "waves": [],
+        "tightness": round(handle_depth, 2),
+        "vol_ratio": round(vol_ratio, 2),
+        "distance_to_pivot_pct": round(dist_to_pivot, 2),
+        # V6 新增诊断信息
+        "handle_days": handle_days,
+        "r_squared": quality["r_squared"],
+        "dwell_ratio": quality["dwell_ratio"],
+        "avg_volatility": quality["avg_volatility"],
+        "bottom_cv": round(quality["segment"]["bottom_cv"], 2),
+        "has_vol_contraction": quality["has_contraction"],
+        "vol_contraction_ranges": quality["vol_contraction"]["segment_ranges"],
+        "left_slope": round(quality["segment"]["left_slope_pct_day"], 4),
+        "right_slope": round(quality["segment"]["right_slope_pct_day"], 4),
+    }
+
+
+# =============================================================================
+#  扫描入口
+# =============================================================================
+
+def scan_ndx100_vcp(
+    min_base_days: int = 30,
+    max_base_days: int = 180,
+) -> list[dict]:
+    """扫描纳指100中呈现 VCP / 杯柄 / 平底形态的股票。"""
+
+    stock_data = load_all_ndx100_data()
+    if not stock_data:
+        logger.error("本地无数据！请先运行 update_ndx100_data() 下载数据")
+        return []
+
+    hits: list[dict] = []
+    processed = 0
+
+    _PATTERN_CN = {
+        "Flat Base": "平底形态",
+        "Cup with Handle": "杯柄形态",
+    }
+
+    for ticker, df in stock_data.items():
+        try:
+            if len(df) < 250:
+                continue
+            processed += 1
+            result = screen_vcp(df, min_base_days, max_base_days)
+            if result is not None:
+                ptype = _PATTERN_CN.get(result["pattern"], result["pattern"])
+                logger.success(
+                    f"✅ {ticker} {ptype} "
+                    f"| 基底:{result['base_days']}d(深{result['depths'][0]:.1f}%) "
+                    f"| 手柄:{result['handle_days']}d(深{result['depths'][1]:.1f}%) "
+                    f"| R²={result['r_squared']:.2f} "
+                    f"| 停留={result['dwell_ratio']:.0%} "
+                    f"| 底CV={result['bottom_cv']:.1f}% "
+                    f"| 量缩:{result['vol_ratio']:.0%} "
+                    f"| 波动收缩:{result['has_vol_contraction']}"
+                )
+                hits.append({"ticker": ticker, "df": df, "vcp_info": result})
+        except Exception as e:
+            logger.error(f"{ticker}: VCP V6 检测失败 - {e}")
+            continue
+
+    logger.info(
+        f"VCP V6 扫描完成：{len(stock_data)} 只 → 有效 {processed} 只 → 命中 {len(hits)} 只"
+    )
+    return hits

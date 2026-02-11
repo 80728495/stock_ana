@@ -1,248 +1,277 @@
 """
-上升三角形 / 上升楔形策略模块
+上升收敛形态策略模块 (V3)
+========================
 
-基于极值边界法检测收敛三角形形态。
+检测上升三角形 / 上升楔形。
+三维度筛选:
+  1. 趋势 — Minervini Stage 2
+  2. 几何 — 支撑线(low 连线)显著上升 + 收敛(sup_slope > res_slope)
+           阻力线角度 ≤ 15°，排除上升通道
+  3. 微观 — K 线波幅递缩 + 量能枯竭 (VCP 原理)
 """
 
 import math
 
+import numpy as np
 import pandas as pd
 from loguru import logger
 
 from stock_ana.data_fetcher import load_all_ndx100_data
-from stock_ana.strategy_base import (
-    find_swing_points,
-    line_from_two_points,
-    line_value,
-    count_breaches_and_touches,
-    find_best_boundary_line,
-)
+from stock_ana.strategy_base import check_trend_template, find_swing_points
 
+
+# ─────────── 工具 ───────────
+
+def _fit_line(pts: list[tuple[int, float]]) -> tuple[float, float, float]:
+    """OLS 线性回归。返回 (slope, intercept, r²)。"""
+    if len(pts) < 2:
+        return 0.0, 0.0, 0.0
+    xs = np.array([p[0] for p in pts], dtype=float)
+    ys = np.array([p[1] for p in pts], dtype=float)
+    s, i = np.polyfit(xs, ys, 1)
+    yh = s * xs + i
+    ssr = float(np.sum((ys - yh) ** 2))
+    sst = float(np.sum((ys - ys.mean()) ** 2))
+    r2 = max(0.0, 1.0 - ssr / sst) if sst > 1e-12 else 0.0
+    return float(s), float(i), r2
+
+
+def _lv(s: float, i: float, x: float) -> float:
+    """线上取值。"""
+    return s * x + i
+
+
+# ─────────── 主检测 ───────────
 
 def screen_ascending_triangle(
     df: pd.DataFrame,
-    min_period: int = 40,
+    min_period: int = 25,
     max_period: int = 120,
-    swing_order: int = 5,
-    min_touches: int = 2,
-    min_convergence_angle_deg: float = 3.0,
-    touch_tolerance: float = 0.015,
-    max_breach_ratio: float = 0.05,
 ) -> dict | None:
     """
-    检测上升三角形 / 上升楔形（基于极值边界法，非回归）。
+    检测上升收敛形态（上升三角形 / 上升楔形）。
 
-    算法：
-    1. 在 min_period ~ max_period 窗口中找 swing highs / lows
-    2. 枚举两个极值点组合，构造上轨线和下轨线
-    3. 要求 K 线不穿越边界（穿越比例 < 5%）
-    4. 要求两条边界线收敛，且收敛角度 > min_convergence_angle_deg
-    5. 要求边界线有多次有效触及（测试）
-
-    上升三角形：上轨基本水平，下轨上倾
-    上升楔形：  两线都上倾，下轨斜率 > 上轨斜率
+    维度 1 — 趋势: 必须满足 Minervini Stage 2 模板。
+    维度 2 — 几何:
+        · OLS 回归 swing highs → 阻力线, swing lows → 支撑线
+        · 支撑线上倾 (slope_pct ≥ 0.02 %/day)
+        · 阻力线角度 ≤ 15°，排除上升通道
+        · 收敛比 (1 − end_gap/start_gap) ≥ 15 %
+    维度 3 — 微观 (VCP):
+        · 右 1/3 平均波幅 < 左 1/3（至少缩 10 %）
+        · 右 1/3 成交量 < 左 2/3
 
     Returns:
         形态信息 dict 或 None
     """
+    # ── 维度 1: 趋势 ──
+    if not check_trend_template(df):
+        return None
     if len(df) < min_period:
         return None
 
-    best_result = None
-    best_score = -1
+    best: dict | None = None
+    best_sc = -1.0
 
-    for period in range(min_period, min(max_period + 1, len(df) + 1), 10):
-        window = df.iloc[-period:]
-        highs = window["high"]
-        lows = window["low"]
-        avg_price = window["close"].mean()
+    for period in range(min_period, min(max_period + 1, len(df) + 1), 5):
+        w = df.iloc[-period:]
+        hi = w["high"]
+        lo = w["low"]
+        cl = w["close"]
+        avg = float(cl.mean())
 
-        swing_all = find_swing_points(highs, order=swing_order)
-        swing_all_low = find_swing_points(lows, order=swing_order)
+        # 自适应 swing order
+        order = 3 if period < 40 else 4 if period < 80 else 5
 
-        sw_highs = [(i, v) for i, v, t in swing_all if t == "high"]
-        sw_lows = [(i, v) for i, v, t in swing_all_low if t == "low"]
-
-        if len(sw_highs) < 2 or len(sw_lows) < 2:
+        # ── 维度 2a: swing 极值 ──
+        sw_h = [(i, v) for i, v, t in find_swing_points(hi, order=order) if t == "high"]
+        sw_l = [(i, v) for i, v, t in find_swing_points(lo, order=order) if t == "low"]
+        if len(sw_h) < 3 or len(sw_l) < 3:
             continue
 
-        # 找最佳上轨（连接 swing highs，K 线不穿越上方）
-        upper = find_best_boundary_line(
-            sw_highs, highs, period, is_upper=True,
-            touch_tolerance=touch_tolerance,
-            max_breach_ratio=max_breach_ratio,
-            min_touches=min_touches,
+        # ── 维度 2b: OLS 回归 ──
+        rs, ri, rr2 = _fit_line(sw_h)
+        ss, si, sr2 = _fit_line(sw_l)
+
+        # 支撑线上倾
+        ss_pct = ss / avg * 100
+        if ss_pct < 0.02:
+            continue
+
+        # 阻力线角度 ≤ 15°，排除上升通道
+        res_angle_deg = abs(math.atan(rs / avg * period)) * 180 / math.pi
+        if res_angle_deg > 15:
+            continue
+
+        # 线性拟合质量: 至少一条线 R² ≥ 0.4
+        if max(rr2, sr2) < 0.4:
+            continue
+
+        # ── 维度 2c: 触线测试 ──
+        # swing 点距回归线 ≤ 1.5% 才算有效 touch
+        tol = avg * 0.015
+        res_touches = sum(
+            1 for x, y in sw_h if abs(y - _lv(rs, ri, x)) <= tol
         )
-        if upper is None:
-            continue
-
-        res_slope_tmp = upper[0]
-
-        # 找最佳下轨（优先选择与上轨收敛的线）
-        lower = find_best_boundary_line(
-            sw_lows, lows, period, is_upper=False,
-            touch_tolerance=touch_tolerance,
-            max_breach_ratio=max_breach_ratio,
-            min_touches=min_touches,
-            converge_with_slope=res_slope_tmp,
+        sup_touches = sum(
+            1 for x, y in sw_l if abs(y - _lv(ss, si, x)) <= tol
         )
-        if lower is None:
+        if res_touches < 3 or sup_touches < 3:
             continue
 
-        res_slope, res_intercept, res_touches, res_breaches, res_anchors = upper
-        sup_slope, sup_intercept, sup_touches, sup_breaches, sup_anchors = lower
-
-        # ---- 收敛检查 ----
-        start_gap = abs(line_value(res_slope, res_intercept, 0)
-                        - line_value(sup_slope, sup_intercept, 0))
-        end_gap = abs(line_value(res_slope, res_intercept, period - 1)
-                      - line_value(sup_slope, sup_intercept, period - 1))
-
-        if end_gap >= start_gap:
+        # 收敛
+        if ss <= rs:
             continue
 
-        convergence_ratio = 1 - end_gap / start_gap if start_gap > 0 else 0
-        if convergence_ratio < 0.15:
+        g0 = _lv(rs, ri, 0) - _lv(ss, si, 0)
+        ge = _lv(rs, ri, period - 1) - _lv(ss, si, period - 1)
+        if g0 <= 0 or ge <= 0:
+            continue
+        conv = 1.0 - ge / g0
+        if conv < 0.15:
             continue
 
-        # ---- 角度检查 ----
-        norm = avg_price / period if avg_price > 0 else 1
-        angle_upper = math.atan(res_slope / norm)
-        angle_lower = math.atan(sup_slope / norm)
-        convergence_angle_deg = abs(angle_upper - angle_lower) * 180 / math.pi
-
-        if convergence_angle_deg < min_convergence_angle_deg:
+        # 穿越统计
+        hv = hi.values
+        lv_arr = lo.values
+        rv = sum(1 for x in range(period) if hv[x] > _lv(rs, ri, x) * 1.015)
+        sv = sum(1 for x in range(period) if lv_arr[x] < _lv(ss, si, x) * 0.985)
+        if rv > period * 0.12 or sv > period * 0.12:
             continue
 
-        # ---- 下轨必须上倾 ----
-        sup_slope_pct = (sup_slope / avg_price) * 100 if avg_price > 0 else 0
-        res_slope_pct = (res_slope / avg_price) * 100 if avg_price > 0 else 0
+        # 当前价在通道内
+        cur = float(cl.iloc[-1])
+        re = _lv(rs, ri, period - 1)
+        se = _lv(ss, si, period - 1)
+        ch = re - se
+        if cur < se - ch * 0.05 or cur > re * 1.03:
+            continue
+        pos = (cur - se) / ch if ch > 0 else 0.5
 
-        if sup_slope <= res_slope:
+        # ── 维度 3: VCP 微观 ──
+        seg = period // 3
+        if seg < 5:
             continue
 
-        # ---- 当前价在通道内 ----
-        last_x = period - 1
-        res_val = line_value(res_slope, res_intercept, last_x)
-        sup_val = line_value(sup_slope, sup_intercept, last_x)
-        curr_close = window["close"].iloc[-1]
-        margin = max(end_gap * 0.1, avg_price * 0.005)
-        if curr_close < sup_val - margin or curr_close > res_val + margin:
+        rng = hv - lv_arr
+        sp1 = float(np.mean(rng[:seg]))
+        sp3 = float(np.mean(rng[-seg:]))
+        spr = sp3 / sp1 if sp1 > 0 else 1.0
+        if spr > 0.90:
             continue
 
-        # ---- 判断形态类型（只保留看涨形态） ----
-        if abs(res_slope_pct) < 0.08 and sup_slope_pct > 0.03:
-            pattern_type = "ascending_triangle"
-        elif res_slope_pct > 0 and sup_slope_pct > res_slope_pct:
-            pattern_type = "rising_wedge"
+        vr = 1.0
+        if "volume" in w.columns:
+            vol = w["volume"]
+            if not vol.isna().all() and vol.sum() > 0:
+                vv = vol.values.astype(float)
+                vl = float(np.mean(vv[: seg * 2]))
+                vri = float(np.mean(vv[-seg:]))
+                vr = vri / vl if vl > 0 else 1.0
+
+        # ── 分类 ──
+        rs_pct = rs / avg * 100
+        if abs(rs_pct) < 0.05:
+            pt = "ascending_triangle"
         else:
-            continue
+            pt = "rising_wedge"
 
-        # ---- 收敛时间估算 ----
-        slope_diff = res_slope - sup_slope
-        if abs(slope_diff) > 1e-12:
-            x_convergence = (sup_intercept - res_intercept) / (res_slope - sup_slope)
-            days_to_convergence = x_convergence - (period - 1)
-        else:
-            days_to_convergence = float("inf")
-
-        max_future_days = 20
-        if days_to_convergence <= 0:
-            convergence_status = "converged"
-        elif days_to_convergence <= max_future_days:
-            convergence_status = "imminent"
-        else:
-            continue
-
-        # ---- 评分 ----
-        urgency_bonus = max(0, (max_future_days - days_to_convergence)) * 0.5
-        score = (
-            (res_touches + sup_touches) * 5
-            - (res_breaches + sup_breaches) * 20
-            + convergence_angle_deg * 2
-            + convergence_ratio * 10
-            + urgency_bonus
+        # ── 评分 ──
+        total_touches = res_touches + sup_touches
+        sc = (
+            conv * 20
+            + (1 - spr) * 20
+            + max(0, 1 - vr) * 10
+            + pos * 10
+            + min(rr2, sr2) * 10
+            + total_touches * 3
+            - (rv + sv) * 1.0
         )
 
-        if score > best_score:
-            best_score = score
-            window_start = len(df) - period
-            best_result = {
-                "pattern": pattern_type,
+        if sc > best_sc:
+            best_sc = sc
+            ws = len(df) - period
+            sd = rs - ss
+            dtc = (si - ri) / sd - (period - 1) if abs(sd) > 1e-12 else float("inf")
+            norm = avg / period if avg > 0 else 1.0
+            angle = abs(math.atan(ss / norm) - math.atan(rs / norm)) * 180 / math.pi
+
+            best = {
+                "pattern": pt,
                 "period": period,
-                "window_start": window_start,
-                "convergence_angle_deg": convergence_angle_deg,
-                "convergence_ratio": convergence_ratio,
-                "days_to_convergence": round(days_to_convergence, 1),
-                "convergence_status": convergence_status,
+                "window_start": ws,
+                "convergence_ratio": round(conv, 3),
+                "convergence_angle_deg": round(angle, 1),
+                "days_to_convergence": round(dtc, 1),
+                "convergence_status": (
+                    "converged" if dtc <= 0
+                    else "imminent" if dtc <= 20
+                    else "future"
+                ),
+                "spread_contraction": round(spr, 3),
+                "vol_contraction": round(vr, 3),
+                "position_in_channel": round(pos, 3),
+                "score": round(sc, 1),
                 "resistance": {
-                    "slope": res_slope, "intercept": res_intercept,
-                    "touches": res_touches, "breaches": res_breaches,
-                    "anchors": [(window_start + x, y) for x, y in res_anchors],
+                    "slope": rs, "intercept": ri,
+                    "r_squared": round(rr2, 3),
+                    "touches": res_touches, "breaches": rv,
+                    "total_swings": len(sw_h),
+                    "anchors": [(ws + x, y) for x, y in sw_h],
                 },
                 "support": {
-                    "slope": sup_slope, "intercept": sup_intercept,
-                    "touches": sup_touches, "breaches": sup_breaches,
-                    "anchors": [(window_start + x, y) for x, y in sup_anchors],
+                    "slope": ss, "intercept": si,
+                    "r_squared": round(sr2, 3),
+                    "touches": sup_touches, "breaches": sv,
+                    "total_swings": len(sw_l),
+                    "anchors": [(ws + x, y) for x, y in sw_l],
                 },
-                "swing_highs": [(window_start + x, y) for x, y in sw_highs],
-                "swing_lows": [(window_start + x, y) for x, y in sw_lows],
+                "swing_highs": [(ws + x, y) for x, y in sw_h],
+                "swing_lows": [(ws + x, y) for x, y in sw_l],
             }
 
-    return best_result
+    return best
 
 
 def scan_ndx100_ascending_triangle(
-    min_period: int = 40,
+    min_period: int = 25,
     max_period: int = 120,
 ) -> list[dict]:
-    """
-    扫描纳指100中呈现上升三角形 / 上升楔形的股票。
-    """
+    """扫描纳指100中呈现上升收敛形态的股票。"""
     stock_data = load_all_ndx100_data()
-
     if not stock_data:
         logger.error("本地无数据！请先运行 update_ndx100_data() 下载数据")
         return []
+
+    _CN = {
+        "ascending_triangle": "上升三角形",
+        "rising_wedge": "上升楔形",
+    }
 
     hits: list[dict] = []
     processed = 0
 
     for ticker, df in stock_data.items():
         try:
-            if len(df) < min_period:
+            if len(df) < 260:
                 continue
-
             processed += 1
-            result = screen_ascending_triangle(
-                df, min_period=min_period, max_period=max_period,
-            )
+            result = screen_ascending_triangle(df, min_period, max_period)
             if result is not None:
-                _PATTERN_CN = {
-                    "ascending_triangle": "上升三角形",
-                    "rising_wedge": "上升楔形",
-                    "symmetrical_triangle": "对称三角形",
-                    "descending_wedge": "下降楔形",
-                }
-                ptype = _PATTERN_CN.get(result["pattern"], result["pattern"])
-                status_cn = "已收敛" if result["convergence_status"] == "converged" else "即将收敛"
-                dtc = result["days_to_convergence"]
-                dtc_str = f"{dtc:.0f}日后" if dtc > 0 else "已过"
+                ptype = _CN.get(result["pattern"], result["pattern"])
                 logger.success(
-                    f"✅ {ticker} 呈现{ptype}【{status_cn}】"
-                    f"（周期 {result['period']} 日，"
-                    f"收敛点 {dtc_str}，"
-                    f"角度 {result['convergence_angle_deg']:.1f}°，"
-                    f"上轨测试 {result['resistance']['touches']} 次，"
-                    f"下轨测试 {result['support']['touches']} 次）"
+                    f"✅ {ticker} {ptype} "
+                    f"({result['period']}d, "
+                    f"收敛{result['convergence_ratio']:.0%}, "
+                    f"波幅缩{1 - result['spread_contraction']:.0%}, "
+                    f"量缩{1 - result['vol_contraction']:.0%})"
                 )
                 hits.append({"ticker": ticker, "df": df, "pattern_info": result})
         except Exception as e:
-            logger.error(f"{ticker}: 处理失败 - {e}")
-            continue
+            logger.error(f"{ticker}: {e}")
 
     logger.info(
-        f"上升三角形扫描完成：本地共 {len(stock_data)} 只股票，"
-        f"有效处理 {processed} 只，{len(hits)} 只呈现形态"
+        f"上升收敛扫描完成：{len(stock_data)} 只股票，"
+        f"有效 {processed} 只，{len(hits)} 只呈现形态"
     )
     return hits
