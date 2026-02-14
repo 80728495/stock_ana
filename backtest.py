@@ -20,23 +20,48 @@ from stock_ana.data_fetcher import load_all_ndx100_data
 from stock_ana.indicators import add_vegas_channel
 from stock_ana.screener import (
     screen_ascending_triangle,
+    screen_ascending_triangle_kde,
+    screen_parallel_channel,
+    screen_rising_wedge,
     screen_vegas_channel_touch,
     screen_vcp,
+)
+from stock_ana.strategy_rs import (
+    screen_relative_strength,
+    screen_rs_trap,
+    compute_rs_rank_at_cutoff,
+    _load_qqq,
+    update_qqq_data,
+    compute_rs_line,
 )
 
 # ──────── 常量 ────────
 FORWARD_DAYS = [5, 10, 21]  # 持有 1 周 / 2 周 / 1 个月
 STRATEGY_NAMES = {
     "vegas": "Vegas 通道回弹",
-    "triangle": "上升三角形",
+    "triangle": "上升三角形(OLS)",
+    "triangle_kde": "上升三角形(KDE)",
+    "parallel": "上升平行通道",
+    "wedge": "上升楔形",
     "vcp": "VCP 波动率收缩",
+    "rs_strict": "RS加速(严格)",
+    "rs_loose": "RS加速(宽松)",
+    "rs_trap_strict": "RS陷阱预警(严格)",
+    "rs_trap_loose": "RS陷阱预警(宽松)",
 }
 
 # 图表标题用英文避免字体问题
 STRATEGY_NAMES_EN = {
     "vegas": "Vegas Channel Touchback",
-    "triangle": "Ascending Triangle",
+    "triangle": "Ascending Triangle (OLS)",
+    "triangle_kde": "Ascending Triangle (KDE)",
+    "parallel": "Parallel Channel",
+    "wedge": "Rising Wedge",
     "vcp": "VCP (Volatility Contraction)",
+    "rs_strict": "RS Acceleration (Strict)",
+    "rs_loose": "RS Acceleration (Loose)",
+    "rs_trap_strict": "RS Trap Warning (Strict)",
+    "rs_trap_loose": "RS Trap Warning (Loose)",
 }
 
 
@@ -105,15 +130,33 @@ def _compute_forward_returns(
     return result
 
 
-def _screen_one(strategy: str, df: pd.DataFrame) -> dict | None:
+def _screen_one(strategy: str, df: pd.DataFrame, **kwargs) -> dict | None:
     """统一调用筛选函数，所有策略统一返回 dict | None。"""
     if strategy == "vegas":
         df = add_vegas_channel(df.copy())
         return screen_vegas_channel_touch(df, lookback_days=5)
     elif strategy == "triangle":
         return screen_ascending_triangle(df)
+    elif strategy == "triangle_kde":
+        return screen_ascending_triangle_kde(df)
+    elif strategy == "parallel":
+        return screen_parallel_channel(df)
+    elif strategy == "wedge":
+        return screen_rising_wedge(df)
     elif strategy == "vcp":
         return screen_vcp(df)
+    elif strategy in ("rs_strict", "rs_loose"):
+        df_market = kwargs.get("df_market")
+        rs_rank = kwargs.get("rs_rank")
+        if df_market is None or rs_rank is None:
+            return None
+        return screen_relative_strength(df, df_market, rs_rank, variant=strategy)
+    elif strategy in ("rs_trap_strict", "rs_trap_loose"):
+        df_market = kwargs.get("df_market")
+        rs_rank = kwargs.get("rs_rank")
+        if df_market is None or rs_rank is None:
+            return None
+        return screen_rs_trap(df, df_market, rs_rank, variant=strategy)
     return None
 
 
@@ -121,6 +164,7 @@ def backtest_single_cutoff(
     strategy: str,
     stock_data: dict[str, pd.DataFrame],
     cutoff_idx: int,
+    **kwargs,
 ) -> list[dict]:
     """
     在单个截止点对所有股票运行策略筛选，计算前瞻收益。
@@ -142,13 +186,27 @@ def backtest_single_cutoff(
         # 各策略的最低数据要求
         if strategy == "vcp" and len(df_screen) < 200:
             continue
-        if strategy == "triangle" and len(df_screen) < 60:
+        if strategy in ("triangle", "triangle_kde") and len(df_screen) < 60:
+            continue
+        if strategy in ("parallel", "wedge") and len(df_screen) < 60:
             continue
         if strategy == "vegas" and len(df_screen) < 170:
             continue
+        if strategy in ("rs_strict", "rs_loose", "rs_trap_strict", "rs_trap_loose") and len(df_screen) < 252:
+            continue
 
         try:
-            result = _screen_one(strategy, df_screen)
+            # RS 策略需要额外参数
+            if strategy in ("rs_strict", "rs_loose", "rs_trap_strict", "rs_trap_loose"):
+                df_market = kwargs.get("df_market")
+                rs_ranks = kwargs.get("rs_ranks", {})
+                result = _screen_one(
+                    strategy, df_screen,
+                    df_market=df_market.iloc[:cutoff_idx] if df_market is not None else None,
+                    rs_rank=rs_ranks.get(ticker, -1),
+                )
+            else:
+                result = _screen_one(strategy, df_screen)
         except Exception:
             continue
 
@@ -178,10 +236,43 @@ def backtest_single_cutoff(
                 "period": result.get("period"),
                 "window_start": result.get("window_start"),
             }
+        elif strategy in ("parallel", "wedge"):
+            signal_info = {
+                "pattern": result.get("pattern", ""),
+                "convergence": result.get("convergence_ratio", 0),
+                "resistance": result.get("resistance"),
+                "support": result.get("support"),
+                "period": result.get("period"),
+                "window_start": result.get("window_start"),
+            }
         elif strategy == "vegas":
             signal_info = {
                 "peak_price": result.get("peak_price"),
                 "above_ratio": result.get("above_ratio"),
+            }
+        elif strategy in ("rs_strict", "rs_loose"):
+            signal_info = {
+                "rs_rank": result.get("rs_rank"),
+                "rs_chg_21d": result.get("rs_chg_21d"),
+                "rs_chg_63d": result.get("rs_chg_63d"),
+                "acceleration": result.get("acceleration"),
+                "rs_below_days": result.get("rs_below_days"),
+                "atr_ratio": result.get("atr_ratio"),
+                "price_vs_52w_high": result.get("price_vs_52w_high"),
+                "variant": result.get("variant"),
+            }
+        elif strategy in ("rs_trap_strict", "rs_trap_loose"):
+            signal_info = {
+                "rs_rank": result.get("rs_rank"),
+                "mkt_ret": result.get("mkt_ret"),
+                "stk_ret": result.get("stk_ret"),
+                "outperform": result.get("outperform"),
+                "rs_chg_63d": result.get("rs_chg_63d"),
+                "rs_chg_short": result.get("rs_chg_short"),
+                "rs_vs_ema": result.get("rs_vs_ema"),
+                "price_below_sma200": result.get("price_below_sma200"),
+                "death_cross": result.get("death_cross"),
+                "variant": result.get("variant"),
             }
 
         # 计算前瞻收益（从截止日的下一天开始算）
@@ -236,6 +327,7 @@ def compute_benchmark(
                 "median_return_pct": round(float(np.median(vals)), 2),
             }
     return benchmark
+
 
 
 # ═══════════════════════════════════════════════════════════
@@ -368,6 +460,34 @@ def _build_vcp_overlays(
     return overlays
 
 
+def _build_rs_overlays(
+    df_view: pd.DataFrame,
+    full_df: pd.DataFrame,
+    view_start: int,
+    view_end: int,
+    df_market: pd.DataFrame | None = None,
+) -> list:
+    """为 RS 策略生成 SMA200 辅助线。RS Line 在标题中显示关键数值。"""
+    overlays = []
+
+    # SMA200
+    closes_full = full_df["close"]
+    sma200 = closes_full.rolling(200).mean().iloc[view_start:view_end]
+    if not sma200.isna().all():
+        overlays.append(
+            mpf.make_addplot(sma200, color="purple", width=1.0, linestyle="-")
+        )
+
+    # SMA50
+    sma50 = closes_full.rolling(50).mean().iloc[view_start:view_end]
+    if not sma50.isna().all():
+        overlays.append(
+            mpf.make_addplot(sma50, color="blue", width=0.8, linestyle="-")
+        )
+
+    return overlays
+
+
 def plot_backtest_signals(
     trades: list[dict],
     stock_data: dict[str, pd.DataFrame],
@@ -461,7 +581,7 @@ def plot_backtest_signals(
                 add_plots.extend(
                     _build_vegas_overlays(df_view, full_df, view_start, view_end)
                 )
-            elif strategy == "triangle":
+            elif strategy in ("triangle", "triangle_kde", "parallel", "wedge"):
                 add_plots.extend(
                     _build_triangle_overlays(
                         df_view, signal_info,
@@ -473,6 +593,12 @@ def plot_backtest_signals(
                     _build_vcp_overlays(
                         df_view, signal_info,
                         full_df, view_start, view_end,
+                    )
+                )
+            elif strategy in ("rs_strict", "rs_loose", "rs_trap_strict", "rs_trap_loose"):
+                add_plots.extend(
+                    _build_rs_overlays(
+                        df_view, full_df, view_start, view_end,
                     )
                 )
         except Exception as e:
@@ -512,6 +638,28 @@ def plot_backtest_signals(
                 ret_text.append(f"{label}:{r:+.1f}%")
         ret_str = "  ".join(ret_text)
         name_en = STRATEGY_NAMES_EN.get(strategy, strategy)
+        # OLS 类策略：标题显示具体形态名
+        if strategy in ("triangle", "triangle_kde", "parallel", "wedge"):
+            pat = signal_info.get("pattern", "")
+            method = signal_info.get("method", "ols")
+            suffix = "(KDE)" if method == "kde" else ""
+            _pat_names = {
+                "ascending_triangle": "Ascending Triangle",
+                "parallel_channel": "Parallel Channel",
+                "rising_wedge": "Rising Wedge",
+            }
+            pat_label = _pat_names.get(pat, pat)
+            name_en = f"{pat_label} {suffix}".strip() if suffix else pat_label
+        # RS 策略：标题追加 RS Rank 和加速度信息
+        if strategy in ("rs_strict", "rs_loose"):
+            rs_r = signal_info.get("rs_rank", 0)
+            accel = signal_info.get("acceleration", 0)
+            name_en = f"{name_en}  RS:{rs_r:.0f}%  Accel:{accel:+.1f}%"
+        elif strategy in ("rs_trap_strict", "rs_trap_loose"):
+            rs_r = signal_info.get("rs_rank", 0)
+            outperf = signal_info.get("outperform", 0)
+            rs63 = signal_info.get("rs_chg_63d", 0)
+            name_en = f"{name_en}  RS:{rs_r:.0f}%  Out:{outperf:+.1f}ppt  RS63d:{rs63:+.1f}%"
         title = f"{ticker} - {name_en}  |  {ret_str}"
 
         style = mpf.make_mpf_style(base_mpf_style="charles", rc={"font.size": 9})
@@ -534,7 +682,12 @@ def plot_backtest_signals(
                 ),
             }
 
-        save_path = strat_dir / f"{ticker}_{strategy}.png"
+        # OLS 类策略：文件名含具体形态类型
+        if strategy in ("triangle", "triangle_kde", "parallel", "wedge"):
+            pat = signal_info.get("pattern", strategy)
+            save_path = strat_dir / f"{ticker}_{pat}.png"
+        else:
+            save_path = strat_dir / f"{ticker}_{strategy}.png"
 
         mpf.plot(
             df_view,
@@ -842,8 +995,8 @@ def run_backtest(
                 f"  基准 {label}: 平均 {avg_benchmark[key]['avg_return_pct']:+.2f}%"
             )
 
-    # ── 运行策略（triangle 暂时屏蔽） ──
-    strategies = ["vegas", "vcp"]
+    # ── 运行策略 ──
+    strategies = ["vegas", "triangle", "parallel", "wedge", "vcp"]
     all_summaries = {}
 
     for strategy in strategies:
@@ -883,6 +1036,90 @@ def run_backtest(
             plot_backtest_signals(
                 deduped_trades, stock_data, strategy, chart_dir,
             )
+
+    # ── RS 加速策略（需要 QQQ 数据 + 跨股排名）──
+    df_market = _load_qqq()
+    if df_market is not None:
+        for rs_variant in ["rs_strict", "rs_loose"]:
+            name = STRATEGY_NAMES[rs_variant]
+            logger.info(f"回测策略: {name} ...")
+            all_trades = []
+            signal_counts = []
+
+            for idx in cutoff_indices:
+                # 每个截止点需先计算 RS 排名
+                rs_ranks = compute_rs_rank_at_cutoff(stock_data, df_market, idx)
+                trades = backtest_single_cutoff(
+                    rs_variant, stock_data, idx,
+                    df_market=df_market, rs_ranks=rs_ranks,
+                )
+                signal_counts.append(len(trades))
+                all_trades.extend(trades)
+
+            total_signals = sum(signal_counts)
+            active_cutoffs = sum(1 for c in signal_counts if c > 0)
+            logger.info(
+                f"  汇总: {total_signals} 个信号, "
+                f"在 {active_cutoffs}/{len(cutoff_indices)} 个截止点触发"
+            )
+
+            deduped_trades = _deduplicate_trades(all_trades, min_gap_days=15)
+            if len(deduped_trades) < len(all_trades):
+                logger.info(
+                    f"  去重: {len(all_trades)} -> {len(deduped_trades)} "
+                    f"(合并 {15} 天内同股票重复信号)"
+                )
+
+            summary = summarize_trades(deduped_trades, avg_benchmark)
+            all_summaries[rs_variant] = summary
+            print_report(rs_variant, summary, deduped_trades)
+
+            if deduped_trades:
+                chart_dir = Path("data") / "backtest_charts"
+                plot_backtest_signals(
+                    deduped_trades, stock_data, rs_variant, chart_dir,
+                )
+        # ── RS 陷阱预警策略 ──
+        for trap_variant in ["rs_trap_strict", "rs_trap_loose"]:
+            name = STRATEGY_NAMES[trap_variant]
+            logger.info(f"回测策略: {name} ...")
+            all_trades = []
+            signal_counts = []
+
+            for idx in cutoff_indices:
+                rs_ranks = compute_rs_rank_at_cutoff(stock_data, df_market, idx)
+                trades = backtest_single_cutoff(
+                    trap_variant, stock_data, idx,
+                    df_market=df_market, rs_ranks=rs_ranks,
+                )
+                signal_counts.append(len(trades))
+                all_trades.extend(trades)
+
+            total_signals = sum(signal_counts)
+            active_cutoffs = sum(1 for c in signal_counts if c > 0)
+            logger.info(
+                f"  汇总: {total_signals} 个信号, "
+                f"在 {active_cutoffs}/{len(cutoff_indices)} 个截止点触发"
+            )
+
+            deduped_trades = _deduplicate_trades(all_trades, min_gap_days=15)
+            if len(deduped_trades) < len(all_trades):
+                logger.info(
+                    f"  去重: {len(all_trades)} -> {len(deduped_trades)} "
+                    f"(合并 {15} 天内同股票重复信号)"
+                )
+
+            summary = summarize_trades(deduped_trades, avg_benchmark)
+            all_summaries[trap_variant] = summary
+            print_report(trap_variant, summary, deduped_trades)
+
+            if deduped_trades:
+                chart_dir = Path("data") / "backtest_charts"
+                plot_backtest_signals(
+                    deduped_trades, stock_data, trap_variant, chart_dir,
+                )
+    else:
+        logger.warning("QQQ 数据不存在，跳过 RS 策略回测。请运行 update_qqq_data() 下载数据")
 
     # ── 对比总结 ──
     print_cross_strategy_comparison(all_summaries)

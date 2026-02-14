@@ -23,7 +23,7 @@ def check_trend_template(df: pd.DataFrame) -> bool:
     5. 股价较 52周低点至少上涨 25%
     6. 股价处于 52周高点的 25% 范围内（靠近新高）
     """
-    if len(df) < 260:
+    if len(df) < 200:
         return False
 
     curr = df.iloc[-1]
@@ -37,9 +37,10 @@ def check_trend_template(df: pd.DataFrame) -> bool:
     # 计算 200日均线 趋势 (比较当前与 20 天前的 MA200)
     ma_200_prev = df["close"].rolling(200).mean().iloc[-20]
 
-    # 52周高低点
-    high_52w = df["high"].iloc[-260:].max()
-    low_52w = df["low"].iloc[-260:].min()
+    # 52周高低点（数据不足 260 日时用可用数据）
+    lookback_52w = min(260, len(df))
+    high_52w = df["high"].iloc[-lookback_52w:].max()
+    low_52w = df["low"].iloc[-lookback_52w:].min()
 
     # --- 核心判定逻辑 ---
 

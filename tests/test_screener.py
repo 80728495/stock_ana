@@ -467,3 +467,89 @@ def test_scan_vcp():
     if vcp_hits:
         plot_vcp_results(vcp_hits)
         print(f"图表已保存到 {_OUTPUT_DIR}")
+
+
+# ══════════════════════════════════════════════════════════════
+# AI 代码审查测试
+# ══════════════════════════════════════════════════════════════
+
+def test_step9_ai_review_triangle_gemini():
+    """
+    步骤九A：使用 Gemini 2.5 Flash 审查三角形策略
+    前提：先运行回测（python backtest.py）生成 data/backtest_charts/triangle/ 图表
+    运行：pytest tests/test_screener.py::test_step9_ai_review_triangle_gemini -s
+    """
+    from stock_ana.ai_code_reviewer import AICodeReviewer
+
+    reviewer = AICodeReviewer(backend="gemini", model="gemini-2.5-flash")
+    result = reviewer.review_triangle_strategy(
+        backtest_summary=(
+            "Triangle 策略 (3年 NDX100 滚动回测):\n"
+            "  - 143 个信号, 55% 胜率\n"
+            "  - 21日平均收益 +0.67%, Alpha -0.76%\n"
+            "  - 最大盈 +26.18%, 最大亏 -22.66%"
+        ),
+        max_images=3,
+    )
+    print(f"\n{'='*60}")
+    print("Gemini AI 审查意见 (三角形策略)")
+    print(f"{'='*60}")
+    print(result)
+    print(f"{'='*60}")
+
+
+def test_step9_ai_review_triangle_claude():
+    """
+    步骤九B：使用 Claude Opus 4.6 (via Antigravity) 审查三角形策略
+    前提：
+      1. 先运行回测生成图表
+      2. 启动 Antigravity Manager 并在 API Proxy 页面开启服务
+    运行：pytest tests/test_screener.py::test_step9_ai_review_triangle_claude -s
+    """
+    from stock_ana.ai_code_reviewer import AICodeReviewer
+
+    reviewer = AICodeReviewer(backend="antigravity")
+
+    # 先检查代理是否可用
+    if not reviewer.check_antigravity():
+        print("⚠️  Antigravity 代理不可用，请先启动 Antigravity Manager")
+        return
+
+    result = reviewer.review_triangle_strategy(
+        backtest_summary=(
+            "Triangle 策略 (3年 NDX100 滚动回测):\n"
+            "  - 143 个信号, 55% 胜率\n"
+            "  - 21日平均收益 +0.67%, Alpha -0.76%\n"
+            "  - 最大盈 +26.18%, 最大亏 -22.66%"
+        ),
+        max_images=3,
+    )
+    print(f"\n{'='*60}")
+    print("Claude Opus 4.6 审查意见 (三角形策略)")
+    print(f"{'='*60}")
+    print(result)
+    print(f"{'='*60}")
+
+
+def test_step9_ai_review_vcp():
+    """
+    步骤九C：使用 Gemini 审查 VCP 策略
+    运行：pytest tests/test_screener.py::test_step9_ai_review_vcp -s
+    """
+    from stock_ana.ai_code_reviewer import AICodeReviewer
+
+    reviewer = AICodeReviewer(backend="gemini", model="gemini-2.5-flash")
+    result = reviewer.review_vcp_strategy(
+        backtest_summary=(
+            "VCP 策略 (3年 NDX100 滚动回测):\n"
+            "  - 11 个信号, 73% 胜率\n"
+            "  - 21日平均收益 +1.97%, Alpha +0.54%\n"
+            "  - 信号数量较少，需要更多触发机会"
+        ),
+        max_images=3,
+    )
+    print(f"\n{'='*60}")
+    print("Gemini AI 审查意见 (VCP 策略)")
+    print(f"{'='*60}")
+    print(result)
+    print(f"{'='*60}")
