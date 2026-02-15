@@ -15,6 +15,10 @@ RS 定义：
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -29,6 +33,14 @@ from stock_ana.data_fetcher_hk import (
 # 输出目录
 HK_RS_DIR = OUTPUT_DIR / "hk_rs"
 HK_RS_DIR.mkdir(parents=True, exist_ok=True)
+
+# RS 每日序列存储目录
+HK_RS_SERIES_DIR = OUTPUT_DIR / "hk_rs_series"
+HK_RS_SERIES_DIR.mkdir(parents=True, exist_ok=True)
+
+# RS 图表存储目录
+HK_RS_CHARTS_DIR = OUTPUT_DIR / "hk_rs_charts"
+HK_RS_CHARTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ─────────────────── RS 计算 ───────────────────
@@ -334,3 +346,272 @@ def _fmt_pct(val) -> str:
     if pd.isna(val):
         return "N/A"
     return f"{val:+.2f}%"
+
+
+# ─────────────────── RS 每日序列 & 图表 ───────────────────
+
+
+def _prepare_benchmark_groups() -> tuple[
+    dict[str, str],           # code_bench_map
+    dict[str, pd.DataFrame],  # bench_df_map
+    dict[str, str],           # code_name_map
+    dict[str, pd.DataFrame],  # all_stock_data
+]:
+    """准备基准分组和数据加载（公共逻辑提取）"""
+    hk_list = load_hk_list()
+
+    df_hsi = load_hk_local("800000")
+    df_hstech = load_hk_local("800700")
+    if df_hsi is None or df_hstech is None:
+        raise RuntimeError("指数数据缺失，请先运行 update_hk_data()")
+
+    code_bench_map: dict[str, str] = {}
+    for _, row in hk_list.iterrows():
+        code = row["code"]
+        if code in _INDEX_MAP:
+            continue
+        code_bench_map[code] = "800700" if row["hstech"] else "800000"
+
+    bench_df_map = {"800000": df_hsi, "800700": df_hstech}
+    code_name_map = dict(zip(hk_list["code"], hk_list["name"]))
+
+    all_stock_data: dict[str, pd.DataFrame] = {}
+    for code in code_bench_map:
+        df = load_hk_local(code)
+        if df is not None and not df.empty:
+            all_stock_data[code] = df
+
+    return code_bench_map, bench_df_map, code_name_map, all_stock_data
+
+
+def compute_all_rs_series() -> dict[str, pd.DataFrame]:
+    """
+    计算每只港股标的的完整每日 RS 序列。
+
+    Returns:
+        {code: DataFrame} 其中 DataFrame columns = [rs_line, rs_ema21, close, bench_close]
+        index = date
+    """
+    code_bench_map, bench_df_map, code_name_map, all_stock_data = _prepare_benchmark_groups()
+
+    result: dict[str, pd.DataFrame] = {}
+
+    for code, df_stock in all_stock_data.items():
+        bench_code = code_bench_map.get(code)
+        if bench_code is None:
+            continue
+        df_bench = bench_df_map[bench_code]
+
+        rs_line = _compute_rs_line(df_stock, df_bench)
+        if rs_line is None or len(rs_line) < 21:
+            continue
+
+        rs_ema21 = rs_line.ewm(span=21).mean()
+
+        # 对齐 close 和 bench_close
+        common_idx = rs_line.index
+        stock_close = df_stock.loc[common_idx, "close"]
+        bench_close = df_bench.loc[common_idx, "close"]
+
+        rs_df = pd.DataFrame({
+            "rs_line": rs_line,
+            "rs_ema21": rs_ema21,
+            "close": stock_close,
+            "bench_close": bench_close,
+        })
+        rs_df.index.name = "date"
+        result[code] = rs_df
+
+    logger.info(f"RS 序列计算完成：{len(result)} 只标的")
+    return result
+
+
+def save_rs_series(rs_data: dict[str, pd.DataFrame] | None = None) -> Path:
+    """
+    将每只股票的每日 RS 序列保存为 CSV 文件。
+
+    文件保存在 data/output/hk_rs_series/ 目录下，
+    每只股票一个文件：{code}_{name}.csv
+
+    Returns:
+        输出目录路径
+    """
+    if rs_data is None:
+        rs_data = compute_all_rs_series()
+
+    _, _, code_name_map, _ = _prepare_benchmark_groups()
+    code_bench_map, _, _, _ = _prepare_benchmark_groups()
+    bench_name_map = {"800000": "恒生指数", "800700": "恒生科技"}
+
+    for code, rs_df in rs_data.items():
+        name = code_name_map.get(code, "")
+        bench = bench_name_map.get(code_bench_map.get(code, ""), "")
+        safe_name = name.replace("/", "_").replace(" ", "")
+        filename = f"{code}_{safe_name}.csv"
+
+        # 保存时添加元信息作为注释行
+        filepath = HK_RS_SERIES_DIR / filename
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(f"# {code} {name} | 基准: {bench}\n")
+            f.write(f"# RS Line: 个股收盘价/基准收盘价, 归一化首日=100, 上升=跑赢大盘\n")
+            f.write(f"# RS EMA21: RS Line的21日指数均线\n")
+            rs_df.round(4).to_csv(f)
+
+    logger.info(f"RS 序列已保存：{len(rs_data)} 个文件 → {HK_RS_SERIES_DIR}")
+    return HK_RS_SERIES_DIR
+
+
+def plot_rs_charts(rs_data: dict[str, pd.DataFrame] | None = None,
+                   days: int = 0) -> Path:
+    """
+    为每只股票绘制 RS Line 历史趋势图并保存为 PNG。
+
+    图表包含：
+    - 上半部分：股价走势
+    - 下半部分：RS Line + EMA21，背景色标注强弱区间
+
+    Args:
+        rs_data: 预计算的 RS 数据，为 None 则自动计算
+        days: 显示最近 N 天的数据，0 = 全部
+
+    Returns:
+        图表输出目录路径
+    """
+    if rs_data is None:
+        rs_data = compute_all_rs_series()
+
+    code_bench_map, _, code_name_map, _ = _prepare_benchmark_groups()
+    bench_name_map = {"800000": "恒生指数", "800700": "恒生科技"}
+
+    # 设置中文字体
+    plt.rcParams["font.sans-serif"] = ["Arial Unicode MS", "PingFang SC",
+                                        "Heiti SC", "SimHei", "sans-serif"]
+    plt.rcParams["axes.unicode_minus"] = False
+
+    total = len(rs_data)
+    for i, (code, rs_df) in enumerate(rs_data.items(), 1):
+        name = code_name_map.get(code, "")
+        bench = bench_name_map.get(code_bench_map.get(code, ""), "")
+        safe_name = name.replace("/", "_").replace(" ", "")
+
+        plot_df = rs_df.iloc[-days:] if days > 0 else rs_df
+
+        try:
+            _draw_single_rs_chart(code, name, bench, plot_df)
+            if i % 10 == 0 or i == total:
+                logger.info(f"[{i}/{total}] RS 图表生成中 ...")
+        except Exception as e:
+            logger.error(f"{code} {name} 图表生成失败: {e}")
+
+    plt.close("all")
+    logger.info(f"RS 图表已保存：{total} 张 → {HK_RS_CHARTS_DIR}")
+    return HK_RS_CHARTS_DIR
+
+
+def _draw_single_rs_chart(code: str, name: str, bench: str,
+                          rs_df: pd.DataFrame) -> None:
+    """
+    绘制单只股票的 RS 趋势图（双面板：价格 + RS）。
+    """
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8),
+                                    gridspec_kw={"height_ratios": [1, 1.2]},
+                                    sharex=True)
+    fig.subplots_adjust(hspace=0.08)
+
+    dates = rs_df.index
+    close = rs_df["close"]
+    rs_line = rs_df["rs_line"]
+    rs_ema21 = rs_df["rs_ema21"]
+
+    # ── 上面板：股价 ──
+    ax1.plot(dates, close, color="#2196F3", linewidth=1.2, label="收盘价")
+    # 添加均线参考
+    if len(close) >= 50:
+        ma50 = close.rolling(50).mean()
+        ax1.plot(dates, ma50, color="#FF9800", linewidth=0.8, alpha=0.7, label="MA50")
+    if len(close) >= 200:
+        ma200 = close.rolling(200).mean()
+        ax1.plot(dates, ma200, color="#9C27B0", linewidth=0.8, alpha=0.7, label="MA200")
+
+    ax1.set_ylabel("价格", fontsize=11)
+    ax1.legend(loc="upper left", fontsize=8)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_title(f"{code} {name}  |  基准: {bench}", fontsize=14, fontweight="bold")
+
+    # ── 下面板：RS Line ──
+    # 背景色：RS > 100 浅绿（跑赢），< 100 浅红（跑输）
+    ax2.axhline(y=100, color="gray", linewidth=0.8, linestyle="--", alpha=0.5)
+    rs_min, rs_max = rs_line.min(), rs_line.max()
+    y_lo = max(rs_min - 5, 0)
+    y_hi = rs_max + 5
+    ax2.fill_between(dates, 100, y_hi, alpha=0.06, color="green")
+    ax2.fill_between(dates, y_lo, 100, alpha=0.06, color="red")
+
+    ax2.plot(dates, rs_line, color="#E91E63", linewidth=1.4, label="RS Line")
+    ax2.plot(dates, rs_ema21, color="#4CAF50", linewidth=1.0,
+             linestyle="--", alpha=0.8, label="RS EMA21")
+
+    # 标注最新值
+    last_rs = rs_line.iloc[-1]
+    last_ema = rs_ema21.iloc[-1]
+    ax2.annotate(f"{last_rs:.1f}",
+                 xy=(dates[-1], last_rs),
+                 xytext=(10, 0), textcoords="offset points",
+                 fontsize=9, color="#E91E63", fontweight="bold")
+
+    # RS 趋势判断标注
+    trend_label = "↑ 跑赢大盘" if last_rs > 100 else "↓ 跑输大盘"
+    trend_color = "#4CAF50" if last_rs > 100 else "#F44336"
+    ema_status = "RS > EMA21 ↑" if last_rs > last_ema else "RS < EMA21 ↓"
+    ax2.text(0.02, 0.95, f"{trend_label}  |  {ema_status}",
+             transform=ax2.transAxes, fontsize=10,
+             color=trend_color, fontweight="bold",
+             verticalalignment="top",
+             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+
+    ax2.set_ylabel("RS Line", fontsize=11)
+    ax2.set_xlabel("日期", fontsize=11)
+    ax2.legend(loc="upper right", fontsize=8)
+    ax2.grid(True, alpha=0.3)
+
+    # 日期格式
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    ax2.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+    fig.autofmt_xdate(rotation=30)
+
+    # 保存
+    safe_name = name.replace("/", "_").replace(" ", "")
+    filepath = HK_RS_CHARTS_DIR / f"{code}_{safe_name}.png"
+    fig.savefig(filepath, dpi=120, bbox_inches="tight",
+                facecolor="white", edgecolor="none")
+    plt.close(fig)
+
+
+def generate_hk_rs_all() -> dict[str, Path]:
+    """
+    一键生成全部港股 RS 产出：
+    1. 每日 RS 排名报告 (txt)
+    2. 每只股票每日 RS 序列 (csv)
+    3. 每只股票 RS 趋势图 (png)
+
+    Returns:
+        {"report": path, "series": path, "charts": path}
+    """
+    # 先计算 RS 序列（复用）
+    rs_data = compute_all_rs_series()
+
+    # 1. 报告
+    report_path = generate_hk_rs_report()
+
+    # 2. CSV 序列
+    series_dir = save_rs_series(rs_data)
+
+    # 3. 图表
+    charts_dir = plot_rs_charts(rs_data)
+
+    logger.info(f"港股 RS 全部产出完成:\n"
+                f"  报告: {report_path}\n"
+                f"  序列: {series_dir}\n"
+                f"  图表: {charts_dir}")
+
+    return {"report": report_path, "series": series_dir, "charts": charts_dir}
