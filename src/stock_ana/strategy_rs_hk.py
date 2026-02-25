@@ -64,6 +64,48 @@ def _compute_rs_line(df_stock: pd.DataFrame,
     return rs_line
 
 
+def _compute_rs_momentum(
+    df_stock: pd.DataFrame,
+    df_market: pd.DataFrame,
+    lookback: int = 63,
+    smooth: int = 10,
+) -> pd.Series | None:
+    """
+    计算 RS Z-Score = 价格比的滚动标准化偏差。
+
+    ratio  = Stock Close / Bench Close
+    zscore = (ratio − SMA(ratio, N)) / StdDev(ratio, N)
+    RS     = EMA(zscore, smooth)
+
+    以 0 为中轴：
+      > 0   当前相对表现优于近 N 日平均
+      = 0   与近 N 日平均一致
+      < 0   当前相对表现弱于近 N 日平均
+
+    单位：标准差 (σ)，±1 = 较明显偏离，±2 = 显著偏离。
+    """
+    common_idx = df_stock.index.intersection(df_market.index)
+    if len(common_idx) < lookback + smooth:
+        return None
+
+    stock_close = df_stock.loc[common_idx, "close"]
+    bench_close = df_market.loc[common_idx, "close"]
+
+    # 价格比
+    ratio = stock_close / bench_close
+
+    # 滚动均值和标准差
+    ratio_sma = ratio.rolling(lookback).mean()
+    ratio_std = ratio.rolling(lookback).std()
+
+    # Z-Score
+    zscore = (ratio - ratio_sma) / ratio_std.replace(0, np.nan)
+
+    # EMA 平滑
+    rs_mom = zscore.ewm(span=smooth).mean()
+    return rs_mom
+
+
 def _compute_rs_rank(stock_data: dict[str, pd.DataFrame],
                      df_market: pd.DataFrame,
                      lookback: int = 63) -> dict[str, float]:
@@ -100,6 +142,7 @@ def compute_hk_rs_daily() -> pd.DataFrame:
     Returns:
         DataFrame: columns = [
             code, name, benchmark, rs_rank_63d, rs_rank_21d,
+            rs_momentum, rs_momentum_21d,
             rs_latest, rs_ema21, rs_chg_5d, rs_chg_21d, rs_chg_63d,
             close, pct_5d, pct_21d, strength
         ]
@@ -166,6 +209,13 @@ def compute_hk_rs_daily() -> pd.DataFrame:
         if rs_line is None or len(rs_line) < 21:
             continue
 
+        # RS 动量 (Z-Score)
+        rs_mom = _compute_rs_momentum(df_stock, df_bench, lookback=63, smooth=10)
+        rs_mom_val = round(float(rs_mom.iloc[-1]), 2) if rs_mom is not None and len(rs_mom.dropna()) > 0 else np.nan
+
+        rs_mom_21 = _compute_rs_momentum(df_stock, df_bench, lookback=21, smooth=10)
+        rs_mom_21_val = round(float(rs_mom_21.iloc[-1]), 2) if rs_mom_21 is not None and len(rs_mom_21.dropna()) > 0 else np.nan
+
         # RS 指标
         rs_latest = rs_line.iloc[-1]
         rs_ema21 = rs_line.ewm(span=21).mean().iloc[-1]
@@ -190,6 +240,8 @@ def compute_hk_rs_daily() -> pd.DataFrame:
             "benchmark": bench_name_map[bench_code],
             "rs_rank_63d": rank_63,
             "rs_rank_21d": rs_ranks_21d.get(code, np.nan),
+            "rs_momentum": rs_mom_val,
+            "rs_momentum_21d": rs_mom_21_val,
             "rs_latest": round(rs_latest, 2),
             "rs_ema21": round(rs_ema21, 2),
             "rs_chg_5d": round(rs_chg_5d, 2) if not np.isnan(rs_chg_5d) else np.nan,
@@ -250,7 +302,10 @@ _REPORT_HEADER = """\
 │  基准选择规则：属于恒生科技成份股 → 对比恒生科技指数                          │
 │              其余 → 对比恒生指数                                              │
 │                                                                             │
-│  RS Line: 个股收盘价/基准收盘价，归一化首日=100，上升=跑赢大盘               │
+│  RS 动量: Z-Score of (股价/基准价) vs N日均值和标准差                      │
+│    63d: 中期趋势视角 | 21d: 短期灵敏视角                                  │
+│    > 0: 相对表现优于近N日平均 | = 0: 与平均一致 | < 0: 弱于平均      │
+│    ±1σ: 较明显偏离 | ±2σ: 显著偏离                                        │
 │  rs_chg_Nd: RS Line 近N日变化率(%)，正值=相对走强                            │
 │  rs_ema21: RS Line 的21日指数均线，RS > EMA21 = 短期趋势向上                 │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -295,17 +350,18 @@ def generate_hk_rs_report() -> Path:
     lines.append("【一、RS 排名总览（按 rs_rank_63d 降序）】\n")
     lines.append(
         f"{'排名':>4}  {'代码':<6}  {'名称':<12}  {'基准':<6}  "
-        f"{'RS排名63d':>9}  {'RS排名21d':>9}  {'RS_Line':>8}  {'EMA21':>8}  "
+        f"{'RS排名63d':>9}  {'RS排名21d':>9}  {'RS动量63d':>9}  {'RS动量21d':>9}  "
         f"{'RS变化5d':>8}  {'RS变化21d':>9}  {'RS变化63d':>9}  "
         f"{'收盘价':>8}  {'涨跌5d':>7}  {'涨跌21d':>8}  {'强弱':>4}"
     )
-    lines.append("-" * 155)
+    lines.append("-" * 165)
 
     for i, row in df.iterrows():
         lines.append(
             f"{i+1:>4}  {row['code']:<6}  {row['name']:<12}  {row['benchmark']:<6}  "
             f"{row['rs_rank_63d']:>9.1f}  {row['rs_rank_21d']:>9.1f}  "
-            f"{row['rs_latest']:>8.2f}  {row['rs_ema21']:>8.2f}  "
+            f"{_fmt_pp(row['rs_momentum']):>9}  "
+            f"{_fmt_pp(row['rs_momentum_21d']):>9}  "
             f"{_fmt_pct(row['rs_chg_5d']):>8}  {_fmt_pct(row['rs_chg_21d']):>9}  "
             f"{_fmt_pct(row['rs_chg_63d']):>9}  "
             f"{row['close']:>8.3f}  {_fmt_pct(row['pct_5d']):>7}  "
@@ -326,7 +382,8 @@ def generate_hk_rs_report() -> Path:
             lines.append(
                 f"  {row['code']} {row['name']:<10}  "
                 f"RS排名={row['rs_rank_63d']:.1f}%  "
-                f"RS变化21d={_fmt_pct(row['rs_chg_21d'])}  "
+                f"RS动量63d={_fmt_pp(row['rs_momentum'])}  "
+                f"RS动量21d={_fmt_pp(row['rs_momentum_21d'])}  "
                 f"收盘={row['close']:.3f}  [{row['benchmark']}]"
             )
         lines.append("")
@@ -346,6 +403,13 @@ def _fmt_pct(val) -> str:
     if pd.isna(val):
         return "N/A"
     return f"{val:+.2f}%"
+
+
+def _fmt_pp(val) -> str:
+    """格式化 Z-Score 值"""
+    if pd.isna(val):
+        return "N/A"
+    return f"{val:+.2f}σ"
 
 
 # ─────────────────── RS 每日序列 & 图表 ───────────────────
@@ -388,8 +452,17 @@ def compute_all_rs_series() -> dict[str, pd.DataFrame]:
     """
     计算每只港股标的的完整每日 RS 序列。
 
+    RS = Z-Score of (Stock/Bench ratio) vs rolling mean & std。
+    以 0 为中轴，单位为标准差，±1 = 较明显偏离，±2 = 显著偏离。
+
+    两个时间窗口：
+    - 63d：中期趋势（rs_zscore / rs_zscore_fast）
+    - 21d：短期灵敏（rs_zscore_21d / rs_zscore_21d_fast）
+
     Returns:
-        {code: DataFrame} 其中 DataFrame columns = [rs_line, rs_ema21, close, bench_close]
+        {code: DataFrame} 其中 DataFrame columns =
+            [rs_zscore, rs_zscore_fast, rs_zscore_21d, rs_zscore_21d_fast,
+             close, bench_close]
         index = date
     """
     code_bench_map, bench_df_map, code_name_map, all_stock_data = _prepare_benchmark_groups()
@@ -402,20 +475,28 @@ def compute_all_rs_series() -> dict[str, pd.DataFrame]:
             continue
         df_bench = bench_df_map[bench_code]
 
-        rs_line = _compute_rs_line(df_stock, df_bench)
-        if rs_line is None or len(rs_line) < 21:
+        # ── 63d 窗口：慢线 EMA10 和快线 EMA5 ──
+        rs_slow = _compute_rs_momentum(df_stock, df_bench, lookback=63, smooth=10)
+        if rs_slow is None:
+            continue
+        rs_fast = _compute_rs_momentum(df_stock, df_bench, lookback=63, smooth=5)
+
+        # ── 21d 窗口：慢线 EMA10 和快线 EMA5 ──
+        rs_slow_21 = _compute_rs_momentum(df_stock, df_bench, lookback=21, smooth=10)
+        rs_fast_21 = _compute_rs_momentum(df_stock, df_bench, lookback=21, smooth=5)
+
+        common_idx = rs_slow.dropna().index
+        if len(common_idx) < 30:
             continue
 
-        rs_ema21 = rs_line.ewm(span=21).mean()
-
-        # 对齐 close 和 bench_close
-        common_idx = rs_line.index
         stock_close = df_stock.loc[common_idx, "close"]
         bench_close = df_bench.loc[common_idx, "close"]
 
         rs_df = pd.DataFrame({
-            "rs_line": rs_line,
-            "rs_ema21": rs_ema21,
+            "rs_zscore": rs_slow.loc[common_idx],
+            "rs_zscore_fast": rs_fast.loc[common_idx] if rs_fast is not None else np.nan,
+            "rs_zscore_21d": rs_slow_21.reindex(common_idx) if rs_slow_21 is not None else np.nan,
+            "rs_zscore_21d_fast": rs_fast_21.reindex(common_idx) if rs_fast_21 is not None else np.nan,
             "close": stock_close,
             "bench_close": bench_close,
         })
@@ -453,8 +534,12 @@ def save_rs_series(rs_data: dict[str, pd.DataFrame] | None = None) -> Path:
         filepath = HK_RS_SERIES_DIR / filename
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(f"# {code} {name} | 基准: {bench}\n")
-            f.write(f"# RS Line: 个股收盘价/基准收盘价, 归一化首日=100, 上升=跑赢大盘\n")
-            f.write(f"# RS EMA21: RS Line的21日指数均线\n")
+            f.write(f"# rs_zscore: Z-Score of (股价/基准价) vs 63日均值和标准差, EMA10平滑\n")
+            f.write(f"# rs_zscore_fast: 同上但用EMA5平滑(快线)\n")
+            f.write(f"# rs_zscore_21d: Z-Score of (股价/基准价) vs 21日均值和标准差, EMA10平滑(更灵敏)\n")
+            f.write(f"# rs_zscore_21d_fast: 同上但用EMA5平滑(快线)\n")
+            f.write(f"#   > 0 相对表现优于近N日平均 | = 0 与平均一致 | < 0 相对表现弱于平均\n")
+            f.write(f"# 单位: 标准差(σ), ±1=较明显偏离, ±2=显著偏离\n")
             rs_df.round(4).to_csv(f)
 
     logger.info(f"RS 序列已保存：{len(rs_data)} 个文件 → {HK_RS_SERIES_DIR}")
@@ -511,21 +596,23 @@ def plot_rs_charts(rs_data: dict[str, pd.DataFrame] | None = None,
 def _draw_single_rs_chart(code: str, name: str, bench: str,
                           rs_df: pd.DataFrame) -> None:
     """
-    绘制单只股票的 RS 趋势图（双面板：价格 + RS）。
+    绘制单只股票的 RS Z-Score 趋势图（三面板：价格 + RS 63d + RS 21d）。
+    RS 以 0 为中轴，单位为标准差。
     """
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8),
-                                    gridspec_kw={"height_ratios": [1, 1.2]},
-                                    sharex=True)
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 11),
+                                         gridspec_kw={"height_ratios": [1, 1, 1]},
+                                         sharex=True)
     fig.subplots_adjust(hspace=0.08)
 
     dates = rs_df.index
     close = rs_df["close"]
-    rs_line = rs_df["rs_line"]
-    rs_ema21 = rs_df["rs_ema21"]
+    rs_z = rs_df["rs_zscore"]
+    rs_fast = rs_df["rs_zscore_fast"]
+    rs_z_21 = rs_df["rs_zscore_21d"]
+    rs_fast_21 = rs_df["rs_zscore_21d_fast"]
 
     # ── 上面板：股价 ──
     ax1.plot(dates, close, color="#2196F3", linewidth=1.2, label="收盘价")
-    # 添加均线参考
     if len(close) >= 50:
         ma50 = close.rolling(50).mean()
         ax1.plot(dates, ma50, color="#FF9800", linewidth=0.8, alpha=0.7, label="MA50")
@@ -538,45 +625,23 @@ def _draw_single_rs_chart(code: str, name: str, bench: str,
     ax1.grid(True, alpha=0.3)
     ax1.set_title(f"{code} {name}  |  基准: {bench}", fontsize=14, fontweight="bold")
 
-    # ── 下面板：RS Line ──
-    # 背景色：RS > 100 浅绿（跑赢），< 100 浅红（跑输）
-    ax2.axhline(y=100, color="gray", linewidth=0.8, linestyle="--", alpha=0.5)
-    rs_min, rs_max = rs_line.min(), rs_line.max()
-    y_lo = max(rs_min - 5, 0)
-    y_hi = rs_max + 5
-    ax2.fill_between(dates, 100, y_hi, alpha=0.06, color="green")
-    ax2.fill_between(dates, y_lo, 100, alpha=0.06, color="red")
+    # ── 中面板：RS Z-Score 63d（以 0 为中轴）──
+    _draw_rs_panel(ax2, dates, rs_z, rs_fast,
+                   panel_label="RS Z-Score 63d",
+                   slow_label="RS 63d (EMA10)", fast_label="RS 63d 快线 (EMA5)",
+                   color_slow="#E91E63", color_fast="#FF9800")
 
-    ax2.plot(dates, rs_line, color="#E91E63", linewidth=1.4, label="RS Line")
-    ax2.plot(dates, rs_ema21, color="#4CAF50", linewidth=1.0,
-             linestyle="--", alpha=0.8, label="RS EMA21")
+    # ── 下面板：RS Z-Score 21d（以 0 为中轴）──
+    _draw_rs_panel(ax3, dates, rs_z_21, rs_fast_21,
+                   panel_label="RS Z-Score 21d",
+                   slow_label="RS 21d (EMA10)", fast_label="RS 21d 快线 (EMA5)",
+                   color_slow="#1565C0", color_fast="#26A69A")
 
-    # 标注最新值
-    last_rs = rs_line.iloc[-1]
-    last_ema = rs_ema21.iloc[-1]
-    ax2.annotate(f"{last_rs:.1f}",
-                 xy=(dates[-1], last_rs),
-                 xytext=(10, 0), textcoords="offset points",
-                 fontsize=9, color="#E91E63", fontweight="bold")
-
-    # RS 趋势判断标注
-    trend_label = "↑ 跑赢大盘" if last_rs > 100 else "↓ 跑输大盘"
-    trend_color = "#4CAF50" if last_rs > 100 else "#F44336"
-    ema_status = "RS > EMA21 ↑" if last_rs > last_ema else "RS < EMA21 ↓"
-    ax2.text(0.02, 0.95, f"{trend_label}  |  {ema_status}",
-             transform=ax2.transAxes, fontsize=10,
-             color=trend_color, fontweight="bold",
-             verticalalignment="top",
-             bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
-
-    ax2.set_ylabel("RS Line", fontsize=11)
-    ax2.set_xlabel("日期", fontsize=11)
-    ax2.legend(loc="upper right", fontsize=8)
-    ax2.grid(True, alpha=0.3)
+    ax3.set_xlabel("日期", fontsize=11)
 
     # 日期格式
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
-    ax2.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+    ax3.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    ax3.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
     fig.autofmt_xdate(rotation=30)
 
     # 保存
@@ -585,6 +650,88 @@ def _draw_single_rs_chart(code: str, name: str, bench: str,
     fig.savefig(filepath, dpi=120, bbox_inches="tight",
                 facecolor="white", edgecolor="none")
     plt.close(fig)
+
+
+def _draw_rs_panel(ax, dates, rs_z, rs_fast,
+                   panel_label: str,
+                   slow_label: str, fast_label: str,
+                   color_slow: str, color_fast: str) -> None:
+    """
+    在指定 Axes 上绘制一个 RS Z-Score 面板（含参考线、填充、标注）。
+    """
+    ax.axhline(y=0, color="gray", linewidth=1.0, linestyle="-", alpha=0.6)
+    ax.axhline(y=1, color="#4CAF50", linewidth=0.6, linestyle=":", alpha=0.5)
+    ax.axhline(y=-1, color="#F44336", linewidth=0.6, linestyle=":", alpha=0.5)
+    ax.axhline(y=2, color="#4CAF50", linewidth=0.6, linestyle="--", alpha=0.4)
+    ax.axhline(y=-2, color="#F44336", linewidth=0.6, linestyle="--", alpha=0.4)
+
+    # 有效数据掩码
+    valid = rs_z.notna()
+
+    # 背景填充
+    ax.fill_between(dates, 0, rs_z, where=(rs_z >= 0) & valid,
+                    alpha=0.15, color="#4CAF50", interpolate=True)
+    ax.fill_between(dates, 0, rs_z, where=(rs_z < 0) & valid,
+                    alpha=0.15, color="#F44336", interpolate=True)
+
+    # RS 曲线
+    ax.plot(dates, rs_z, color=color_slow, linewidth=1.5, label=slow_label)
+    if rs_fast is not None and rs_fast.notna().any():
+        ax.plot(dates, rs_fast, color=color_fast, linewidth=0.9,
+                alpha=0.6, label=fast_label)
+
+    # 标注最新值
+    valid_z = rs_z.dropna()
+    if len(valid_z) > 0:
+        last_rs = valid_z.iloc[-1]
+        last_date = valid_z.index[-1]
+        ax.annotate(f"{last_rs:+.2f}σ",
+                    xy=(last_date, last_rs),
+                    xytext=(10, 0), textcoords="offset points",
+                    fontsize=9, color=color_slow, fontweight="bold")
+
+        # 右侧标注区间含义
+        for y_val, label in [(2, "显著强"), (1, "偏强"), (-1, "偏弱"), (-2, "显著弱")]:
+            ax.text(1.01, y_val, label, transform=ax.get_yaxis_transform(),
+                    fontsize=7, color="gray", va="center")
+
+        # 趋势状态标注
+        if last_rs > 1.5:
+            trend_label, trend_color = "↑ 显著跑赢", "#4CAF50"
+        elif last_rs > 0.5:
+            trend_label, trend_color = "↗ 跑赢", "#8BC34A"
+        elif last_rs > -0.5:
+            trend_label, trend_color = "→ 接近", "#9E9E9E"
+        elif last_rs > -1.5:
+            trend_label, trend_color = "↘ 跑输", "#FF9800"
+        else:
+            trend_label, trend_color = "↓ 显著跑输", "#F44336"
+
+        # 动量变化方向
+        if len(valid_z) >= 5:
+            delta = last_rs - valid_z.iloc[-5]
+            dir_label = f"5日变化: {delta:+.2f}σ"
+        else:
+            dir_label = ""
+
+        ax.text(0.02, 0.95,
+                f"{trend_label}  ({last_rs:+.2f}σ)  {dir_label}",
+                transform=ax.transAxes, fontsize=10,
+                color=trend_color, fontweight="bold",
+                verticalalignment="top",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+
+    ax.set_ylabel(f"{panel_label} (σ)", fontsize=11)
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # Y 轴对称于 0，至少显示 ±3
+    valid_vals = rs_z.dropna()
+    if len(valid_vals) > 0:
+        y_abs_max = max(abs(valid_vals.min()), abs(valid_vals.max()), 3) * 1.05
+    else:
+        y_abs_max = 3
+    ax.set_ylim(-y_abs_max, y_abs_max)
 
 
 def generate_hk_rs_all() -> dict[str, Path]:
