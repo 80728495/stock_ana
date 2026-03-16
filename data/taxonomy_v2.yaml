@@ -1,0 +1,474 @@
+# ============================================================
+# US Stock Industry Taxonomy v2 — 三级架构
+# ============================================================
+#
+# 分类体系：
+#   Level 1  Sector       — Finviz 11 大板块（已知，不需要分类）
+#   Level 2  SIC Code     — SEC EDGAR 注册代码（已知，硬约束）
+#   Level 3  Sub-label    — LLM 从固定列表中选取（仅大 SIC 组需要）
+#
+# 工作流程：
+#   1. 每只股票的 sector 和 sic_code 已经是确定事实（来自 Finviz + SEC）
+#   2. 对于小型 SIC 组（<15 只股票），SIC 描述本身即最细分类，不需要 LLM
+#   3. 仅对大型 SIC 组（≥15 只股票，共 ~23 个），LLM 从下方固定列表选 1 个 sub_label
+#   4. LLM 不允许自造标签，只能从该 SIC 对应的 sub_labels 列表中选择
+#
+# 最终输出字段（每只股票）：
+#   sector, sic_code, sic_description, sub_label (可为空)
+#
+# ============================================================
+
+
+# ============================================================
+#                    需要 Sub-label 的 SIC 组
+# ============================================================
+# 以下 SIC 代码因股票数量多、内部差异大，需要 LLM 进一步细分。
+# 其余 ~266 个 SIC 代码（覆盖 ~700 只股票）不需要 sub_label。
+
+sub_labels:
+
+  # --------------------------------------------------------
+  #  Technology 板块
+  # --------------------------------------------------------
+
+  3674:
+    sic_name: "Semiconductors & Related Devices"
+    sector: Technology
+    stock_count: 50
+    labels:
+      - label: "AI & GPU Accelerators"
+        description: "AI training/inference chips, GPU, TPU, DPU, high-bandwidth networking silicon"
+        examples: [NVDA, AVGO, ALAB, CRDO]
+      - label: "Analog & Mixed-Signal ICs"
+        description: "Analog ICs, power management, signal processing, sensors, microcontrollers"
+        examples: [ADI, TXN, MCHP, MPWR, POWI, ON, ALGM, CRUS]
+      - label: "Digital Logic, CPU & SoC"
+        description: "CPUs, FPGAs, ASICs, SoCs, RF semiconductors, baseband processors"
+        examples: [INTC, AMD, QCOM, ARM, LSCC, QRVO, SWKS, NXPI]
+      - label: "Memory & Storage ICs"
+        description: "DRAM, NAND flash, storage controllers, memory IP, HBM"
+        examples: [MU, SIMO, RMBS]
+      - label: "Foundry, OSAT & Substrates"
+        description: "Wafer foundry, outsourced assembly & test, compound semiconductor substrates"
+        examples: [TSM, GFS, UMC, ASX, TSEM, AMKR, AXTI]
+      - label: "Semiconductor Equipment & Materials"
+        description: "Lithography, deposition, etch, inspection equipment, EDA tools, photomask"
+        examples: [AMAT, UCTT, KLIC, FORM]
+      - label: "Optoelectronics & Laser"
+        description: "Fiber lasers, photonic components, optical sensing, directed energy"
+        examples: [IPGP, LASR, AAOI, VIAV]
+      - label: "Solar & Power Electronics"
+        description: "Solar inverters, solar panels, power conversion semiconductors"
+        examples: [ENPH, SEDG, FSLR]
+
+  7372:
+    sic_name: "Services-Prepackaged Software"
+    sector: Technology
+    stock_count: 90
+    labels:
+      - label: "Enterprise & Vertical SaaS"
+        description: "ERP, CRM, HR, supply chain, industry-specific enterprise software"
+        examples: [SAP, ORCL, WDAY, NOW, HUBS]
+      - label: "Cybersecurity"
+        description: "Network security, endpoint protection, identity & access, cloud security"
+        examples: [CRWD, PANW, FTNT, ZS]
+      - label: "Developer Tools & Data Platforms"
+        description: "Dev platforms, databases, observability, CI/CD, data infrastructure, AI/ML tools"
+        examples: [MDB, DDOG, SNOW, ESTC, PLTR]
+      - label: "FinTech Software"
+        description: "Payments processing, digital banking, financial software platforms"
+        examples: [SQ, BILL, TOST]
+      - label: "Gaming & Interactive Entertainment"
+        description: "PC/console/mobile game publishers, game engines"
+        examples: [EA, TTWO, RBLX, U]
+      - label: "Other Software"
+        description: "Application/infrastructure software not covered by above categories"
+        examples: []
+
+  # --------------------------------------------------------
+  #  Healthcare 板块
+  # --------------------------------------------------------
+
+  2834:
+    sic_name: "Pharmaceutical Preparations"
+    sector: Healthcare
+    stock_count: 83
+    labels:
+      - label: "Oncology"
+        description: "Cancer therapeutics, immuno-oncology, ADCs, tumor-targeted therapies"
+        examples: [CGON, COGT, CELC]
+      - label: "Immunology & Inflammation"
+        description: "Autoimmune, inflammatory diseases, dermatology, rheumatology"
+        examples: [APGE, ARQT, CORT]
+      - label: "Rare Disease & Gene Therapy"
+        description: "Rare/orphan disease treatments, gene therapy, cell therapy, genetic medicines"
+        examples: [BMRN, BBIO, ALNY]
+      - label: "Neuroscience"
+        description: "CNS disorders, neurodegeneration, psychiatry, pain management"
+        examples: [ACAD, AXSM, CRNX]
+      - label: "Large Cap Pharma"
+        description: "Diversified drug portfolios, global distribution, blockbuster drugs"
+        examples: [JNJ, PFE, MRK, LLY, ABBV]
+      - label: "Specialty & Generic Pharma"
+        description: "Specialty drugs, generics, biosimilars, branded generics"
+        examples: [TEVA, VTRS, JAZZ]
+      - label: "Other Therapeutics"
+        description: "Metabolic, infectious disease, cardiovascular, multi-therapeutic, other areas"
+        examples: [CPRX, ADMA]
+
+  2836:
+    sic_name: "Biological Products, (No Diagnostic Substances)"
+    sector: Healthcare
+    stock_count: 28
+    labels:
+      - label: "Oncology Biologics"
+        description: "Biologic cancer therapies, CAR-T, bispecific antibodies, cancer vaccines"
+        examples: [BEAM, ACLX]
+      - label: "Immunology Biologics"
+        description: "Biologic treatments for autoimmune & inflammatory diseases"
+        examples: [APLS, CNTA]
+      - label: "Large Cap Biopharma"
+        description: "Large diversified biopharmaceutical companies"
+        examples: [AMGN, GILD, REGN, VRTX, BNTX]
+      - label: "Other Biologics"
+        description: "Gene therapy, RNA therapeutics, infectious disease biologics, other"
+        examples: [ARWR, SRPT]
+
+  3841:
+    sic_name: "Surgical & Medical Instruments & Apparatus"
+    sector: Healthcare
+    stock_count: 18
+    labels:
+      - label: "Medical Devices"
+        description: "Implantable devices, surgical robots, cardiac/orthopedic/neuro devices"
+        examples: [SYK, ISRG, BSX, DXCM, PODD]
+      - label: "Instruments & Supplies"
+        description: "Surgical instruments, disposable supplies, wound care, sterilization"
+        examples: [BAX, BDX, WST, RMD, TFX]
+
+  # --------------------------------------------------------
+  #  Financial 板块
+  # --------------------------------------------------------
+
+  6021:
+    sic_name: "National Commercial Banks"
+    sector: Financial
+    stock_count: 16
+    labels:
+      - label: "Money Center & Diversified Banks"
+        description: "Large global banks, money center banks, diversified banking"
+        examples: [JPM, BAC, WFC, C]
+      - label: "Regional Banks"
+        description: "Regional and super-regional banks, focused on lending & deposits"
+        examples: [CFG, HBAN, PNC]
+
+  6029:
+    sic_name: "Commercial Banks, NEC"
+    sector: Financial
+    stock_count: 15
+    labels:
+      - label: "Money Center & Diversified Banks"
+        description: "Large global banks, money center banks, diversified banking"
+        examples: [GS, USB]
+      - label: "Regional Banks"
+        description: "Regional and community banking"
+        examples: [RF, FITB, KEY]
+
+  6211:
+    sic_name: "Security Brokers, Dealers & Flotation Companies"
+    sector: Financial
+    stock_count: 20
+    labels:
+      - label: "Capital Markets & Trading"
+        description: "Brokerage, trading, investment banking, market making"
+        examples: [MS, SCHW, IBKR, RJF]
+      - label: "Asset & Wealth Management"
+        description: "Wealth management, fund platforms, alternative asset managers"
+        examples: [BX, KKR, APO, ARES]
+
+  6282:
+    sic_name: "Investment Advice"
+    sector: Financial
+    stock_count: 25
+    labels:
+      - label: "Traditional Asset Management"
+        description: "Mutual funds, ETF providers, index funds, wealth managment"
+        examples: [BLK, TROW, IVZ]
+      - label: "Alternative Asset Management"
+        description: "Private equity, hedge funds, private credit, real assets managers"
+        examples: [BX, KKR, APO, ARES, OWL]
+      - label: "Financial Infrastructure & Data"
+        description: "Financial data platforms, exchanges, ratings (SIC 6282 classified)"
+        examples: [MSCI, FHI]
+
+  6199:
+    sic_name: "Finance Services"
+    sector: Financial
+    stock_count: 23
+    labels:
+      - label: "Payments & Transaction Processing"
+        description: "Payment networks, merchant acquiring, transaction processing"
+        examples: [V, MA, FIS, GPN]
+      - label: "Capital Markets & Platforms"
+        description: "Trading platforms, financial marketplaces, crypto exchanges"
+        examples: [COIN, HOOD]
+      - label: "Specialty Finance & Credit"
+        description: "Consumer lending, credit services, BNPL, specialty finance"
+        examples: [SYF, AFRM]
+
+  6331:
+    sic_name: "Fire, Marine & Casualty Insurance"
+    sector: Financial
+    stock_count: 19
+    labels:
+      - label: "P&C Insurance"
+        description: "Property & casualty, homeowners, auto, commercial lines"
+        examples: [PGR, ALL, TRV, CB]
+      - label: "Diversified & Specialty Insurance"
+        description: "Diversified insurance, specialty lines, reinsurance, title"
+        examples: [BRK.B, ACGL, RNR]
+
+  # --------------------------------------------------------
+  #  Energy 板块
+  # --------------------------------------------------------
+
+  1311:
+    sic_name: "Crude Petroleum & Natural Gas"
+    sector: Energy
+    stock_count: 38
+    labels:
+      - label: "Integrated Oil & Gas"
+        description: "Vertically integrated: exploration through refining & retail"
+        examples: [XOM, CVX, COP, EOG]
+      - label: "E&P - Oil Focused"
+        description: "Upstream exploration and production, primarily oil"
+        examples: [PXD, DVN, FANG, HES]
+      - label: "E&P - Gas & Diversified"
+        description: "Natural gas focused or diversified E&P"
+        examples: [EQT, AR, SWN]
+      - label: "Midstream & LNG"
+        description: "Pipelines, gathering, processing, LNG export (SIC 1311 classified)"
+        examples: [ENB]
+
+  2911:
+    sic_name: "Petroleum Refining"
+    sector: Energy
+    stock_count: 15
+    labels:
+      - label: "Integrated Oil & Gas"
+        description: "Integrated major with significant refining (SIC 2911 classified)"
+        examples: [SHEL, TTE, BP]
+      - label: "Refining & Marketing"
+        description: "Independent refiners, fuel marketing, petroleum products"
+        examples: [VLO, PSX, MPC, DINO]
+
+  # --------------------------------------------------------
+  #  Communication Services 板块
+  # --------------------------------------------------------
+
+  7370:
+    sic_name: "Services-Computer Programming, Data Processing, Etc."
+    sector: Communication Services
+    stock_count: 21
+    labels:
+      - label: "Internet Platforms & Social Media"
+        description: "Search engines, social media, digital advertising, internet platforms"
+        examples: [GOOGL, META, SNAP, PINS]
+      - label: "Digital Media & Streaming"
+        description: "Streaming services, digital content, OTT platforms"
+        examples: [NFLX, SPOT, ROKU]
+      - label: "Ad-Tech & Digital Marketing"
+        description: "Programmatic advertising, ad exchanges, digital marketing platforms"
+        examples: [TTD, MGNI]
+
+  # --------------------------------------------------------
+  #  Basic Materials 板块
+  # --------------------------------------------------------
+
+  1040:
+    sic_name: "Gold and Silver Ores"
+    sector: Basic Materials
+    stock_count: 30
+    labels:
+      - label: "Gold Mining"
+        description: "Gold mining, gold royalties & streaming"
+        examples: [NEM, GOLD, AEM, WPM, FNV]
+      - label: "Silver & Precious Metals"
+        description: "Silver mining, platinum, diversified precious metals"
+        examples: [AG, PAAS, HL]
+
+  1000:
+    sic_name: "Metal Mining"
+    sector: Basic Materials
+    stock_count: 16
+    labels:
+      - label: "Copper & Base Metals"
+        description: "Copper, zinc, nickel, diversified base metals mining"
+        examples: [FCX, SCCO, TECK, HBM]
+      - label: "Diversified Mining"
+        description: "Multi-commodity mining, iron ore, industrial minerals"
+        examples: [BHP, RIO, VALE]
+
+  # --------------------------------------------------------
+  #  Real Estate 板块
+  # --------------------------------------------------------
+
+  6798:
+    sic_name: "Real Estate Investment Trusts"
+    sector: Real Estate
+    stock_count: 79
+    labels:
+      - label: "Data Center & Digital Infrastructure"
+        description: "Data center REITs, cell tower REITs, fiber/digital infrastructure"
+        examples: [EQIX, DLR, AMT, CCI]
+      - label: "Industrial & Logistics"
+        description: "Warehouse, distribution center, logistics, cold storage REITs"
+        examples: [PLD, REXR, STAG]
+      - label: "Retail"
+        description: "Shopping center, mall, net lease, single tenant retail REITs"
+        examples: [O, NNN, SPG, VICI]
+      - label: "Residential"
+        description: "Apartment, single-family rental, manufactured housing REITs"
+        examples: [EQR, AVB, INVH, MAA]
+      - label: "Office"
+        description: "Office building REITs"
+        examples: [BXP, ARE, KRC]
+      - label: "Healthcare Facilities"
+        description: "Healthcare, senior housing, medical office REITs"
+        examples: [WELL, VTR, OHI]
+      - label: "Specialty & Self-Storage"
+        description: "Self-storage, gaming, timber, diversified REITs"
+        examples: [PSA, EXR, CUBE, LADR]
+      - label: "Mortgage REIT"
+        description: "Mortgage-backed securities, mortgage origination REITs"
+        examples: [NLY, AGNC, STWD]
+
+  # --------------------------------------------------------
+  #  Utilities 板块
+  # --------------------------------------------------------
+
+  4911:
+    sic_name: "Electric Services"
+    sector: Utilities
+    stock_count: 32
+    labels:
+      - label: "Regulated Electric Utility"
+        description: "Regulated electric utilities, integrated utility holding companies"
+        examples: [NEE, DUK, SO, D, AEP]
+      - label: "Independent Power & Renewable"
+        description: "Independent power producers, renewable energy generation, merchant power"
+        examples: [VST, CEG, CWEN]
+
+  # --------------------------------------------------------
+  #  跨板块出现的 NEC 类 SIC
+  # --------------------------------------------------------
+  # SIC 7389 (Business Services NEC) 出现在多个板块，共 37 只股票。
+  # 该 SIC 本身无区分度，sub_label 按所属 sector 上下文决定。
+
+  7389:
+    sic_name: "Services-Business Services, NEC"
+    sector: "(跨板块)"
+    stock_count: 37
+    note: "此 SIC 是万能桶，公司类型由 sector 和 business_summary 共同决定"
+    labels:
+      - label: "IT Services & Software"
+        description: "IT outsourcing, managed services, SaaS (Technology sector)"
+        examples: [ACN, CTSH, EPAM]
+      - label: "Financial & Payment Services"
+        description: "Payment infrastructure, credit, financial services (Financial sector)"
+        examples: [PYPL, WEX, ADP]
+      - label: "Business Process & Professional Services"
+        description: "Outsourcing, consulting, process services (Industrials/other sectors)"
+        examples: [MMS, RBA, RELX]
+      - label: "E-Commerce & Digital Marketplace"
+        description: "Online marketplaces, e-commerce enablers (Consumer Cyclical sector)"
+        examples: [BKNG, CARG, SE]
+
+  7374:
+    sic_name: "Services-Computer Processing & Data Preparation"
+    sector: "(跨板块)"
+    stock_count: 18
+    labels:
+      - label: "Cloud & Data Processing"
+        description: "Cloud computing platforms, data processing services"
+        examples: [AMZN, CRM]
+      - label: "IT Services & Outsourcing"
+        description: "IT outsourcing, system integration, BPO"
+        examples: [INFY, WIT]
+      - label: "Vertical Software & SaaS"
+        description: "Industry-specific SaaS, vertical software platforms"
+        examples: [KVUE, VEEV]
+
+  7373:
+    sic_name: "Services-Computer Integrated Systems Design"
+    sector: "(跨板块)"
+    stock_count: 12
+    labels:
+      - label: "IT Consulting & System Integration"
+        description: "IT consulting, system integration, managed IT services"
+        examples: [CTSH, EPAM, GLOB]
+      - label: "Software Platforms"
+        description: "Enterprise software platforms built on systems integration"
+        examples: [MANH]
+
+  # --------------------------------------------------------
+  #  Consumer Cyclical (Hotels) 板块
+  # --------------------------------------------------------
+
+  7011:
+    sic_name: "Hotels & Motels"
+    sector: Consumer Cyclical
+    stock_count: 15
+    labels:
+      - label: "Hotels & Lodging"
+        description: "Hotel chains, lodging REITs, resort operators"
+        examples: [MAR, HLT, H, IHG]
+      - label: "Resorts & Casinos"
+        description: "Casino resorts, gaming, integrated resorts"
+        examples: [LVS, WYNN, MGM]
+
+  # --------------------------------------------------------
+  #  Financial (Life Insurance)
+  # --------------------------------------------------------
+
+  6311:
+    sic_name: "Life Insurance"
+    sector: Financial
+    stock_count: 14
+    labels:
+      - label: "Life & Annuity Insurance"
+        description: "Life insurance, annuities, retirement products"
+        examples: [MET, PRU, LNC]
+      - label: "Diversified Insurance & Asset Management"
+        description: "Diversified insurance with significant asset management"
+        examples: [AIG, GL]
+
+
+# ============================================================
+#   不需要 Sub-label 的 SIC 组（~266 个，覆盖 ~700 只股票）
+# ============================================================
+# 以下 SIC 代码因股票数少、描述已足够精确，不需要 LLM 打标签。
+# 分类时直接使用 sic_description 作为最终标签。
+#
+# 示例：
+#   SIC 3827 (Optical Instruments & Lenses)     → COHR, KLAC, CAMT
+#   SIC 3576 (Computer Communications Equipment) → CSCO, ANET, FFIV
+#   SIC 3572 (Computer Storage Devices)          → NTAP, PSTG, STX
+#   SIC 3826 (Laboratory Analytical Instruments) → A, ILMN, WAT
+#   SIC 3559 (Special Industry Machinery, NEC)   → ASML, LRCX, ACLS
+#   SIC 3672 (Printed Circuit Boards)            → FLEX, JBL, CLS
+#   SIC 4512 (Air Transportation, Scheduled)     → DAL, UAL, LUV
+#   SIC 4922 (Natural Gas Transmission)          → WMB, KMI, ET
+#   SIC 3714 (Motor Vehicle Parts & Accessories) → APTV, BWA, LEA
+#   SIC 5812 (Retail-Eating Places)              → MCD, CMG, YUM
+#
+# 完整列表在 us_sec_profiles.csv 中，按 sic_code 字段查阅。
+
+
+# ============================================================
+# 统计概要
+# ============================================================
+# 需要 LLM sub-label 的 SIC 组:     22 个 (覆盖 ~850 只股票)
+# 不需要 sub-label 的 SIC 组:        ~266 个 (覆盖 ~700 只股票)
+# Sub-label 候选标签总数:            ~65 个
+# ============================================================

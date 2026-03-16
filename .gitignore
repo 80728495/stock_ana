@@ -23,9 +23,15 @@ env/
 .env
 
 # 数据缓存（本地缓存不同步）
-data/
+data/*
 !data/hk_list.txt
 !data/ana_prompt.txt
+!data/us_sec_profiles.csv
+!data/taxonomy_v2.yaml
+!data/output
+data/output/*
+!data/output/daily_momentum_*.csv
+!data/output/sector_analysis
 *.pkl
 *.h5
 
