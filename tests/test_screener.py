@@ -6,28 +6,71 @@ from pathlib import Path
 
 import pandas as pd
 
-from stock_ana.screener import (
+from stock_ana.strategies.screener import (
     screen_golden_cross,
     screen_macd_cross_in_period,
     screen_rsi_oversold,
-    screen_vegas_channel_touch,
-    screen_ascending_triangle,
-    screen_vcp,
-    scan_ndx100_macd_cross,
-    scan_ndx100_vegas_touch,
-    scan_ndx100_ascending_triangle,
-    scan_ndx100_vcp,
+    scan_macd_cross,
 )
-from stock_ana.data_fetcher import update_ndx100_data, load_all_ndx100_data
-from stock_ana.chart import (
+from stock_ana.strategies.registry import scan_strategy
+from stock_ana.strategies.api import (
+    screen_vegas_touch,
+    screen_triangle_ascending,
+    screen_vcp_setup,
+)
+from stock_ana.data.indicators import add_vegas_channel
+from stock_ana.data.fetcher import update_ndx100_data, load_all_ndx100_data
+from stock_ana.utils.plot_renderers import (
     plot_macd_cross_results,
     plot_vegas_touch_results,
     plot_ascending_triangle_results,
     plot_vcp_results,
 )
-from stock_ana.gemini_analyst import analyze_screener_results, batch_analyze, rank_and_summarize
+from stock_ana.utils.gemini_analyst import analyze_screener_results, batch_analyze, rank_and_summarize
 
 _OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data" / "output"
+
+
+def _to_plot_hits(scan_result, stock_data: dict, info_key: str | None = None, df_transform=None) -> list[dict]:
+    """Convert scan hits into plotting payloads with attached data frames."""
+    hits: list[dict] = []
+    for hit in scan_result.hits:
+        df = stock_data.get(hit.symbol)
+        if df is None:
+            continue
+        if df_transform is not None:
+            df = df_transform(df.copy())
+        item = {"ticker": hit.symbol, "df": df}
+        if info_key is not None:
+            item[info_key] = hit.decision.features
+        hits.append(item)
+    return hits
+
+
+def _scan_vegas_hits(lookback_days: int = 5) -> list[dict]:
+    """Run the vegas scan and prepare chart-ready hit payloads."""
+    data = load_all_ndx100_data()
+    result = scan_strategy("vegas", market="ndx100", lookback_days=lookback_days)
+    return _to_plot_hits(result, data, df_transform=add_vegas_channel)
+
+
+def _scan_triangle_hits(min_period: int = 40, max_period: int = 120) -> list[dict]:
+    """Run the ascending triangle scan and format hits for plotting."""
+    data = load_all_ndx100_data()
+    result = scan_strategy("triangle_ascending", market="ndx100")
+    return _to_plot_hits(result, data, info_key="pattern_info")
+
+
+def _scan_vcp_hits(min_base_days: int = 30, max_base_days: int = 180) -> list[dict]:
+    """Run the VCP scan and format hits for plotting."""
+    data = load_all_ndx100_data()
+    result = scan_strategy(
+        "vcp",
+        universe="ndx100",
+        min_base_days=min_base_days,
+        max_base_days=max_base_days,
+    )
+    return _to_plot_hits(result, data, info_key="vcp_info")
 
 
 def _clean_output():
@@ -38,10 +81,12 @@ def _clean_output():
 
 
 def _make_df(data: dict) -> pd.DataFrame:
+    """Build a DataFrame fixture from a compact column dictionary."""
     return pd.DataFrame(data)
 
 
 def test_golden_cross_true():
+    """Return true when the short moving average crosses above the long one."""
     df = _make_df({
         "close": [10, 11, 12, 13],
         "sma_5":  [9, 10, 11, 13],
@@ -51,6 +96,7 @@ def test_golden_cross_true():
 
 
 def test_golden_cross_false():
+    """Return false when no bullish moving-average crossover is present."""
     df = _make_df({
         "close": [10, 11, 12, 13],
         "sma_5":  [12, 13, 14, 15],
@@ -60,6 +106,7 @@ def test_golden_cross_false():
 
 
 def test_rsi_oversold():
+    """Detect oversold RSI values and reject neutral readings."""
     df = _make_df({"close": [10], "rsi": [25.0]})
     assert screen_rsi_oversold(df) == True
 
@@ -113,7 +160,7 @@ def test_step2_scan_macd_cross():
     assert len(data) > 0, "本地无数据！请先运行 test_step1_update_data"
 
     # 扫描 MACD 金叉
-    hits = scan_ndx100_macd_cross(lookback_days=5)
+    hits = scan_macd_cross(lookback_days=5, universe="ndx100")
     print(f"\n{'='*60}")
     print(f"共发现 {len(hits)} 只股票在最近1周内发生 MACD 金叉：")
     for item in hits:
@@ -145,12 +192,12 @@ def test_vegas_channel_touch_true():
         "close": price,
         "volume": [1000000] * n,
     }, index=dates)
-    from stock_ana.indicators import add_vegas_channel
+    from stock_ana.data.indicators import add_vegas_channel
     df = add_vegas_channel(df)
     # 最后几天 low 应该接近 ema_144/169
-    result = screen_vegas_channel_touch(df, lookback_days=5, half_year_days=120)
+    decision = screen_vegas_touch(df, lookback_days=5, half_year_days=120)
     # 结果取决于 EMA 的具体值，主要验证不报错
-    assert isinstance(result, bool)
+    assert isinstance(decision.passed, bool)
 
 
 def test_vegas_channel_touch_false_no_drop():
@@ -166,10 +213,10 @@ def test_vegas_channel_touch_false_no_drop():
         "close": price,
         "volume": [1000000] * n,
     }, index=dates)
-    from stock_ana.indicators import add_vegas_channel
+    from stock_ana.data.indicators import add_vegas_channel
     df = add_vegas_channel(df)
-    result = screen_vegas_channel_touch(df, lookback_days=5)
-    assert result == False
+    decision = screen_vegas_touch(df, lookback_days=5)
+    assert decision.passed == False
 
 
 def test_step3_scan_vegas_touch():
@@ -181,7 +228,7 @@ def test_step3_scan_vegas_touch():
     data = load_all_ndx100_data()
     assert len(data) > 0, "本地无数据！请先运行 test_step1_update_data"
 
-    hits = scan_ndx100_vegas_touch(lookback_days=5)
+    hits = _scan_vegas_hits(lookback_days=5)
     print(f"\n{'='*60}")
     print(f"共发现 {len(hits)} 只股票满足 Vegas 通道回踩条件：")
     for item in hits:
@@ -220,9 +267,9 @@ def test_ascending_triangle_detection():
         "close": close,
         "volume": [1000000] * n,
     }, index=dates)
-    result = screen_ascending_triangle(df, min_period=40, max_period=100)
+    decision = screen_triangle_ascending(df)
     # 主要验证不报错，形态检测取决于具体数值
-    assert result is None or isinstance(result, dict)
+    assert isinstance(decision.passed, bool)
 
 
 def test_ascending_triangle_none_for_downtrend():
@@ -238,8 +285,8 @@ def test_ascending_triangle_none_for_downtrend():
         "close": price,
         "volume": [1000000] * n,
     }, index=dates)
-    result = screen_ascending_triangle(df, min_period=40, max_period=100)
-    assert result is None
+    decision = screen_triangle_ascending(df)
+    assert decision.passed == False
 
 
 def test_step4_scan_ascending_triangle():
@@ -251,7 +298,7 @@ def test_step4_scan_ascending_triangle():
     data = load_all_ndx100_data()
     assert len(data) > 0, "本地无数据！请先运行 test_step1_update_data"
 
-    hits = scan_ndx100_ascending_triangle(min_period=40, max_period=120)
+    hits = _scan_triangle_hits(min_period=40, max_period=120)
     print(f"\n{'='*60}")
     print(f"共发现 {len(hits)} 只股票呈现收敛三角形/楔形：")
     _PCN = {"ascending_triangle": "上升三角形", "rising_wedge": "上升楔形",
@@ -286,7 +333,7 @@ def test_step5_run_all():
     assert len(data) > 0, "本地无数据！请先运行 test_step1_update_data"
 
     # 策略1: MACD 金叉
-    macd_hits = scan_ndx100_macd_cross(lookback_days=5)
+    macd_hits = scan_macd_cross(lookback_days=5, universe="ndx100")
     print(f"\n{'='*60}")
     print(f"【策略1】MACD 金叉：{len(macd_hits)} 只")
     for item in macd_hits:
@@ -295,7 +342,7 @@ def test_step5_run_all():
     plot_macd_cross_results(macd_hits)
 
     # 策略2: Vegas 通道回踩
-    vegas_hits = scan_ndx100_vegas_touch(lookback_days=5)
+    vegas_hits = _scan_vegas_hits(lookback_days=5)
     print(f"\n{'='*60}")
     print(f"【策略2】Vegas 通道回踩：{len(vegas_hits)} 只")
     for item in vegas_hits:
@@ -306,7 +353,7 @@ def test_step5_run_all():
     plot_vegas_touch_results(vegas_hits)
 
     # 策略3: 收敛三角形/楔形
-    tri_hits = scan_ndx100_ascending_triangle(min_period=40, max_period=120)
+    tri_hits = _scan_triangle_hits(min_period=40, max_period=120)
     print(f"\n{'='*60}")
     print(f"【策略3】收敛三角形/楔形：{len(tri_hits)} 只")
     _PCN = {"ascending_triangle": "上升三角形", "rising_wedge": "上升楔形",
@@ -341,7 +388,7 @@ def test_step6_gemini_analyze_triangle():
     assert len(data) > 0, "本地无数据！请先运行 test_step1_update_data"
 
     # 先筛选
-    tri_hits = scan_ndx100_ascending_triangle(min_period=40, max_period=120)
+    tri_hits = _scan_triangle_hits(min_period=40, max_period=120)
     print(f"\n{'='*60}")
     print(f"共 {len(tri_hits)} 只股票呈现收敛形态，开始 Gemini 分析...")
     print(f"{'='*60}")
@@ -375,19 +422,19 @@ def test_step7_gemini_analyze_all():
     all_hits = []
 
     # 策略1：Vegas 通道回踩
-    vegas_hits = scan_ndx100_vegas_touch(lookback_days=5)
+    vegas_hits = _scan_vegas_hits(lookback_days=5)
     print(f"\n【策略1】Vegas 通道回踩：{len(vegas_hits)} 只")
     plot_vegas_touch_results(vegas_hits)
     all_hits.extend(vegas_hits)
 
     # 策略2：收敛三角形/楔形
-    tri_hits = scan_ndx100_ascending_triangle(min_period=40, max_period=120)
+    tri_hits = _scan_triangle_hits(min_period=40, max_period=120)
     print(f"【策略2】收敛三角形/楔形：{len(tri_hits)} 只")
     plot_ascending_triangle_results(tri_hits)
     all_hits.extend(tri_hits)
 
     # 策略3：VCP / 杯柄形态
-    vcp_hits = scan_ndx100_vcp(min_base_days=30, max_base_days=180)
+    vcp_hits = _scan_vcp_hits(min_base_days=30, max_base_days=180)
     print(f"【策略3】VCP / 杯柄形态：{len(vcp_hits)} 只")
     plot_vcp_results(vcp_hits)
     all_hits.extend(vcp_hits)
@@ -450,7 +497,7 @@ def test_scan_vcp():
 
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    vcp_hits = scan_ndx100_vcp(min_base_days=30, max_base_days=180)
+    vcp_hits = _scan_vcp_hits(min_base_days=30, max_base_days=180)
 
     print(f"\n{'='*60}")
     print(f"VCP / 杯柄扫描结果：共 {len(vcp_hits)} 只")
@@ -476,10 +523,10 @@ def test_scan_vcp():
 def test_step9_ai_review_triangle_gemini():
     """
     步骤九A：使用 Gemini 2.5 Flash 审查三角形策略
-    前提：先运行回测（python backtest.py）生成 data/backtest_charts/triangle/ 图表
+    前提：先运行回测（python -m stock_ana.backtest.backtest_multi_strategy）生成 data/backtest_charts/triangle/ 图表
     运行：pytest tests/test_screener.py::test_step9_ai_review_triangle_gemini -s
     """
-    from stock_ana.ai_code_reviewer import AICodeReviewer
+    from stock_ana.utils.ai_code_reviewer import AICodeReviewer
 
     reviewer = AICodeReviewer(backend="gemini", model="gemini-2.5-flash")
     result = reviewer.review_triangle_strategy(
@@ -506,7 +553,7 @@ def test_step9_ai_review_triangle_claude():
       2. 启动 Antigravity Manager 并在 API Proxy 页面开启服务
     运行：pytest tests/test_screener.py::test_step9_ai_review_triangle_claude -s
     """
-    from stock_ana.ai_code_reviewer import AICodeReviewer
+    from stock_ana.utils.ai_code_reviewer import AICodeReviewer
 
     reviewer = AICodeReviewer(backend="antigravity")
 
@@ -536,7 +583,7 @@ def test_step9_ai_review_vcp():
     步骤九C：使用 Gemini 审查 VCP 策略
     运行：pytest tests/test_screener.py::test_step9_ai_review_vcp -s
     """
-    from stock_ana.ai_code_reviewer import AICodeReviewer
+    from stock_ana.utils.ai_code_reviewer import AICodeReviewer
 
     reviewer = AICodeReviewer(backend="gemini", model="gemini-2.5-flash")
     result = reviewer.review_vcp_strategy(

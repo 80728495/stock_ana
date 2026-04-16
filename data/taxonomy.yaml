@@ -1,0 +1,428 @@
+# ============================================================
+# US Stock Industry Taxonomy (v1 Draft)
+# ============================================================
+# 目标：~100 个细分标签，分两级：Sector > Sub-Industry
+# 设计原则：
+#   1. 第一级 sector 沿用 Finviz 11 大板块（投资者熟悉）
+#   2. 第二级 sub-industry 在 Finviz industry 基础上做合并/拆分:
+#      - 股票数 <5 的合并到相邻分类
+#      - 过于笼统的拆分（如 Semiconductors 拆为 Fabless/IDM/Memory 等）
+#   3. 标签名保持英文，便于与 Finviz/SEC 互操作
+#   4. 每个标签附 description 和 finviz_map，便于 LLM 对照和自动映射
+# 用法：LLM 从本列表中选择 1-2 个 sub_industry 标签，不允许自造标签
+# ============================================================
+
+# ---- Technology (272 stocks) ----
+Technology:
+  - label: "AI & Cloud Infrastructure"
+    description: "AI chips, cloud computing platforms, GPU/TPU accelerators, hyperscale infrastructure"
+    examples: [NVDA, AVGO, ALAB, CRDO]
+
+  - label: "Semiconductors - Analog & Mixed-Signal"
+    description: "Analog ICs, power management, signal processing, sensors"
+    examples: [ADI, TXN, MCHP, MPWR, POWI, ON, ALGM]
+
+  - label: "Semiconductors - Digital & Logic"
+    description: "CPUs, FPGAs, ASICs, SoCs, digital logic chips, RF semiconductors"
+    examples: [INTC, AMD, QCOM, ARM, LSCC, QRVO, SWKS]
+
+  - label: "Semiconductors - Memory & Storage"
+    description: "DRAM, NAND flash, storage controllers, memory IP"
+    examples: [MU, SIMO, RMBS]
+
+  - label: "Semiconductors - Foundry & OSAT"
+    description: "Wafer foundry, outsourced assembly and test, semiconductor substrates"
+    examples: [TSM, GFS, UMC, ASX, TSEM, AMKR, AXTI]
+
+  - label: "Semiconductor Equipment & Materials"
+    description: "Lithography, wafer inspection, EDA, process equipment, photomasks"
+    examples: [AMAT, KLAC, CAMT, FORM]
+
+  - label: "Software - Enterprise & Vertical"
+    description: "ERP, CRM, HR, supply chain, industry-specific enterprise software"
+    examples: [SAP, ORCL, WDAY, NOW]
+
+  - label: "Software - Cybersecurity"
+    description: "Network security, endpoint protection, identity & access, cloud security"
+    examples: [CRWD, PANW, FTNT, ZS]
+
+  - label: "Software - Developer Tools & Platforms"
+    description: "Dev platforms, databases, observability, CI/CD, data infrastructure"
+    examples: [MDB, DDOG, SNOW, ESTC]
+
+  - label: "Software - FinTech"
+    description: "Payments processing, digital banking, financial software (not banks/asset mgmt)"
+    examples: [SQ, BILL, TOST]
+
+  - label: "Software - Other"
+    description: "Catch-all for application/infrastructure software not covered above"
+    examples: []
+
+  - label: "IT Services & Consulting"
+    description: "IT outsourcing, system integration, managed services, tech consulting"
+    examples: [ACN, CTSH, EPAM]
+
+  - label: "Communication Equipment"
+    description: "Networking hardware, routers, switches, optical transceivers, 5G equipment"
+    examples: [CSCO, ANET, COHR, CIEN]
+
+  - label: "Electronic Components"
+    description: "Passive components, connectors, PCBs, displays, optoelectronics"
+    examples: [GLW, APH, TEL]
+
+  - label: "Computer Hardware & Storage"
+    description: "PCs, servers, storage systems, peripherals, printers"
+    examples: [DELL, HPQ, NTAP, PSTG]
+
+  - label: "Scientific & Technical Instruments"
+    description: "Test & measurement, lab instruments, analytical equipment"
+    examples: [KEYS, TDY, COHR]
+
+  - label: "Solar & Clean Energy Tech"
+    description: "Solar panels, inverters, clean energy equipment manufacturers"
+    examples: [FSLR, ENPH]
+
+  - label: "Consumer Electronics"
+    description: "Consumer devices, wearables, smart home, EV electronics"
+    examples: [AAPL]
+
+# ---- Healthcare (209 stocks) ----
+Healthcare:
+  - label: "Biotech - Oncology"
+    description: "Cancer therapeutics, immuno-oncology, tumor-targeted therapies"
+    examples: [CGON, COGT, CAI]
+
+  - label: "Biotech - Rare Disease & Gene Therapy"
+    description: "Rare/orphan disease, gene therapy, cell therapy, genetic medicines"
+    examples: [BMRN, BEAM, BBIO]
+
+  - label: "Biotech - Immunology & Inflammation"
+    description: "Autoimmune, inflammatory diseases, dermatology biologics"
+    examples: [APGE, ARQT]
+
+  - label: "Biotech - Other"
+    description: "Biotech companies in neuroscience, metabolic, infectious disease, multi-therapeutic"
+    examples: [ALNY, BNTX, ACAD]
+
+  - label: "Drug Manufacturers - Large Cap"
+    description: "Big Pharma with diversified drug portfolios, global distribution"
+    examples: [JNJ, PFE, MRK, LLY, ABBV]
+
+  - label: "Drug Manufacturers - Specialty & Generic"
+    description: "Specialty drugs, generics, biosimilars, branded generics"
+    examples: [TEVA, VTRS]
+
+  - label: "Medical Devices"
+    description: "Implantable devices, surgical robots, cardiac/orthopedic devices"
+    examples: [MDT, ISRG, SYK, ABT]
+
+  - label: "Medical Instruments & Supplies"
+    description: "Surgical instruments, disposable supplies, sterilization, wound care"
+    examples: [BAX, BDX]
+
+  - label: "Diagnostics & Research"
+    description: "In vitro diagnostics, clinical labs, research reagents, CROs"
+    examples: [DHR, TMO, A, IQV]
+
+  - label: "Health Information Technology"
+    description: "EHR, health data analytics, healthcare IT platforms, telehealth"
+    examples: [VEEV, HIMS]
+
+  - label: "Healthcare Plans & Services"
+    description: "Health insurance, managed care, pharmacy benefit management"
+    examples: [UNH, CI, HUM, ELV]
+
+  - label: "Healthcare Facilities & Distribution"
+    description: "Hospitals, clinical labs facilities, medical/pharma distribution"
+    examples: [HCA, MCK, CAH]
+
+# ---- Industrials (197 stocks) ----
+Industrials:
+  - label: "Aerospace & Defense - Prime"
+    description: "Defense primes, military aircraft, missiles, space systems"
+    examples: [LMT, RTX, NOC, GD, BA]
+
+  - label: "Aerospace & Defense - Subsystems"
+    description: "Avionics, defense electronics, propulsion, satellite components"
+    examples: [HII, TDG, HEI]
+
+  - label: "Industrial Machinery & Automation"
+    description: "Factory automation, robotics, pumps, compressors, industrial equipment"
+    examples: [EMR, ROK, AME, IR]
+
+  - label: "Electrical Equipment"
+    description: "Power distribution, transformers, wiring, electrical components"
+    examples: [ETN, HUBB, AYI]
+
+  - label: "Engineering & Construction"
+    description: "E&C firms, infrastructure, environmental services"
+    examples: [PWR, ACM, J]
+
+  - label: "Building Products"
+    description: "HVAC, plumbing, insulation, building components"
+    examples: [JCI, TT, CARR]
+
+  - label: "Transportation - Rail & Freight"
+    description: "Railroads, freight logistics, intermodal transport"
+    examples: [UNP, CSX, NSC]
+
+  - label: "Transportation - Airlines & Shipping"
+    description: "Airlines, marine shipping, trucking, air freight"
+    examples: [DAL, UAL, FDX, UPS]
+
+  - label: "Industrial Services & Distribution"
+    description: "Industrial distribution, rental, leasing, waste management, staffing"
+    examples: [FAST, GWW, WM, RSG, URI]
+
+  - label: "Farm & Construction Equipment"
+    description: "Tractors, heavy machinery, mining equipment"
+    examples: [DE, CAT, AGCO]
+
+  - label: "Conglomerates"
+    description: "Diversified industrial conglomerates with multiple business segments"
+    examples: [GE, HON, MMM]
+
+# ---- Financial (191 stocks) ----
+Financial:
+  - label: "Banks - Diversified / Money Center"
+    description: "Large diversified banks, global banking, money center banks"
+    examples: [JPM, BAC, WFC, C, GS]
+
+  - label: "Banks - Regional"
+    description: "Regional and community banking, focused on lending & deposits"
+    examples: [HBAN, CFG, RF]
+
+  - label: "Capital Markets & Investment Banking"
+    description: "Brokerage, trading, investment banking, market making"
+    examples: [MS, SCHW, IBKR]
+
+  - label: "Asset Management"
+    description: "Mutual funds, ETF providers, hedge fund platforms, private equity managers"
+    examples: [BLK, BX, KKR, APO, ARES]
+
+  - label: "Insurance - Life & Health"
+    description: "Life insurance, annuities, health insurance underwriting"
+    examples: [MET, PRU, AFL]
+
+  - label: "Insurance - P&C & Specialty"
+    description: "Property & casualty, reinsurance, specialty lines, title insurance"
+    examples: [CB, TRV, ALL, PGR]
+
+  - label: "Insurance Brokers"
+    description: "Insurance brokerage, risk advisory, benefits consulting"
+    examples: [MMC, AON, WTW]
+
+  - label: "Credit Services & Consumer Finance"
+    description: "Credit cards, consumer lending, BNPL, student loans, auto finance"
+    examples: [V, MA, AXP, COF, SYF]
+
+  - label: "Financial Data & Exchanges"
+    description: "Stock exchanges, data providers, rating agencies, financial infrastructure"
+    examples: [CME, ICE, SPGI, MCO, MSCI]
+
+  - label: "Mortgage & Specialty Finance"
+    description: "Mortgage origination, servicing, mortgage REITs, specialty lenders"
+    examples: [RKT, UWMC]
+
+# ---- Consumer Cyclical (187 stocks) ----
+Consumer Cyclical:
+  - label: "E-Commerce & Internet Retail"
+    description: "Online retail, marketplace platforms, direct-to-consumer e-commerce"
+    examples: [AMZN, BABA, MELI, SHOP, ETSY]
+
+  - label: "Specialty & Apparel Retail"
+    description: "Specialty stores, apparel retailers, home improvement, department stores"
+    examples: [HD, LOW, TJX, ROST, NKE]
+
+  - label: "Restaurants & Food Service"
+    description: "Quick service, casual dining, coffee chains, food delivery platforms"
+    examples: [MCD, SBUX, CMG, YUM, DASH]
+
+  - label: "Auto Manufacturers"
+    description: "Passenger vehicles, commercial vehicles, EV manufacturers"
+    examples: [TSLA, GM, F, RIVN]
+
+  - label: "Auto Parts & Accessories"
+    description: "OEM and aftermarket auto parts, tires, auto dealerships"
+    examples: [APTV, BWA, AN, LAD]
+
+  - label: "Travel & Leisure"
+    description: "Hotels, cruise lines, OTAs, theme parks, resorts, casinos, gaming"
+    examples: [MAR, HLT, RCL, BKNG, LVS, WYNN]
+
+  - label: "Residential Construction & Furnishings"
+    description: "Homebuilders, furniture, fixtures, appliances, home decor"
+    examples: [LEN, DHI, NVR, WHR]
+
+  - label: "Apparel & Luxury Goods"
+    description: "Apparel brands, luxury, footwear, accessories, fashion"
+    examples: [NKE, LULU, TPR, RL]
+
+  - label: "Packaging & Containers"
+    description: "Paper, plastic, glass, metal packaging, containers"
+    examples: [BLL, AMCR, SEE, IP]
+
+  - label: "Personal Services & Education"
+    description: "Consumer services, education, fitness, pet care, personal care services"
+    examples: []
+
+# ---- Consumer Defensive (68 stocks) ----
+Consumer Defensive:
+  - label: "Packaged Foods & Beverages"
+    description: "Food manufacturers, beverage companies, snacks, dairy, confectionery"
+    examples: [PEP, KO, MDLZ, GIS, HSY]
+
+  - label: "Household & Personal Products"
+    description: "Cleaning products, personal care, cosmetics, toiletries"
+    examples: [PG, CL, EL, CHD]
+
+  - label: "Discount & Grocery Stores"
+    description: "Discount retailers, warehouse clubs, grocery chains, dollar stores"
+    examples: [WMT, COST, KR, DG, DLTR]
+
+  - label: "Tobacco & Alcohol"
+    description: "Tobacco products, cigarettes, beer, wine, spirits"
+    examples: [PM, MO, BF.B, STZ, DEO]
+
+  - label: "Agricultural Products"
+    description: "Crop production, seeds, fertilizers, animal nutrition, farm products"
+    examples: [ADM, BG, CTVA]
+
+# ---- Energy (109 stocks) ----
+Energy:
+  - label: "Oil & Gas - Integrated"
+    description: "Vertically integrated oil companies: exploration through refining & retail"
+    examples: [XOM, CVX, COP, EOG]
+
+  - label: "Oil & Gas - E&P"
+    description: "Upstream exploration and production of oil and natural gas"
+    examples: [PXD, DVN, FANG, HES]
+
+  - label: "Oil & Gas - Midstream & Pipelines"
+    description: "Pipelines, gathering, processing, storage, LNG terminals, MLPs"
+    examples: [WMB, KMI, ENB, ET, OKE]
+
+  - label: "Oil & Gas - Refining & Marketing"
+    description: "Refineries, fuel marketing, petroleum products distribution"
+    examples: [VLO, PSX, MPC]
+
+  - label: "Oil & Gas - Services & Equipment"
+    description: "Drilling services, oilfield equipment, pressure pumping, completion tools"
+    examples: [SLB, HAL, BKR]
+
+  - label: "Uranium & Nuclear"
+    description: "Uranium mining, nuclear fuel, nuclear energy services"
+    examples: [CCJ, LEU, NNE]
+
+  - label: "Coal"
+    description: "Thermal coal, metallurgical coal mining"
+    examples: [ARCH, HCC]
+
+# ---- Communication Services (69 stocks) ----
+Communication Services:
+  - label: "Internet Platforms & Search"
+    description: "Search engines, social media, digital advertising, internet platforms"
+    examples: [GOOGL, META, SNAP, PINS, RDDT]
+
+  - label: "Streaming & Digital Media"
+    description: "Video/music streaming, digital content, OTT platforms"
+    examples: [NFLX, SPOT, ROKU, DIS]
+
+  - label: "Telecom Services"
+    description: "Wireless carriers, fiber/broadband, cable, tower companies"
+    examples: [T, VZ, TMUS, AMT, CCI]
+
+  - label: "Video Games & Interactive Media"
+    description: "Game publishers, esports, interactive entertainment"
+    examples: [EA, TTWO, RBLX]
+
+  - label: "Publishing & Advertising"
+    description: "Print/digital publishing, TV broadcasting, advertising agencies, ad-tech"
+    examples: [NWSA, NYT, TTD, MGNI]
+
+# ---- Basic Materials (101 stocks) ----
+Basic Materials:
+  - label: "Precious Metals Mining"
+    description: "Gold, silver, platinum mining and royalties"
+    examples: [NEM, GOLD, AEM, WPM, FNV]
+
+  - label: "Industrial Metals & Mining"
+    description: "Copper, aluminum, steel, iron ore, zinc, diversified mining"
+    examples: [FCX, AA, NUE, STLD, CLF]
+
+  - label: "Specialty & Commodity Chemicals"
+    description: "Specialty chemicals, commodity chemicals, coatings, adhesives"
+    examples: [LIN, APD, SHW, ECL, DOW]
+
+  - label: "Agricultural Chemicals & Inputs"
+    description: "Fertilizers, crop protection, agricultural chemicals"
+    examples: [MOS, CF, FMC]
+
+  - label: "Building Materials & Paper"
+    description: "Cement, aggregates, lumber, paper, glass, construction materials"
+    examples: [VMC, MLM, WY]
+
+# ---- Utilities (61 stocks) ----
+Utilities:
+  - label: "Utilities - Regulated Electric"
+    description: "Regulated electric utilities, integrated electric power"
+    examples: [NEE, DUK, SO, D, AEP]
+
+  - label: "Utilities - Regulated Gas & Water"
+    description: "Natural gas distribution, water utilities"
+    examples: [SRE, NI, AWK, WTRG]
+
+  - label: "Utilities - Renewable & Independent Power"
+    description: "Renewable energy generation, independent power producers, clean energy utilities"
+    examples: [BEP, CWEN, VST]
+
+# ---- Real Estate (93 stocks) ----
+Real Estate:
+  - label: "REIT - Data Center & Tower"
+    description: "Data center REITs, cell tower REITs, digital infrastructure"
+    examples: [EQIX, DLR, AMT, CCI]
+
+  - label: "REIT - Industrial & Logistics"
+    description: "Warehouse, distribution center, logistics, cold storage REITs"
+    examples: [PLD, REXR, STAG]
+
+  - label: "REIT - Retail"
+    description: "Shopping center, mall, net lease, single tenant retail REITs"
+    examples: [O, NNN, SPG, VICI]
+
+  - label: "REIT - Residential"
+    description: "Apartment, single-family rental, manufactured housing REITs"
+    examples: [EQR, AVB, INVH, MAA]
+
+  - label: "REIT - Office"
+    description: "Office building REITs"
+    examples: [BXP, ARE, CBRE]
+
+  - label: "REIT - Healthcare"
+    description: "Healthcare facilities, senior housing, medical office REITs"
+    examples: [WELL, VTR, OHI]
+
+  - label: "REIT - Specialty & Diversified"
+    description: "Self-storage, gaming, diversified, mortgage REITs, specialty property"
+    examples: [PSA, EXR, CUBE, LADR]
+
+  - label: "Real Estate Services"
+    description: "Real estate brokerage, property management, real estate tech"
+    examples: [CBRE, JLL, RKT]
+
+# ============================================================
+# 合计标签数：
+#   Technology:          17
+#   Healthcare:          12
+#   Industrials:         11
+#   Financial:           10
+#   Consumer Cyclical:   10
+#   Consumer Defensive:   5
+#   Energy:               7
+#   Communication Svcs:   5
+#   Basic Materials:      5
+#   Utilities:            3
+#   Real Estate:          8
+# ────────────────────────
+#   总计:                93
+# ============================================================
