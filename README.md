@@ -277,6 +277,31 @@ python -m stock_ana.strategies.impl.momentum_detector --ticker NVDA  # 单只查
 # 板块周报（Gemini 深度分析）
 python -m stock_ana.workflows.weekly_sector_report --preview        # 仅预览数据
 python -m stock_ana.workflows.weekly_sector_report                  # 完整周报
+
+# 每周任务脚本入口（生成周报 + 推送通知）
+bash cron_weekly_sector_notify.sh
+```
+
+### 每周扫描流程（实际执行）
+
+1. `cron_weekly_sector_notify.sh`
+2. `python3 -m stock_ana.workflows.weekly_sector_report`
+3. `python3 notify_weekly_sector_report.py --workflow-exit-code <WORKFLOW_EXIT>`
+
+说明：
+- `weekly_sector_report` 内部按顺序执行：价格更新 -> 全市场异动扫描 -> 板块聚合 -> Gemini 生成周报。
+- 周报产物默认落盘到 `data/output/weekly_sector/`（含周报 Markdown 与 summary JSON）。
+- `notify_weekly_sector_report.py` 根据 workflow 退出码推送周报摘要与报告文件通知。
+
+### 每周扫描对应命令（可手工复现）
+
+```bash
+# Step A: 生成周报（更新价格 + 扫描 + Gemini 分析）
+python3 -m stock_ana.workflows.weekly_sector_report
+
+# Step B: 推送周报通知（将上一步退出码透传）
+WORKFLOW_EXIT=$?
+python3 notify_weekly_sector_report.py --workflow-exit-code "$WORKFLOW_EXIT"
 ```
 
 **6 维动量评分体系**（满分 10 分，≥3 分触发）：
