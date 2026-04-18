@@ -321,6 +321,7 @@ def build_scan_blocks(summary: dict | None, token: str) -> tuple[str, list[list[
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Notify daily update + Vegas scan result to main agent.")
     parser.add_argument("--scan-exit-code", type=int, default=0, help="Exit code of vegas_mid_daily_scan.py")
+    parser.add_argument("--no-email", action="store_true", help="跳过邮件发送，仅发飞书消息")
     return parser.parse_args()
 
 
@@ -373,7 +374,7 @@ def main() -> int:
                 print("⚠️ 报告文件卡片发送失败")
 
     # ── 邮件发送：每日扫描 Gemini 报告 ──
-    if report_path_raw:
+    if not args.no_email and report_path_raw:
         report_path = Path(report_path_raw)
         if report_path.exists():
             try:

@@ -137,8 +137,40 @@ python daily_update.py --indicators # 仅技术指标
 python daily_update.py --waves      # 仅 Wave 结构
 python daily_update.py --lists      # 仅同步列表文件
 
-# 自动 cron（每日盘后）
+# 自动 cron（每日任务实际流程）
+
+# 任务1：日更行情/指标/Wave（脚本入口）
 bash cron_daily_update.sh
+
+# 任务2：Vegas Mid 扫描 + Gemini 分析 + 通知推送（脚本入口）
+bash cron_daily_scan_notify.sh
+```
+
+### 每日 cron 流程（实际执行）
+
+1. `cron_daily_update.sh`
+2. `python3 daily_update.py`
+3. `cron_daily_scan_notify.sh`
+4. `python3 vegas_mid_daily_scan.py`
+5. `python3 notify_daily_scan_result.py --scan-exit-code <SCAN_EXIT>`
+
+说明：
+- `daily_update.py` 默认执行 US/NDX/HK/CN 行情更新 + 指标更新 + Wave 结构更新 + 数据校验。
+- `vegas_mid_daily_scan.py` 执行 Vegas Mid 日扫，产出信号、图表和 Gemini 分析摘要。
+- `notify_daily_scan_result.py` 根据扫描退出码推送当日结果通知。
+
+### 每日 cron 对应命令（可手工复现）
+
+```bash
+# Step A: 日更数据
+python3 daily_update.py
+
+# Step B: 扫描 + Gemini
+python3 vegas_mid_daily_scan.py
+
+# Step C: 推送通知（将上一步退出码透传）
+SCAN_EXIT=$?
+python3 notify_daily_scan_result.py --scan-exit-code "$SCAN_EXIT"
 ```
 
 ## 策略扫描

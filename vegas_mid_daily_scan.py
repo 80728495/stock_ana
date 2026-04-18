@@ -58,16 +58,30 @@ DAILY_SCAN_DIR = PROJECT_ROOT / "data" / "output" / "daily_scan"
 #  Step 1-2：运行扫描 + 画图
 # ═══════════════════════════════════════════════════════
 
-def run_daily_scan(lookback: int = 1) -> tuple[list[dict], int]:
-    """运行 Vegas Mid touch 扫描，返回 (signals, total_scanned)。"""
-    from stock_ana.scan.vegas_mid_scan import run_scan, _build_us_universe_watchlist
+def run_daily_scan(lookback: int = 1, list_mode: str = "tech") -> tuple[list[dict], int]:
+    """运行 Vegas Mid touch 扫描，返回 (signals, total_scanned)。
 
-    logger.info("=" * 60)
-    logger.info("【1/3】构建美股科技板块 watchlist ...")
-    logger.info("=" * 60)
-    watchlist = _build_us_universe_watchlist()
+    Args:
+        list_mode: "tech"（科技/通信，339只）| "full"（全量，~1550只）
+    """
+    from stock_ana.scan.vegas_mid_scan import (
+        run_scan,
+        _build_us_universe_watchlist,
+        _build_us_full_watchlist,
+    )
+
+    if list_mode == "full":
+        logger.info("=" * 60)
+        logger.info("【1/3】构建美股全量 watchlist ...")
+        logger.info("=" * 60)
+        watchlist = _build_us_full_watchlist()
+    else:
+        logger.info("=" * 60)
+        logger.info("【1/3】构建美股科技板块 watchlist ...")
+        logger.info("=" * 60)
+        watchlist = _build_us_universe_watchlist()
     total = len(watchlist)
-    logger.info(f"共 {total} 只标的载入")
+    logger.info(f"共 {total} 只标的载入（list_mode={list_mode}）")
 
     logger.info("=" * 60)
     logger.info(f"【2/3】运行 Vegas Mid touch 扫描（lookback={lookback}）...")
@@ -259,14 +273,14 @@ def save_summary(
 #  主入口
 # ═══════════════════════════════════════════════════════
 
-async def _main_async(lookback: int, scan_only: bool) -> None:
+async def _main_async(lookback: int, scan_only: bool, list_mode: str = "tech") -> None:
     t0 = datetime.now()
     logger.info("=" * 60)
     logger.info(f"  每日扫描流水线 — {t0.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 60)
 
     # Step 1-2：扫描 + 画图
-    signals, total_scanned = run_daily_scan(lookback=lookback)
+    signals, total_scanned = run_daily_scan(lookback=lookback, list_mode=list_mode)
 
     # Step 3：Gemini 分析
     gemini_path: Path | None = None
@@ -289,9 +303,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="每日 Vegas Mid 扫描 + Gemini 分析")
     parser.add_argument("--lookback",  type=int, default=1, help="回看天数（默认 1）")
     parser.add_argument("--scan-only", action="store_true", help="仅扫描，不调 Gemini")
+    parser.add_argument(
+        "--list",
+        dest="list_mode",
+        choices=["tech", "full"],
+        default="tech",
+        help="扫描标的池：tech（科技/通信339只，默认）| full（全量~1550只）",
+    )
     args = parser.parse_args()
 
-    asyncio.run(_main_async(lookback=args.lookback, scan_only=args.scan_only))
+    asyncio.run(_main_async(lookback=args.lookback, scan_only=args.scan_only, list_mode=args.list_mode))
 
 
 if __name__ == "__main__":

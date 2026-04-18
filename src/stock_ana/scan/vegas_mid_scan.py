@@ -128,6 +128,52 @@ def _build_us_universe_watchlist() -> dict:
     return watchlist
 
 
+def _build_us_full_watchlist() -> dict:
+    """美股全量列表（from us_full_list.md），附带行业和主营业务信息。
+
+    列表来源：data/lists/us_full_list.md（全量 ~1550 只，含所有行业）。
+    """
+    from stock_ana.data.list_manager import load_us_full_list
+    entries = load_us_full_list()  # [{ticker, company, sector, market_cap_b}]
+
+    # 加载 SEC profiles（行业 + 主营业务摘要）
+    _sec_profiles: dict[str, dict] = {}
+    _sec_profile_path = Path("data/us_sec_profiles.csv")
+    if _sec_profile_path.exists():
+        try:
+            _sp = pd.read_csv(_sec_profile_path, dtype=str)
+            _sp.columns = [c.lstrip("\ufeff").strip() for c in _sp.columns]
+            for _, r in _sp.iterrows():
+                t = str(r.get("ticker", "")).strip().upper()
+                if t:
+                    _sec_profiles[t] = {
+                        "sector": str(r.get("sector", "")).strip(),
+                        "industry": str(r.get("sic_description", "")).strip(),
+                        "business_summary": str(r.get("business_summary", "")).strip(),
+                    }
+        except Exception as e:
+            logger.warning(f"加载 SEC profiles 失败: {e}")
+
+    watchlist = {}
+    for entry in entries:
+        ticker = entry["ticker"]
+        if not ticker:
+            continue
+
+        path = CACHE_DIR / "us" / f"{ticker}.parquet"
+        if not path.exists():
+            continue
+
+        name = entry.get("company") or ticker
+        sec = _sec_profiles.get(ticker, {})
+        sector   = sec.get("sector") or entry.get("sector", "")
+        industry = sec.get("industry", "")
+        biz_summary = sec.get("business_summary", "")
+        watchlist[ticker] = ("US", name, path, "", sector, industry, biz_summary)
+    logger.info(f"美股全量列表：共 {len(watchlist)} 只有缓存数据的标的")
+    return watchlist
+
+
 # ═══════════════════════════════════════════════════════
 #  内部工具：信号注释处理（局灯hold和touch两种策略共用）
 # ═══════════════════════════════════════════════════════
