@@ -62,12 +62,13 @@ def run_daily_scan(lookback: int = 1, list_mode: str = "tech") -> tuple[list[dic
     """运行 Vegas Mid touch 扫描，返回 (signals, total_scanned)。
 
     Args:
-        list_mode: "tech"（科技/通信，339只）| "full"（全量，~1550只）
+        list_mode: "tech"（科技/通信，339只）| "full"（全量，~1550只）| "hk"（港股宇宙池，575只）
     """
     from stock_ana.scan.vegas_mid_scan import (
         run_scan,
         _build_us_universe_watchlist,
         _build_us_full_watchlist,
+        _build_hk_universe_watchlist,
     )
 
     if list_mode == "full":
@@ -75,6 +76,11 @@ def run_daily_scan(lookback: int = 1, list_mode: str = "tech") -> tuple[list[dic
         logger.info("【1/3】构建美股全量 watchlist ...")
         logger.info("=" * 60)
         watchlist = _build_us_full_watchlist()
+    elif list_mode == "hk":
+        logger.info("=" * 60)
+        logger.info("【1/3】构建港股宇宙池 watchlist ...")
+        logger.info("=" * 60)
+        watchlist = _build_hk_universe_watchlist()
     else:
         logger.info("=" * 60)
         logger.info("【1/3】构建美股科技板块 watchlist ...")
@@ -217,8 +223,10 @@ def save_summary(
     total_scanned: int,
     gemini_path: Path | None,
     lookback: int,
+    market_label: str = "",
+    filename: str = "summary.json",
 ) -> Path:
-    """生成 summary.json，为 clawbot 提供消费入口。"""
+    """生成 summary JSON，为 clawbot 提供消费入口。"""
     today = date.today().isoformat()
     out_dir = DAILY_SCAN_DIR / today
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -253,6 +261,7 @@ def save_summary(
     summary = {
         "scan_date":            today,
         "generated_at":         datetime.now().isoformat(timespec="seconds"),
+        "market_label":         market_label,
         "lookback_days":        lookback,
         "total_scanned":        total_scanned,
         "signals_found":        len(signals),
@@ -262,7 +271,7 @@ def save_summary(
         "signals":              summary_signals,
     }
 
-    path = out_dir / "summary.json"
+    path = out_dir / filename
     with open(path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     logger.success(f"Summary 已保存 → {path}")
@@ -273,11 +282,48 @@ def save_summary(
 #  主入口
 # ═══════════════════════════════════════════════════════
 
+async def _run_single_market(
+    lookback: int,
+    scan_only: bool,
+    list_mode: str,
+    market_label: str,
+    filename: str,
+) -> Path:
+    """扫描单个市场并保存 summary，返回 summary 路径。"""
+    signals, total_scanned = run_daily_scan(lookback=lookback, list_mode=list_mode)
+
+    gemini_path: Path | None = None
+    if not scan_only and signals:
+        gemini_path = await run_gemini_analysis(signals)
+
+    return save_summary(
+        signals, total_scanned, gemini_path, lookback,
+        market_label=market_label, filename=filename,
+    )
+
+
 async def _main_async(lookback: int, scan_only: bool, list_mode: str = "tech") -> None:
     t0 = datetime.now()
     logger.info("=" * 60)
     logger.info(f"  每日扫描流水线 — {t0.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 60)
+
+    if list_mode == "combined":
+        # 先美股，再港股
+        logger.info("【组合模式】先扫描美股科技板块，再扫描港股宇宙池")
+        await _run_single_market(lookback, scan_only, "tech",  "每日美股扫描", "summary_us.json")
+        await _run_single_market(lookback, scan_only, "hk",   "每日港股扫描", "summary_hk.json")
+        elapsed = (datetime.now() - t0).seconds
+        logger.info("=" * 60)
+        logger.info(f"  组合流水线完成 — 总耗时 {elapsed}s")
+        logger.info("=" * 60)
+        return
+
+    # 单市场模式
+    _label_map = {"tech": "每日美股扫描", "full": "每日美股扫描（全量）", "hk": "每日港股扫描"}
+    _file_map  = {"tech": "summary_us.json", "full": "summary_us.json", "hk": "summary_hk.json"}
+    market_label = _label_map.get(list_mode, "每日扫描")
+    filename     = _file_map.get(list_mode, "summary.json")
 
     # Step 1-2：扫描 + 画图
     signals, total_scanned = run_daily_scan(lookback=lookback, list_mode=list_mode)
@@ -288,7 +334,10 @@ async def _main_async(lookback: int, scan_only: bool, list_mode: str = "tech") -
         gemini_path = await run_gemini_analysis(signals)
 
     # Step 4-5：保存 summary
-    summary_path = save_summary(signals, total_scanned, gemini_path, lookback)
+    summary_path = save_summary(
+        signals, total_scanned, gemini_path, lookback,
+        market_label=market_label, filename=filename,
+    )
 
     elapsed = (datetime.now() - t0).seconds
     logger.info("=" * 60)
@@ -306,9 +355,9 @@ def main() -> None:
     parser.add_argument(
         "--list",
         dest="list_mode",
-        choices=["tech", "full"],
+        choices=["tech", "full", "hk", "combined"],
         default="tech",
-        help="扫描标的池：tech（科技/通信339只，默认）| full（全量~1550只）",
+        help="扫描标的池：tech（科技/通信339只，默认）| full（全量~1550只）| hk（港股宇宙池575只）| combined（先美股tech再港股）",
     )
     args = parser.parse_args()
 

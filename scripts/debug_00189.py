@@ -1,7 +1,7 @@
 """Diagnose a specific signal date for any stock."""
 import pandas as pd
 import numpy as np
-from stock_ana.data.market_data import load_shawn_data
+from stock_ana.data.market_data import load_watchlist_data
 from stock_ana.scan.vegas_mid_scan import scan_one, _came_from_above, _compute_all_emas
 from stock_ana.strategies.impl.vegas_mid import (
     detect_mid_touch_immediate, detect_mid_touch_and_hold,
@@ -14,7 +14,7 @@ from stock_ana.strategies.primitives.wave import analyze_wave_structure
 SYM    = "00981"
 TARGET = "2025-03-14"
 
-data = load_shawn_data()
+data = load_watchlist_data()
 info = data.get(SYM)
 df   = info["df"]
 
@@ -115,7 +115,7 @@ for s in sigs:
               f"gap={s.get('mid_long_gap_pct'):.1f}%  slope={s.get('long_slope_pct'):.2f}%")
 
 
-data = load_shawn_data()
+data = load_watchlist_data()
 info = data.get("00189")
 df = info["df"]
 

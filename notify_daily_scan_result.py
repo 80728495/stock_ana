@@ -234,13 +234,14 @@ def build_scan_blocks(summary: dict | None, token: str) -> tuple[str, list[list[
         )
 
     scan_date = summary.get("scan_date", "unknown")
+    market_label = summary.get("market_label") or "Vegas 扫描"
     total_scanned = summary.get("total_scanned", 0)
     signals_found = summary.get("signals_found", 0)
     has_gemini = bool(summary.get("has_gemini_analysis", False))
     report_path = summary.get("gemini_report_path") or "N/A"
     signals = summary.get("signals", [])
 
-    title = f"📊 Vegas 扫描报告 {scan_date}"
+    title = f"📊 {market_label} {scan_date}"
     head = [
         f"扫描总数: {total_scanned}",
         f"触发信号: {signals_found}",
@@ -322,17 +323,83 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Notify daily update + Vegas scan result to main agent.")
     parser.add_argument("--scan-exit-code", type=int, default=0, help="Exit code of vegas_mid_daily_scan.py")
     parser.add_argument("--no-email", action="store_true", help="跳过邮件发送，仅发飞书消息")
+    parser.add_argument(
+        "--market",
+        choices=["us", "hk", "combined"],
+        default="combined",
+        help="指定发哪个市场的扫描通知（默认 combined = 全部）",
+    )
     return parser.parse_args()
+
+
+def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: int = 0, no_email: bool = False) -> bool:
+    """发送单个市场的扫描通知（飞书 + 邮件）。返回是否成功。"""
+    ok = True
+    title2, blocks2 = build_scan_blocks(summary, token)
+    if scan_exit_code != 0:
+        blocks2.insert(
+            0,
+            [{"tag": "text", "text": f"⚠️ 扫描脚本退出码: {scan_exit_code}，请检查日志。"}],
+        )
+        title2 = f"{title2} ⚠️"
+
+    if not send_post_message(token, title2, blocks2):
+        print(f"❌ 扫描消息发送失败（{title2}）")
+        ok = False
+
+    report_path_raw = summary.get("gemini_report_path") if summary else None
+    if report_path_raw:
+        report_path = Path(report_path_raw)
+        file_key = upload_report_file(token, report_path)
+        if file_key:
+            market_label = (summary or {}).get("market_label") or "每日扫描"
+            send_post_message(
+                token,
+                f"📎 {market_label} Gemini 报告文件",
+                [[{"tag": "text", "text": "已附上 Gemini Markdown 报告文件。"}]],
+            )
+            if not send_file_message(token, file_key):
+                print("⚠️ 报告文件卡片发送失败")
+
+    # 邮件
+    if not no_email and report_path_raw:
+        report_path = Path(report_path_raw)
+        if report_path.exists():
+            try:
+                from stock_ana.utils.email_sender import send_report_with_charts
+                md_content = report_path.read_text(encoding="utf-8")
+                scan_date_str = (summary or {}).get("scan_date", date.today().isoformat())
+                signals_found = (summary or {}).get("signals_found", 0)
+                signals = (summary or {}).get("signals", [])
+                market_label = (summary or {}).get("market_label") or "每日扫描"
+
+                chart_paths, chart_labels = [], []
+                for s in signals:
+                    cp = Path(s.get("chart_path", ""))
+                    if cp.exists():
+                        chart_paths.append(cp)
+                        chart_labels.append(f"{s.get('symbol','')} ({s.get('name','')})")
+
+                email_sent = send_report_with_charts(
+                    subject=f"📊 {market_label} {scan_date_str}（{signals_found} 只信号）",
+                    md_content=md_content,
+                    chart_paths=chart_paths,
+                    signal_labels=chart_labels,
+                    to=["99772120@qq.com", "80728495@qq.com"],
+                )
+                if not email_sent:
+                    print("⚠️ 邮件发送失败")
+            except Exception as e:
+                print(f"⚠️ 邮件发送异常: {e}")
+
+    return ok
 
 
 def main() -> int:
     args = parse_args()
 
     status_path = _find_today_or_latest(DAILY_UPDATE_DIR, "status.json")
-    summary_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary.json")
-
     status = _read_json(status_path) if status_path else None
-    summary = _read_json(summary_path) if summary_path else None
 
     token = get_tenant_token()
     if not token:
@@ -347,62 +414,34 @@ def main() -> int:
         print("❌ 数据更新消息发送失败")
         ok = False
 
-    # Notification 2: scan report + Gemini summary + charts
-    title2, blocks2 = build_scan_blocks(summary, token)
-    if args.scan_exit_code != 0:
-        blocks2.insert(
-            0,
-            [{"tag": "text", "text": f"⚠️ 扫描脚本退出码: {args.scan_exit_code}，请检查日志。"}],
-        )
-        title2 = f"{title2} ⚠️"
+    # Notification 2 & 3: 美股 + 港股扫描（combined 模式）；如仅有一个则单独发
+    summary_us_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_us.json")
+    summary_hk_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_hk.json")
+    summary_legacy_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary.json")
 
-    if not send_post_message(token, title2, blocks2):
-        print("❌ 扫描消息发送失败")
-        ok = False
+    summary_us = _read_json(summary_us_path) if summary_us_path else None
+    summary_hk = _read_json(summary_hk_path) if summary_hk_path else None
+    summary_legacy = _read_json(summary_legacy_path) if summary_legacy_path else None
 
-    report_path_raw = summary.get("gemini_report_path") if summary else None
-    if report_path_raw:
-        report_path = Path(report_path_raw)
-        file_key = upload_report_file(token, report_path)
-        if file_key:
-            send_post_message(
-                token,
-                "📎 每日扫描 Gemini 报告文件",
-                [[{"tag": "text", "text": "已附上 Gemini Markdown 报告文件，点击下方文件卡片可直接查看。"}]],
-            )
-            if not send_file_message(token, file_key):
-                print("⚠️ 报告文件卡片发送失败")
+    send_us = args.market in ("us", "combined")
+    send_hk = args.market in ("hk", "combined")
 
-    # ── 邮件发送：每日扫描 Gemini 报告 ──
-    if not args.no_email and report_path_raw:
-        report_path = Path(report_path_raw)
-        if report_path.exists():
-            try:
-                from stock_ana.utils.email_sender import send_report_with_charts
-                md_content = report_path.read_text(encoding="utf-8")
-                scan_date_str = summary.get("scan_date", date.today().isoformat()) if summary else date.today().isoformat()
-                signals_found = summary.get("signals_found", 0) if summary else 0
-                signals = summary.get("signals", []) if summary else []
-
-                chart_paths = []
-                chart_labels = []
-                for s in signals:
-                    cp = Path(s.get("chart_path", ""))
-                    if cp.exists():
-                        chart_paths.append(cp)
-                        chart_labels.append(f"{s.get('symbol','')} ({s.get('name','')})")
-
-                email_sent = send_report_with_charts(
-                    subject=f"📊 每日扫描报告 {scan_date_str}（{signals_found} 只信号）",
-                    md_content=md_content,
-                    chart_paths=chart_paths,
-                    signal_labels=chart_labels,
-                    to=["99772120@qq.com", "80728495@qq.com"],
-                )
-                if not email_sent:
-                    print("⚠️ 邮件发送失败")
-            except Exception as e:
-                print(f"⚠️ 邮件发送异常: {e}")
+    if summary_us or summary_hk:
+        # 按 --market 参数决定发哪个市场
+        if send_us and summary_us:
+            if not _send_scan_notification(token, summary_us, args.scan_exit_code, args.no_email):
+                ok = False
+        elif send_us and not summary_us:
+            print("⚠️ 未找到 summary_us.json，跳过美股通知")
+        if send_hk and summary_hk:
+            if not _send_scan_notification(token, summary_hk, 0, args.no_email):
+                ok = False
+        elif send_hk and not summary_hk:
+            print("⚠️ 未找到 summary_hk.json，跳过港股通知")
+    else:
+        # 向后兼容：读旧 summary.json
+        if not _send_scan_notification(token, summary_legacy, args.scan_exit_code, args.no_email):
+            ok = False
 
     if ok:
         print("✅ main agent 通知发送完成")

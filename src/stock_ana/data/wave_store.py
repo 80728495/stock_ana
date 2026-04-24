@@ -239,10 +239,10 @@ def update_wave_structures(
     return {"ok": ok, "skip": skip, "fail": fail}
 
 
-def update_wave_structures_for_shawn_list() -> dict[str, list[str]]:
+def update_wave_structures_for_watchlist() -> dict[str, list[str]]:
     """更新 Shawn List 中所有股票的 wave 结构。"""
-    from stock_ana.data.list_manager import load_shawn_list
-    shawn = load_shawn_list()
+    from stock_ana.data.list_manager import load_watchlist
+    shawn = load_watchlist()
 
     pairs: list[tuple[str, str]] = []
     for code in shawn.get("hk", []):

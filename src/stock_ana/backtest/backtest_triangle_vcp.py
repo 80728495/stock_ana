@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from stock_ana.data.market_data import load_shawn_data
+from stock_ana.data.market_data import load_watchlist_data
 from stock_ana.strategies.primitives.peaks import find_macro_peaks
 from stock_ana.strategies.impl.triangle_vcp import screen_triangle_vcp
 from stock_ana.scan.triangle_vcp_scan import scan_historical_triangle_vcp
@@ -226,7 +226,7 @@ def run_backtest(step: int = 5, min_gap_days: int = 20):
     logger.info("VCP 三角形 专项历史回测 (Shawn List)")
     logger.info("=" * 60)
 
-    stock_data_full = load_shawn_data()
+    stock_data_full = load_watchlist_data()
     if not stock_data_full:
         logger.error("无数据！请确保 Shawn List 中的美股已下载到本地")
         return

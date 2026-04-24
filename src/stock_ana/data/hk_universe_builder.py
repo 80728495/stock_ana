@@ -241,34 +241,10 @@ def save_lists(df: pd.DataFrame) -> tuple[Path, Path]:
 #  Step 5: 下载三年 K 线数据
 # ═══════════════════════════════════════════════════════
 
-def _yf_code(code: str) -> str:
-    """HK 代号 → Yahoo Finance 格式: 00700 → '0700.HK'"""
-    return f"{int(code):04d}.HK"
-
-
-def _download_via_yfinance(code: str, start_date: str, end_date: str) -> pd.DataFrame | None:
-    """用 yfinance 下载 HK 股票历史数据，失败返回 None。"""
-    import yfinance as yf
-    sym = _yf_code(code)
-    hist = yf.download(sym, start=start_date[:4]+"-"+start_date[4:6]+"-"+start_date[6:],
-                       end=end_date[:4]+"-"+end_date[4:6]+"-"+end_date[6:],
-                       auto_adjust=True, progress=False)
-    if hist is None or hist.empty:
-        return None
-    # Flatten MultiIndex columns if present
-    if isinstance(hist.columns, pd.MultiIndex):
-        hist.columns = [c[0].lower() for c in hist.columns]
-    else:
-        hist.columns = [c.lower() for c in hist.columns]
-    hist.index.name = "date"
-    return hist
-
-
 def download_kline(df: pd.DataFrame, years: int = KLINE_YEARS,
                    skip_existing: bool = True) -> None:
     """
     用 akshare stock_hk_hist() 下载每只股票的 K 线数据（最近 years 年）。
-    当 EM 被封锁时，自动回退到 yfinance。
     保存到 data/cache/hk/{code}.parquet。
     """
     end_date   = datetime.now().strftime("%Y%m%d")
@@ -290,9 +266,8 @@ def download_kline(df: pd.DataFrame, years: int = KLINE_YEARS,
             continue
 
         hist = None
-        source = "akshare"
 
-        # 尝试 akshare (Eastmoney)
+        # 用 akshare (Eastmoney)
         try:
             hist = ak.stock_hk_hist(
                 symbol=code, period="daily",
@@ -310,23 +285,16 @@ def download_kline(df: pd.DataFrame, years: int = KLINE_YEARS,
                     hist = hist.set_index("date")
             else:
                 hist = None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"  [{i+1}/{total}] {code} {name}: akshare 失败 - {e}")
             hist = None
 
-        # 回退到 yfinance
         if hist is None or hist.empty:
-            source = "yfinance"
-            try:
-                hist = _download_via_yfinance(code, start_date, end_date)
-            except Exception:
-                hist = None
-
-        if hist is None or hist.empty:
-            logger.warning(f"  [{i+1}/{total}] {code} {name}: 两个数据源均失败")
+            logger.warning(f"  [{i+1}/{total}] {code} {name}: 下载失败")
             failed += 1
         else:
             hist.to_parquet(out_path)
-            logger.success(f"  [{i+1}/{total}] {code} {name}: {len(hist)} 行 [{source}] → {out_path.name}")
+            logger.success(f"  [{i+1}/{total}] {code} {name}: {len(hist)} 行 → {out_path.name}")
             ok += 1
 
         time.sleep(KLINE_DELAY)

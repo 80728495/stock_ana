@@ -4,7 +4,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from stock_ana.data.market_data import load_shawn_data
+from stock_ana.data.market_data import load_watchlist_data
 from stock_ana.strategies.primitives.wave import analyze_wave_structure
 from stock_ana.utils.plot_renderers import plot_wave_structure_chart
 
@@ -14,7 +14,7 @@ TARGETS = ["00981", "NVDA", "PLTR", "000537", "AAPL", "PDD", "MSFT"]
 
 
 def main():
-    data = load_shawn_data()
+    data = load_watchlist_data()
     for sym in TARGETS:
         info = data.get(sym)
         if info is None:

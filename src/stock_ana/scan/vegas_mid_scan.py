@@ -50,6 +50,30 @@ SCAN_OUT_DIR = OUTPUT_DIR / "vegas_scan"
 # a curated CSV (hk_main_largecap_list.csv) with name metadata — the generic
 # build_watchlist() covers all cache-dir–based sources automatically.
 
+def _build_hk_universe_watchlist() -> dict:
+    """港股全量宇宙池（from hk_universe_list.md，市值≥100亿，575只）。"""
+    from stock_ana.data.list_manager import _read_md_table
+    from stock_ana.config import DATA_DIR
+    path = DATA_DIR / "lists" / "hk_universe_list.md"
+    if not path.exists():
+        logger.warning(f"未找到港股宇宙池列表: {path}，回退到大市值列表")
+        return _build_hk_largecap_watchlist()
+
+    rows = _read_md_table(path)
+    watchlist = {}
+    for r in rows:
+        if len(r) < 3:
+            continue
+        code = r[1].strip().zfill(5)
+        name_zh = r[2].strip() or code
+        path_p = CACHE_DIR / "hk" / f"{code}.parquet"
+        if not path_p.exists():
+            continue
+        watchlist[code] = ("HK", name_zh, path_p, "")
+    logger.info(f"港股宇宙池列表：共 {len(watchlist)} 只有缓存数据的标的")
+    return watchlist
+
+
 def _build_hk_largecap_watchlist() -> dict:
     """港股大市值列表（from hk_main_largecap_list.csv）。"""
     csv_path = OUTPUT_DIR.parent / "hk_main_largecap_list.csv"
@@ -358,7 +382,7 @@ def scan_one(
     x.columns = [c.lower() for c in x.columns]
     x.index = pd.to_datetime(x.index)
     x = x.sort_index()
-    if len(x) < 200:
+    if len(x) < 2:
         return []
 
     close = x["close"].astype(float).values
@@ -609,7 +633,7 @@ def main():
                         choices=["STRONG_BUY", "BUY", "HOLD"],
                         help="最低信号等级 (默认 BUY)")
     parser.add_argument("--shawn", action="store_true",
-                        help="扫描 Shawn 自选列表（data/lists/shawn_list.md，默认）")
+                        help="扫描关注列表（data/lists/watchlist.md，默认）")
     parser.add_argument("--hk", action="store_true",
                         help="扫描港股大市值列表（data/hk_main_largecap_list.csv）")
     parser.add_argument("--us", action="store_true",

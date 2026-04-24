@@ -1,12 +1,13 @@
 """
 股票列表统一管理模块
 
-维护五个核心列表（存储于 data/lists/），提供加载和同步功能：
-  1. shawn_list       — 人工维护的重点关注股票（HK + US）
-  2. ndx100_list      — 纳斯达克 100 成分股（自动生成）
-  3. us_universe_list — 美股宇宙池 ~1500 只（自动生成）
-  4. hk_focus_list    — 港股重点关注（恒生/恒科，市值≥200亿，自动生成）
-  5. hk_full_list     — 港股全量标的（自动生成）
+维护六个核心列表（存储于 data/lists/），提供加载和同步功能：
+  1. watchlist         — 关注列表，含手动维护 + 自动同步持仓（HK + US + CN）
+  2. ndx100_list       — 纳斯达克 100 成分股（自动生成）
+  3. us_universe_list  — 美股宇宙池 ~1500 只（自动生成）
+  4. hk_focus_list     — 港股重点关注（恒生/恒科，市值≥200亿，自动生成）
+  5. hk_full_list      — 港股全量标的（自动生成，旧版 HKEX 来源）
+  6. hk_universe_list  — 港股投资标的池（富途 OpenD，市值≥100亿，自动生成）
 
 列表文件路径：data/lists/{name}.md
 """
@@ -83,19 +84,23 @@ def _write_md_table(
 # ─────────────────────── 加载接口 ───────────────────────
 
 
-def parse_shawn_list(path: Path | None = None) -> dict[str, list[dict[str, str]]]:
-    """解析 Shawn 关注股票列表，含名称信息。
+def parse_watchlist(path: Path | None = None) -> dict[str, list[dict[str, str]]]:
+    """解析关注列表（watchlist.md），含名称信息。
 
-    支持表格格式（data/lists/shawn_list.md）和旧version的 dash 格式（data/stock_list.md）。
+    支持四种区段：
+      - ## .*港股      → hk
+      - ## .*美股      → us
+      - ## .*大A       → cn
+      - ## 持仓.*      → holdings（按各行 market 列自动路由到 hk/us/cn）
 
     Args:
-        path: 显式路径；默认读 data/lists/shawn_list.md，不存在时尝试 data/stock_list.md。
+        path: 显式路径；默认读 data/lists/watchlist.md，不存在时尝试 data/stock_list.md。
 
     Returns:
-        {"us": [{"symbol": "PDD", "name": "拼多多"}, ...], "hk": [...]}
+        {"us": [{"symbol": "PDD", "name": "拼多多"}, ...], "hk": [...], "cn": [...]}
     """
     if path is None:
-        default = LISTS_DIR / "shawn_list.md"
+        default = LISTS_DIR / "watchlist.md"
         legacy = DATA_DIR / "stock_list.md"
         path = default if default.exists() else legacy
 
@@ -115,6 +120,9 @@ def parse_shawn_list(path: Path | None = None) -> dict[str, list[dict[str, str]]
         if re.search(r"##.*大A", stripped):
             section = "cn"
             continue
+        if re.search(r"##.*持仓", stripped):
+            section = "holdings"
+            continue
         if stripped.startswith("##"):
             section = None
             continue
@@ -122,13 +130,30 @@ def parse_shawn_list(path: Path | None = None) -> dict[str, list[dict[str, str]]
         if section is None:
             continue
 
-        # Table format: | CODE | NAME | ... |
+        # Table format: | CODE | ... |
         if stripped.startswith("|"):
             parts = [p.strip() for p in stripped.strip("|").split("|")]
-            if len(parts) < 2:
+            if not parts:
                 continue
             code = parts[0].strip()
             if not code or re.fullmatch(r"[-: ]+", code) or code in ("代码", "Code"):
+                continue
+
+            if section == "holdings":
+                # Holdings row: | CODE | MARKET | NAME | QTY | COST | PL% |
+                if len(parts) < 3:
+                    continue
+                mkt = parts[1].strip().upper()   # HK / US / CN
+                name = parts[2].strip() or code
+                if mkt == "HK":
+                    result["hk"].append({"symbol": code.zfill(5), "name": name})
+                elif mkt == "US":
+                    result["us"].append({"symbol": code.upper(), "name": name})
+                elif mkt == "CN":
+                    result["cn"].append({"symbol": code.zfill(6), "name": name})
+                continue
+
+            if len(parts) < 2:
                 continue
             name = parts[1].strip() or code
             if section == "hk":
@@ -155,20 +180,30 @@ def parse_shawn_list(path: Path | None = None) -> dict[str, list[dict[str, str]]
                     name = payload.replace(m.group(), "").strip() or code
                     result["hk"].append({"symbol": code, "name": name})
 
+    # Deduplicate per market (持仓可能与手动列表重叠，保留第一次出现)
+    for mkt in ("hk", "us", "cn"):
+        seen: set[str] = set()
+        deduped = []
+        for e in result[mkt]:
+            if e["symbol"] not in seen:
+                seen.add(e["symbol"])
+                deduped.append(e)
+        result[mkt] = deduped
+
     return result
 
 
-def load_shawn_list() -> dict[str, list[str]]:
+def load_watchlist() -> dict[str, list[str]]:
     """加载 Shawn 关注股票列表（仅返回代码）。
 
     Returns:
         {"hk": ["02400", ...], "us": ["PDD", ...], "cn": ["600519", ...]}
     """
-    detailed = parse_shawn_list()
+    detailed = parse_watchlist()
     hk = [e["symbol"] for e in detailed["hk"]]
     us = [e["symbol"] for e in detailed["us"]]
     cn = [e["symbol"] for e in detailed.get("cn", [])]
-    logger.info(f"Shawn 列表：HK {len(hk)} 只，US {len(us)} 只，CN {len(cn)} 只")
+    logger.info(f"关注列表：HK {len(hk)} 只，US {len(us)} 只，CN {len(cn)} 只")
     return {"hk": hk, "us": us, "cn": cn}
 
 
@@ -213,6 +248,19 @@ def load_hk_full_list() -> list[str]:
     rows = _read_md_table(path)
     codes = [r[1] for r in rows if len(r) >= 2]
     logger.info(f"港股全量列表：{len(codes)} 只")
+    return codes
+
+
+def load_hk_universe_list() -> list[str]:
+    """加载港股投资标的池代码列表（5位格式，来源：富途 OpenD，市值≥100亿）。"""
+    path = LISTS_DIR / "hk_universe_list.md"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"港股宇宙池列表不存在: {path}，请先运行 python -m stock_ana.data.hk_universe_builder_futu"
+        )
+    rows = _read_md_table(path)
+    codes = [r[1] for r in rows if len(r) >= 2]
+    logger.info(f"港股宇宙池列表：{len(codes)} 只")
     return codes
 
 
@@ -283,15 +331,24 @@ def load_us_full_list() -> list[dict[str, str]]:
     return result
 
 
-_TECH_SECTORS = {"Technology", "Communication Services"}
+_TECH_SECTORS = {
+    "Technology",
+    "Communication Services",
+    "Consumer Cyclical",
+    "Healthcare",
+    "Industrials",
+    "Financial",
+}
 
 
 def sync_us_tech_list_md() -> Path:
     """
-    生成美股科技/通信板块列表 data/lists/us_tech_list.md。
+    生成美股高弹性板块列表 data/lists/us_tech_list.md。
 
-    内容：从 us_universe.csv 中过滤 Technology + Communication Services，
-    再补入 NDX100 里属于这两个板块但不在 universe 中的股票，按市值降序。
+    覆盖行业：Technology, Communication Services, Consumer Cyclical,
+    Healthcare, Industrials, Financial（共 6 个行业）。
+    排除：Utilities, Energy, Basic Materials, Real Estate, Consumer Defensive。
+    再补入 NDX100 里属于上述板块但不在 universe 中的股票，按市值降序。
     每日扫描 Vegas Mid 策略时读取此列表，而非全量 1500+ 只。
     """
     csv = DATA_DIR / "us_universe.csv"
@@ -339,8 +396,8 @@ def sync_us_tech_list_md() -> Path:
 
     _write_md_table(
         path,
-        title="美股科技/通信板块列表（US Tech Universe）",
-        subtitle="来源：US Universe 过滤 Technology + Communication Services",
+        title="美股高弹性板块列表（US Active Universe）",
+        subtitle="来源：US Universe 过滤 Technology / Communication Services / Consumer Cyclical / Healthcare / Industrials / Financial",
         count=len(df),
         headers=["#", "代码", "公司", "行业", "市値(B)"],
         rows=rows,
@@ -497,12 +554,53 @@ def sync_hk_full_list_md(df: pd.DataFrame | None = None) -> Path:
     return path
 
 
+def sync_hk_universe_list_md(df: pd.DataFrame | None = None) -> Path:
+    """
+    同步港股投资标的池列表到 data/lists/hk_universe_list.md。
+
+    来源：data/hk_universe.csv（由 hk_universe_builder_futu 生成，市值≥100亿港元）。
+
+    Args:
+        df: 含 code/name_zh/market_cap_yi/avg_turnover_20d 的 DataFrame；
+            None 则从 data/hk_universe.csv 读取
+    """
+    if df is None:
+        csv = DATA_DIR / "hk_universe.csv"
+        if not csv.exists():
+            raise FileNotFoundError(
+                f"请先运行 python -m stock_ana.data.hk_universe_builder_futu 生成: {csv}"
+            )
+        df = pd.read_csv(csv, dtype={"code": str})
+
+    df = df.copy()
+    df["code"] = df["code"].apply(lambda x: str(x).zfill(5))
+    df = df.sort_values("market_cap_hkd", ascending=False).reset_index(drop=True)
+
+    path = LISTS_DIR / "hk_universe_list.md"
+    rows = []
+    for i, row in enumerate(df.itertuples(), 1):
+        cap = f"{row.market_cap_yi:.0f}" if hasattr(row, "market_cap_yi") and pd.notna(row.market_cap_yi) else "-"
+        turn = f"{row.avg_turnover_20d / 1e4:.0f}" if hasattr(row, "avg_turnover_20d") and pd.notna(row.avg_turnover_20d) else "-"
+        rows.append([str(i), row.code, str(row.name_zh), cap, turn])
+
+    _write_md_table(
+        path,
+        title="港股投资标的池（HK Universe）",
+        subtitle="来源：富途 OpenD，主板，市值≥100亿港元，20日均成交额≥3000万港元",
+        count=len(df),
+        headers=["#", "代码", "中文名", "市值(亿)", "20日均成交(万)"],
+        rows=rows,
+    )
+    logger.info(f"已同步 hk_universe_list.md（{len(df)} 只）")
+    return path
+
+
 def sync_all_auto_lists(include_hk_full: bool = False) -> None:
     """
     同步自动生成列表。
 
-    日常默认仅同步：NDX100、美股全量合并列表、美股宇宙池、港股重点。
-    hk_full_list 作为候选池，默认不参与日常同步；如需同步可显式开启。
+    日常默认同步：NDX100、美股全量合并列表、美股宇宙池、港股重点、港股宇宙池。
+    hk_full_list 作为旧版候选池，默认不参与日常同步；如需同步可显式开启。
     """
     logger.info("开始同步自动生成列表（日常）...")
     sync_ndx100_list_md()
@@ -522,6 +620,10 @@ def sync_all_auto_lists(include_hk_full: bool = False) -> None:
         sync_hk_focus_list_md()
     except FileNotFoundError as e:
         logger.warning(f"跳过港股重点列表: {e}")
+    try:
+        sync_hk_universe_list_md()
+    except FileNotFoundError as e:
+        logger.warning(f"跳过港股宇宙池: {e}")
 
     if include_hk_full:
         try:

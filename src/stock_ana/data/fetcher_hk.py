@@ -1,6 +1,6 @@
 """
-港股数据获取模块 - 恒生指数 / 恒生科技指数 核心标的
-使用 akshare（东方财富源）获取数据，支持本地持久化存储与增量更新
+港股数据获取模块 - 宇宙池全量（市值≥100亿，~575只）
+使用富途 OpenD 为主源（批量单连接），akshare 为备用回落
 """
 
 import os
@@ -134,8 +134,10 @@ def fetch_hk_stock(symbol: str,
     """
     获取单只港股历史行情数据（前复权）
 
-    优先使用东方财富源 (stock_hk_hist)，如不可用则自动回落到
-    新浪/雅虎源 (stock_hk_daily)。
+    优先级：
+      A. 富途 OpenD（本地运行，稳定无限流）
+      B. akshare 东方财富源（EM，大陆访问需绕代理）
+      C. akshare 新浪源（回落）
 
     Args:
         symbol:     股票代码，如 "00700"
@@ -146,12 +148,26 @@ def fetch_hk_stock(symbol: str,
         DataFrame，index=date，columns=[open, high, low, close, volume]
         （如使用东方财富源，还包含 turnover 列）
     """
-    import akshare as ak
-
     if end_date is None:
         end_date = datetime.now().strftime("%Y%m%d")
 
-    # ── 方案 A：东方财富源 ──
+    # 日期转为 "YYYY-MM-DD" 格式，供 futu 使用
+    sd_futu = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
+    ed_futu = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
+
+    # ── 方案 A：富途 OpenD ──
+    try:
+        from stock_ana.data.fetcher_futu import fetch_hk_stock_futu
+        df = fetch_hk_stock_futu(symbol, start_date=sd_futu, end_date=ed_futu)
+        if df is not None and not df.empty:
+            return df
+        logger.debug(f"HK {symbol}: futu 返回空，回落 akshare ...")
+    except Exception as futu_err:
+        logger.debug(f"HK {symbol}: futu 失败 ({futu_err})，回落 akshare ...")
+
+    # ── 方案 B：akshare 东方财富源 ──
+    import akshare as ak
+
     try:
         with _bypass_proxy():
             df = ak.stock_hk_hist(
@@ -180,7 +196,7 @@ def fetch_hk_stock(symbol: str,
     except Exception as em_err:
         logger.debug(f"HK {symbol}: 东方财富源失败 ({em_err})，尝试新浪源 ...")
 
-    # ── 方案 B：新浪/雅虎源（回落） ──
+    # ── 方案 C：akshare 新浪源 ──
     with _bypass_proxy():
         df = ak.stock_hk_daily(symbol=symbol, adjust="qfq")
 
@@ -277,7 +293,13 @@ def _fetch_single(code: str, start_date: str, end_date: str | None = None) -> pd
 
 def update_hk_data(max_stale_days: int = 0) -> dict[str, pd.DataFrame]:
     """
-    增量更新全部港股核心标的的本地数据。
+    增量更新全部港股核心标的的本地数据（富途 OpenD 单连接批量更新）。
+
+    标的来源优先级：
+      1. data/lists/hk_universe_list.md（富途宇宙池，市值≥100亿）
+      2. 回落到 data/hk_list.txt（旧版 HKEX 来源）
+
+    数据获取：整个批次共用一个 futu 连接，逐只获取；单只失败时回落 akshare。
 
     逻辑：
     1. 尚无本地数据 → 下载近 3 年全量数据
@@ -290,86 +312,163 @@ def update_hk_data(max_stale_days: int = 0) -> dict[str, pd.DataFrame]:
     Returns:
         {code: DataFrame} 包含全部标的的最新完整数据
     """
-    codes = get_hk_stock_codes()
-    hk_list = load_hk_list()
-    code_name_map = dict(zip(hk_list["code"], hk_list["name"]))
+    # ── 读取标的列表（futu宇宙池优先，回落旧版） ──
+    try:
+        from stock_ana.data.list_manager import load_hk_universe_list
+        codes = load_hk_universe_list()
+        code_name_map: dict[str, str] = {}
+        logger.info(f"使用富途港股宇宙池: {len(codes)} 只")
+    except FileNotFoundError:
+        logger.warning("hk_universe_list.md 不存在，回落到旧版 hk_list.txt")
+        codes = get_hk_stock_codes()
+        hk_list = load_hk_list()
+        code_name_map = dict(zip(hk_list["code"], hk_list["name"]))
 
     today = pd.Timestamp.now().normalize()
-    three_years_ago = (today - timedelta(days=365 * 3)).strftime("%Y%m%d")
+    three_years_ago = (today - timedelta(days=365 * 3))
+    three_years_ago_yyyymmdd = three_years_ago.strftime("%Y%m%d")
+    three_years_ago_iso = three_years_ago.strftime("%Y-%m-%d")
+    today_iso = today.strftime("%Y-%m-%d")
 
-    # 分组
+    # ── 分组 ──
     need_full: list[str] = []
     need_incr: dict[str, pd.Timestamp] = {}
-    up_to_date: list[str] = []
+    skipped: list[str] = []
 
     for code in codes:
+        if code in _INDEX_MAP:
+            # 指数走单独接口，不纳入 futu 批量
+            local = load_hk_local(code)
+            if local is None or local.empty or (today - local.index.max()).days > max_stale_days:
+                need_full.append(code)
+            else:
+                skipped.append(code)
+            continue
+
         local = load_hk_local(code)
         if local is None or local.empty:
             need_full.append(code)
         else:
-            last_date = local.index.max()
+            last_date = pd.Timestamp(local.index.max()).normalize()
             if (today - last_date).days > max_stale_days:
                 need_incr[code] = last_date
             else:
-                up_to_date.append(code)
+                skipped.append(code)
 
     logger.info(
         f"港股数据状态：全量下载 {len(need_full)} 只 | "
-        f"增量更新 {len(need_incr)} 只 | 已最新 {len(up_to_date)} 只"
+        f"增量更新 {len(need_incr)} 只 | 已最新 {len(skipped)} 只"
     )
 
-    # ── 全量下载 ──
-    if need_full:
-        logger.info(f"开始全量下载 {len(need_full)} 只港股 ...")
-        ok_count = 0
-        for i, code in enumerate(need_full, 1):
-            name = code_name_map.get(code, "")
+    updated = 0
+    failed = 0
+
+    # ── 主路径：futu 单连接批量 ──
+    individual_codes_full = [c for c in need_full if c not in _INDEX_MAP]
+    individual_codes_incr = {c: d for c, d in need_incr.items() if c not in _INDEX_MAP}
+    index_codes_todo = [c for c in need_full if c in _INDEX_MAP]
+
+    if individual_codes_full or individual_codes_incr:
+        all_individual = individual_codes_full + list(individual_codes_incr.keys())
+        logger.info(
+            f"开始 futu 单连接批量获取 {len(all_individual)} 只个股 "
+            f"(限频 0.5s/只，预计 {len(all_individual) * 0.5 / 60:.1f} 分钟) ..."
+        )
+
+        from stock_ana.data.fetcher_futu import fetch_hk_stock_with_ctx, quote_context
+        futu_failed: list[str] = []
+
+        with quote_context() as ctx:
+            # 全量下载
+            for i, code in enumerate(individual_codes_full, 1):
+                name = code_name_map.get(code, "")
+                try:
+                    df = fetch_hk_stock_with_ctx(ctx, code, three_years_ago_iso, today_iso)
+                    if not df.empty:
+                        save_hk_local(code, df)
+                        updated += 1
+                        if i % 20 == 0 or i == len(individual_codes_full):
+                            logger.info(
+                                f"[全量 {i}/{len(individual_codes_full)}] {code} {name}: "
+                                f"{len(df)} 行 ({df.index.min().date()} ~ {df.index.max().date()})"
+                            )
+                    else:
+                        logger.warning(f"[全量 {i}/{len(individual_codes_full)}] {code} {name}: futu 返回空")
+                        futu_failed.append(code)
+                except Exception as e:
+                    logger.debug(f"[全量 {i}/{len(individual_codes_full)}] {code} {name}: futu 失败({e})，加入回落列表")
+                    futu_failed.append(code)
+                time.sleep(0.5)  # 限频：60次/30秒
+
+            # 增量更新
+            for i, (code, last_date) in enumerate(individual_codes_incr.items(), 1):
+                name = code_name_map.get(code, "")
+                incr_start = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
+                try:
+                    new_df = fetch_hk_stock_with_ctx(ctx, code, incr_start, today_iso)
+                    if not new_df.empty:
+                        old_df = load_hk_local(code)
+                        combined = pd.concat([old_df, new_df])
+                        combined = combined[~combined.index.duplicated(keep="last")]
+                        combined = combined.sort_index()
+                        save_hk_local(code, combined)
+                        updated += 1
+                        if i % 20 == 0 or i == len(individual_codes_incr):
+                            logger.info(
+                                f"[增量 {i}/{len(individual_codes_incr)}] {code} {name}: "
+                                f"新增 {len(new_df)} 行，总计 {len(combined)} 行"
+                            )
+                    else:
+                        logger.debug(f"[增量 {i}/{len(individual_codes_incr)}] {code} {name}: 无新数据")
+                        updated += 1  # 无新数据不算失败
+                except Exception as e:
+                    logger.debug(f"[增量 {i}/{len(individual_codes_incr)}] {code} {name}: futu 失败({e})，加入回落列表")
+                    futu_failed.append(code)
+                time.sleep(0.5)  # 限频：60次/30秒
+
+        # ── 回落路径：akshare（futu 失败的个股） ──
+        if futu_failed:
+            logger.warning(f"futu 失败 {len(futu_failed)} 只，回落 akshare ...")
+            for i, code in enumerate(futu_failed, 1):
+                name = code_name_map.get(code, "")
+                start_yyyymmdd = (
+                    three_years_ago_yyyymmdd
+                    if code not in individual_codes_incr
+                    else (individual_codes_incr[code] + timedelta(days=1)).strftime("%Y%m%d")
+                )
+                try:
+                    df = _fetch_single(code, start_date=start_yyyymmdd)
+                    if not df.empty:
+                        if code in individual_codes_incr:
+                            old_df = load_hk_local(code)
+                            if old_df is not None:
+                                df = pd.concat([old_df, df])
+                                df = df[~df.index.duplicated(keep="last")].sort_index()
+                        save_hk_local(code, df)
+                        updated += 1
+                        logger.info(f"[akshare回落 {i}/{len(futu_failed)}] {code} {name}: {len(df)} 行")
+                    else:
+                        failed += 1
+                        logger.warning(f"[akshare回落 {i}/{len(futu_failed)}] {code} {name}: 返回空")
+                except Exception as e:
+                    failed += 1
+                    logger.error(f"[akshare回落 {i}/{len(futu_failed)}] {code} {name}: 失败 - {e}")
+                time.sleep(0.3)
+
+    # ── 指数（走 akshare 专用接口） ──
+    if index_codes_todo:
+        logger.info(f"更新 {len(index_codes_todo)} 个港股指数 ...")
+        for code in index_codes_todo:
             try:
-                df = _fetch_single(code, start_date=three_years_ago)
+                df = fetch_hk_index(code)
                 if not df.empty:
                     save_hk_local(code, df)
-                    ok_count += 1
-                    if i % 5 == 0 or i == len(need_full):
-                        logger.info(
-                            f"[全量 {i}/{len(need_full)}] {code} {name}: "
-                            f"{len(df)} 行 ({df.index.min().date()} ~ {df.index.max().date()})"
-                        )
-                else:
-                    logger.warning(f"[全量 {i}/{len(need_full)}] {code} {name}: 返回空数据")
+                    updated += 1
             except Exception as e:
-                logger.error(f"[全量 {i}/{len(need_full)}] {code} {name}: 下载失败 - {e}")
-            # 延时防止限流
-            time.sleep(0.3)
+                failed += 1
+                logger.error(f"指数 {code}: 更新失败 - {e}")
 
-        logger.info(f"全量下载完成：成功 {ok_count}/{len(need_full)} 只")
-
-    # ── 增量更新 ──
-    if need_incr:
-        logger.info(f"开始增量更新 {len(need_incr)} 只港股 ...")
-        for i, (code, last_date) in enumerate(need_incr.items(), 1):
-            name = code_name_map.get(code, "")
-            try:
-                start = (last_date + timedelta(days=1)).strftime("%Y%m%d")
-                new_df = _fetch_single(code, start_date=start)
-                if not new_df.empty:
-                    old_df = load_hk_local(code)
-                    combined = pd.concat([old_df, new_df])
-                    combined = combined[~combined.index.duplicated(keep="last")]
-                    combined = combined.sort_index()
-                    save_hk_local(code, combined)
-                    logger.info(
-                        f"[增量 {i}/{len(need_incr)}] {code} {name}: "
-                        f"新增 {len(new_df)} 行，总计 {len(combined)} 行"
-                    )
-                else:
-                    logger.debug(
-                        f"[增量 {i}/{len(need_incr)}] {code} {name}: 无新数据"
-                    )
-            except Exception as e:
-                logger.error(
-                    f"[增量 {i}/{len(need_incr)}] {code} {name}: 更新失败 - {e}"
-                )
-            time.sleep(0.3)
+    logger.info(f"港股更新完成: 成功 {updated}, 跳过 {len(skipped)}, 失败 {failed}")
 
     # ── 加载全部本地数据返回 ──
     result: dict[str, pd.DataFrame] = {}
@@ -380,6 +479,7 @@ def update_hk_data(max_stale_days: int = 0) -> dict[str, pd.DataFrame]:
 
     logger.info(f"港股本地数据加载完毕：{len(result)}/{len(codes)} 只标的可用")
     return result
+
 
 
 def load_all_hk_data() -> dict[str, pd.DataFrame]:

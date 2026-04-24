@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from stock_ana.data.market_data import load_market_data, load_universe_data, load_shawn_data
+from stock_ana.data.market_data import load_market_data, load_universe_data, load_watchlist_data
 from stock_ana.strategies.api import screen_vcp_setup
 from stock_ana.utils.plot_renderers import plot_vcp_backtest_signals
 from stock_ana.scan.vcp_scan import scan_historical_vcps
@@ -243,7 +243,7 @@ def run_vcp_backtest(step: int = 5, min_gap_days: int = 20, universe: str = "ndx
 
     logger.info("加载数据...")
     if universe == "shawn":
-        shawn_info = load_shawn_data()
+        shawn_info = load_watchlist_data()
         stock_data = {sym: info["df"] for sym, info in shawn_info.items()}
     else:
         stock_data = load_universe_data(universe)  # type: ignore[arg-type]

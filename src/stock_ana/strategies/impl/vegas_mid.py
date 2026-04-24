@@ -105,7 +105,7 @@ def detect_mid_touch_immediate(
         band = f"ema{span}"
         last_emitted = -999
 
-        for i in range(200, n):
+        for i in range(1, n):
             if i - last_emitted < cooldown:
                 continue
 

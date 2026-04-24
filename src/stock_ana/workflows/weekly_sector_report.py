@@ -241,8 +241,24 @@ _WEEKLY_PROMPT = """角色设定：你是一位顶级宏观策略分析师和行
 
 
 async def _init_client() -> GeminiClient:
-    """Initialize the Gemini client used for weekly sector commentary."""
-    client = GeminiClient()
+    """Initialize the Gemini client used for weekly sector commentary.
+
+    优先从环境变量 GEMINI_PSID / GEMINI_PSIDTS 读取 Cookie，
+    避免 cron 等非 GUI session 下 browser-cookie3 无法访问 Keychain 的问题。
+    若环境变量未设置，回退到 browser-cookie3 自动读取（仅限交互式 session）。
+    """
+    import os
+
+    psid   = os.environ.get("GEMINI_PSID", "").strip()
+    psidts = os.environ.get("GEMINI_PSIDTS", "").strip()
+
+    if psid:
+        client = GeminiClient(secure_1psid=psid, secure_1psidts=psidts or None)
+        logger.info("Gemini 客户端：使用环境变量 Cookie 初始化")
+    else:
+        client = GeminiClient()
+        logger.info("Gemini 客户端：使用 browser-cookie3 自动读取 Cookie")
+
     await client.init(
         timeout=180,
         auto_close=False,

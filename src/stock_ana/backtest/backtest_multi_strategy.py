@@ -14,7 +14,7 @@ import pandas as pd
 from loguru import logger
 
 # ──────── 项目导入 ────────
-from stock_ana.data.market_data import load_market_data, load_universe_data, load_shawn_data
+from stock_ana.data.market_data import load_market_data, load_universe_data, load_watchlist_data
 from stock_ana.data.indicators import add_vegas_channel
 from stock_ana.strategies.api import (
     screen_ma_squeeze,
@@ -737,7 +737,7 @@ def run_backtest(
     """
     logger.info("加载数据...")
     if universe == "shawn":
-        shawn_info = load_shawn_data()
+        shawn_info = load_watchlist_data()
         stock_data = {sym: info["df"] for sym, info in shawn_info.items()}
     else:
         stock_data = load_universe_data(universe)  # type: ignore[arg-type]

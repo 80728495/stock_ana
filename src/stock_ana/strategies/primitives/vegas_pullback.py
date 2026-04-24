@@ -149,7 +149,7 @@ def detect_vegas_pullback(
         broke_below = 0
         last_confirmed = -999
 
-        for i in range(200, n):
+        for i in range(1, n):
             if i - last_confirmed < cooldown:
                 state = None
                 continue

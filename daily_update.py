@@ -6,8 +6,8 @@
 
   1. 美股宇宙池 ~1500 只    → data/cache/us/
   2. 纳指 100               → data/cache/ndx100/
-  3. 港股重点标的（~330 只）→ data/cache/hk/
-  3b. A 股（shawn_list CN）  → data/cache/cn/
+  3. 港股宇宙池（~575 只）  → data/cache/hk/
+  3b. A 股（watchlist CN）  → data/cache/cn/
   4. 技术指标               → data/cache/indicators/{market}/
      (EMA8/21/34/55/60/144/169/200/250；成交量MA5/10/50；前高252日)
   5. Wave 结构（全量 US+HK） → data/cache/wave_structure/{market}/
@@ -91,7 +91,7 @@ def update_ndx() -> dict:
 
 
 def update_hk() -> dict:
-    """更新港股重点标的 OHLCV 数据（~330 只）"""
+    """更新港股宇宙池 OHLCV 数据（市值≥100亿，~575 只，由富途 OpenD 提供）"""
     logger.info("=" * 60)
     logger.info("【3/5】更新港股 ...")
     logger.info("=" * 60)
@@ -108,7 +108,7 @@ def update_hk() -> dict:
 
 
 def update_cn() -> dict:
-    """更新 A 股（shawn_list CN 部分）OHLCV 数据。"""
+    """更新 A 股（watchlist CN 部分）OHLCV 数据。"""
     logger.info("=" * 60)
     logger.info("【3b/5】更新A股 ...")
     logger.info("=" * 60)

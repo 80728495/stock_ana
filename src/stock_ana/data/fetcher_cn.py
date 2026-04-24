@@ -175,7 +175,7 @@ def update_cn_data(
     增量更新 A 股本地缓存数据。
 
     Args:
-        codes:          要更新的股票代码列表；None 则读 shawn_list 中的 cn 部分。
+        codes:          要更新的股票代码列表；None 则读 watchlist 中的 cn 部分。
         max_stale_days: 允许的最大陈旧天数，超过才触发更新（0 = 每次强制更新）。
         force:          True 时忽略本地缓存，重新全量拉取。
 
@@ -183,8 +183,8 @@ def update_cn_data(
         {code: DataFrame}，包含本次成功更新的标的。
     """
     if codes is None:
-        from stock_ana.data.list_manager import parse_shawn_list
-        parsed = parse_shawn_list()
+        from stock_ana.data.list_manager import parse_watchlist
+        parsed = parse_watchlist()
         codes = [e["symbol"] for e in parsed.get("cn", [])]
 
     if not codes:

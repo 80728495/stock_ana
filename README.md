@@ -100,7 +100,7 @@ stock_ana/
 
 data/
 ├── lists/                          # 股票列表 Markdown 文件（手动维护 + 自动同步）
-│   ├── shawn_list.md               # Shawn 自选股（表格格式，含中英文名）
+│   ├── watchlist.md               # 关注列表（手动维护＋自动同步持仓，表格格式，含中英文名）
 │   ├── ndx100_list.md              # NASDAQ-100 成分股
 │   ├── us_universe_list.md         # 美股全市场标的池
 │   └── hk_focus_list.md / hk_full_list.md

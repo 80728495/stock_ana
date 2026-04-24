@@ -43,7 +43,7 @@ from stock_ana.utils.plot_renderers import plot_vegas_wave_summary
 
 from stock_ana.config import OUTPUT_DIR
 from stock_ana.scan.vegas_mid_scan import scan_one
-from stock_ana.data.market_data import load_shawn_data
+from stock_ana.data.market_data import load_watchlist_data
 
 OUT_DIR = OUTPUT_DIR / "vegas_wave_strategy"
 FORWARD_DAYS = [5, 10, 21, 63]
@@ -90,10 +90,10 @@ def _compute_forward_returns(signals: list[dict], df: "pd.DataFrame") -> list[di
 
 
 def run_backtest() -> pd.DataFrame:
-    """对 Shawn 自选列表（data/lists/shawn_list.md）所有股票执行回测。"""
+    """对关注列表（data/lists/watchlist.md）所有股票执行回测。"""
     all_rows: list[dict] = []
 
-    market_data = load_shawn_data()
+    market_data = load_watchlist_data()
     if not market_data:
         logger.error("Shawn 列表无可用数据，请先同步本地缓存")
         return pd.DataFrame()
@@ -523,7 +523,7 @@ def save_backtest_charts(df: pd.DataFrame, buy_only: bool = False):
     chart_dir = OUT_DIR / "backtest_charts"
     chart_dir.mkdir(parents=True, exist_ok=True)
 
-    market_data = load_shawn_data()
+    market_data = load_watchlist_data()
     if not market_data:
         logger.error("无法加载市场数据，图表生成跳过")
         return

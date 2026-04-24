@@ -17,7 +17,7 @@ import pandas as pd
 from stock_ana.data.fetcher import load_all_ndx100_data, load_all_us_data
 from stock_ana.data.fetcher_cn import load_all_cn_data
 from stock_ana.data.fetcher_hk import load_all_hk_data
-from stock_ana.data.list_manager import parse_shawn_list  # re-export
+from stock_ana.data.list_manager import parse_watchlist  # re-export
 
 Market = Literal["us", "ndx100", "hk", "cn"]
 Universe = Literal["us", "ndx100", "hk", "cn", "us+ndx100", "all"]
@@ -132,7 +132,7 @@ def build_watchlist(markets: list[str] | None = None) -> dict:
 
     Adding a new data source only requires:
       1. A new entry in ``_MARKET_REGISTRY`` above.
-      2. Optionally, a new section in ``shawn_list.md`` (for Shawn-list mode).
+      2. Optionally, a new section in ``watchlist.md`` (for watchlist mode).
     """
     from stock_ana.config import CACHE_DIR
 
@@ -153,7 +153,7 @@ def build_watchlist(markets: list[str] | None = None) -> dict:
         return watchlist
 
     # Shawn-list mode: honour per-symbol cache-dir preference
-    parsed = parse_shawn_list()
+    parsed = parse_watchlist()
     watchlist = {}
 
     for entry in parsed.get("us", []):
@@ -194,7 +194,7 @@ def clear_market_data_cache() -> None:
 
 # ── Shawn watchlist data loader ───────────────────────────────────────────────
 
-def load_shawn_data(
+def load_watchlist_data(
     path: Path | None = None,
     min_history: int = 0,
 ) -> dict[str, dict]:
@@ -209,7 +209,7 @@ def load_shawn_data(
     """
     from stock_ana.config import CACHE_DIR  # avoid circular import at module level
 
-    parsed = parse_shawn_list(path)
+    parsed = parse_watchlist(path)
     result: dict[str, dict] = {}
 
     for entry in parsed["us"]:
