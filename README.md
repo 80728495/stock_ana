@@ -405,3 +405,82 @@ GEMINI_API_KEY=your_key_here
 ```
 
 Gemini Web 模式需在 Chrome 中登录 [gemini.google.com](https://gemini.google.com)，`gemini-webapi` 会自动读取 Cookie。
+
+---
+
+## 5) YouTube 每日摘要推送（youtube_trans/）
+
+自动下载指定 YouTube 频道最新视频，转写音频，用大模型生成摘要，推送到飞书。
+
+### 目录结构
+
+```
+youtube_trans/
+├── rhino_finance_daily.py   # 主控脚本（频道扫描 → 下载 → 转写 → 摘要 → 飞书推送）
+├── yt_audio.py              # yt-dlp 下载 + faster-whisper 转写封装
+├── run_daily.bat            # Windows 定时任务入口（读取 .env，调用 rhino_finance_daily.py）
+├── rhino_finance_daily.sh   # Linux/macOS 定时任务入口
+├── install_windows.ps1      # Windows 一键安装脚本
+├── requirements.txt         # Python 依赖
+├── .env.example             # 环境变量模板（复制为 .env 并填写）
+└── rhino_finance_test.py    # 单元测试
+```
+
+### 依赖安装
+
+```bash
+pip install -r youtube_trans/requirements.txt
+# 需要 ffmpeg（转换音频格式）
+winget install Gyan.FFmpeg   # Windows
+brew install ffmpeg           # macOS
+```
+
+### 配置
+
+```bash
+cp youtube_trans/.env.example youtube_trans/.env
+# 编辑 youtube_trans/.env，填写：
+# ARK_API_KEY            - Volcengine ARK 大模型 API Key
+# RHINO_FEISHU_APP_ID    - 飞书应用 App ID
+# RHINO_FEISHU_APP_SECRET
+# RHINO_FEISHU_USER_OPEN_ID - 推送目标用户 Open ID
+# HTTPS_PROXY / HTTP_PROXY  - YouTube 需要代理
+```
+
+### 手动运行
+
+```bash
+# Windows（PowerShell，需先设置代理环境变量）
+$env:HTTPS_PROXY="http://127.0.0.1:5782"
+$env:HTTP_PROXY="http://127.0.0.1:5782"
+python youtube_trans/rhino_finance_daily.py
+
+# Linux / macOS
+HTTPS_PROXY=http://127.0.0.1:5782 bash youtube_trans/rhino_finance_daily.sh
+```
+
+### Windows 定时任务
+
+```powershell
+# 注册每日 10:00 自动运行（run_daily.bat 会自动读取 .env）
+schtasks /create /tn "RhinoFinance Daily" /tr "C:\path\to\stock_ana\youtube_trans\run_daily.bat" /sc daily /st 10:00 /f
+```
+
+### 重试机制
+
+- **快重试**：单次 yt-dlp 调用失败，间隔 10s/20s/30s 重试最多 3 次
+- **慢重试**：快重试全败后，等待 30 分钟再重试整个流程，最多 3 次（共覆盖约 1.5 小时）
+- 可通过环境变量调整：`RHINO_FETCH_RETRIES`、`RHINO_RETRY_DELAY`、`RHINO_SLOW_RETRIES`、`RHINO_SLOW_RETRY_DELAY`（秒）
+
+### 支持频道
+
+默认订阅两个频道，可在 `.env` 中通过 `RHINO_CHANNELS` 自定义（逗号分隔的 `Name|URL` 对）：
+
+| 频道 | 说明 |
+|------|------|
+| RhinoFinance | 美股技术分析 |
+| NaNaShuoMeiGu | NaNa 说美股 |
+
+### 日志
+
+运行日志写入 `%TEMP%\openclaw\rhino_finance_daily.log`（Windows）或 `/tmp/openclaw/rhino_finance_daily.log`（Linux），所有调用路径（定时任务/手动）统一写入同一文件。

@@ -50,3 +50,8 @@ Desktop.ini
 # 日志
 logs/
 *.log
+
+# youtube_trans 敏感/临时文件
+youtube_trans/.env
+youtube_trans/cookies.txt
+youtube_trans/__pycache__/
