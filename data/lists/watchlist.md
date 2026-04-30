@@ -1,6 +1,6 @@
 # Shawn 关注股票列表
 
-> 人工维护，最后更新：2026-04-10
+> 人工维护，最后更新：2026-04-30
 >
 > 重点跟踪标的，兼顾港股、美股与大A。
 
@@ -22,6 +22,11 @@
 | 00189 | 东岳集团 | Dongyue Group |
 | 06869 | 长飞光纤 | YOFC |
 | 02788 | 创新实业 | Chuang Xin |
+| 01772 | 赣锋锂业 | 赣锋锂业 |
+| 01888 | 建滔积层板 | 建滔积层板 |
+| 800000 | 恒生指数 | 恒生指数 |
+| 800700 | 恒生科技指数 | 恒生科技指数 |
+| HTImain | 恒生科技指数期货主连 (2605) | 恒生科技指数期货主连 (2605) |
 
 ## 美股 (US)
 
@@ -74,6 +79,63 @@
 | ALNY | 阿里拉姆制药 | Alnylam Pharmaceuticals |
 | VEEV | Veeva Systems | Veeva Systems |
 | HUBS | HubSpot | HubSpot |
+| YINN | 三倍做多富时中国ETF-Direxion | 三倍做多富时中国ETF-Direxion |
+| RTX | 雷神技术 | 雷神技术 |
+| RKLB | Rocket Lab | Rocket Lab |
+| GE | GE航天航空 | GE航天航空 |
+| TSEM | Tower半导体 | Tower半导体 |
+| DE | 迪尔股份 | 迪尔股份 |
+| QCOM | 高通 | 高通 |
+| TXN | 德州仪器 | 德州仪器 |
+| ARM | Arm Holdings | Arm Holdings |
+| NVTS | 纳微半导体 | 纳微半导体 |
+| MRVL | 迈威尔科技 | 迈威尔科技 |
+| BWXT | BWX Technologies | BWX Technologies |
+| LRCX | 泛林集团 | 泛林集团 |
+| KLAC | 科磊 | 科磊 |
+| AMAT | 应用材料 | 应用材料 |
+| SOXX | 半导体ETF-iShares | 半导体ETF-iShares |
+| QQQ | 纳指100ETF-Invesco QQQ Trust | 纳指100ETF-Invesco QQQ Trust |
+| SOXL | 三倍做多半导体ETF-Direxion | 三倍做多半导体ETF-Direxion |
+| CRM | 赛富时 | 赛富时 |
+| TSLQ | 2倍做空TSLA ETF-Tradr | 2倍做空TSLA ETF-Tradr |
+| SOXS | 三倍做空半导体ETF-Direxion | 三倍做空半导体ETF-Direxion |
+| PSQ | 做空纳斯达克100指数ETF-ProShares | 做空纳斯达克100指数ETF-ProShares |
+| SQQQ | 三倍做空纳指ETF-ProShares | 三倍做空纳指ETF-ProShares |
+| SNPS | 新思科技 | 新思科技 |
+| TER | 泰瑞达 | 泰瑞达 |
+| LUNR | Intuitive Machines | Intuitive Machines |
+| DOCN | DigitalOcean | DigitalOcean |
+| SMR | NuScale Power | NuScale Power |
+| POET | POET Technologies | POET Technologies |
+| POWI | 帕沃英蒂格盛 | 帕沃英蒂格盛 |
+| DUOL | 多邻国 | 多邻国 |
+| AXSM | Axsome Therapeutics | Axsome Therapeutics |
+| MOD | 摩丁制造 | 摩丁制造 |
+| VIRT | Virtu金融 | Virtu金融 |
+| BABA | 阿里巴巴 | 阿里巴巴 |
+| CWEB | 2倍做多中国互联网股票ETF-Direxion | 2倍做多中国互联网股票ETF-Direxion |
+| CHAU | 2倍做多沪深300ETF-Direxion | 2倍做多沪深300ETF-Direxion |
+| MPNGY | 美团(ADR) | 美团(ADR) |
+| HSAI | 禾赛 | 禾赛 |
+| FUTU | 富途控股 | 富途控股 |
+| TME | 腾讯音乐 | 腾讯音乐 |
+| NIO | 蔚来 | 蔚来 |
+| XPEV | 小鹏集团 | 小鹏集团 |
+| BIDU | 百度 | 百度 |
+| GCT | 大健云仓 | 大健云仓 |
+| KWEB | 中国海外互联网ETF-KraneShares | 中国海外互联网ETF-KraneShares |
+| NTES | 网易 | 网易 |
+| JD | 京东 | 京东 |
+| LI | 理想汽车 | 理想汽车 |
+| BILI | 哔哩哔哩 | 哔哩哔哩 |
+| MNSO | 名创优品 | 名创优品 |
+| TCOM | 携程网 | 携程网 |
+| YANG | 三倍做空富时中国ETF-Direxion | 三倍做空富时中国ETF-Direxion |
+| FXI | 中国大盘股ETF-iShares | 中国大盘股ETF-iShares |
+| SPY | 标普500ETF-SPDR | 标普500ETF-SPDR |
+| GLD | 黄金ETF-SPDR | 黄金ETF-SPDR |
+| EWY | 韩国ETF-iShares MSCI | 韩国ETF-iShares MSCI |
 
 ## 大A (CN)
 
@@ -89,3 +151,30 @@
 | 600522 | 中天科技 | ZTT |
 | 002353 | 杰瑞股份 | JEREH |
 | 002384 | 东山精密 | DSBJ |
+| 002364 | 中恒电气 | 中恒电气 |
+| 002851 | 麦格米特 | 麦格米特 |
+| 000680 | 科创综指 | 科创综指 |
+| 000688 | 科创50 | 科创50 |
+| 000300 | 沪深300 | 沪深300 |
+| 000001 | 上证指数 | 上证指数 |
+| 603773 | 沃格光电 | 沃格光电 |
+| 002428 | 云南锗业 | 云南锗业 |
+| 002050 | 三花智控 | 三花智控 |
+| 002156 | 通富微电 | 通富微电 |
+| 600703 | 三安光电 | 三安光电 |
+| 600584 | 长电科技 | 长电科技 |
+| 002371 | 北方华创 | 北方华创 |
+| 002472 | 双环传动 | 双环传动 |
+| 002747 | 埃斯顿 | 埃斯顿 |
+| 000628 | 高新发展 | 高新发展 |
+| 515880 | 通信ETF国泰 | 通信ETF国泰 |
+| 300349 | 金卡智能 | 金卡智能 |
+| 300567 | 精测电子 | 精测电子 |
+| 300015 | 爱尔眼科 | 爱尔眼科 |
+| 688506 | 百利天恒 | 百利天恒 |
+| 300903 | 科翔股份 | 科翔股份 |
+| 588000 | 科创50ETF华夏 | 科创50ETF华夏 |
+| 588200 | 科创芯片ETF嘉实 | 科创芯片ETF嘉实 |
+| 688347 | 华虹公司 | 华虹公司 |
+| 688981 | 中芯国际 | 中芯国际 |
+| 300850 | 新强联 | 新强联 |

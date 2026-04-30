@@ -11,6 +11,7 @@
   squeeze   — 均线收敛度量
   trend     — Minervini Stage 2 趋势过滤
   vcp       — VCP 波幅收缩检测
+  candle_patterns — 蜡烛图形态识别（纯 pandas）
 
 只放策略基础能力，不放完整策略语义。
 """
@@ -19,6 +20,9 @@ from stock_ana.strategies.primitives.pivots import (
     argrel_pivots,
     merge_pivots_with_zigzag,
     multiscale_argrel_pivots,
+    swing_current_state,
+    swing_pivots,
+    trend_series_from_pivots,
     zigzag_indices,
     zigzag_points,
 )
@@ -49,11 +53,31 @@ from stock_ana.strategies.primitives.squeeze import (
 from stock_ana.strategies.primitives.trend import check_trend_template
 from stock_ana.strategies.primitives.vcp import detect_vcp_micro_structure
 from stock_ana.strategies.primitives.wave import analyze_wave_structure, detect_ema8_swings
+from stock_ana.strategies.primitives.candle_patterns import (
+    cdl_doji,
+    cdl_engulfing,
+    cdl_evening_star,
+    cdl_hammer,
+    cdl_harami,
+    cdl_marubozu,
+    cdl_morning_star,
+    cdl_piercing,
+    cdl_spinning_top,
+    cdl_three_black_crows,
+    cdl_three_white_soldiers,
+    get_latest_signals,
+    near_pivot_signals,
+    scan_candle_patterns,
+    trend_aware_hammer_star,
+)
 
 __all__ = [
     "argrel_pivots",
     "merge_pivots_with_zigzag",
     "multiscale_argrel_pivots",
+    "swing_current_state",
+    "swing_pivots",
+    "trend_series_from_pivots",
     "zigzag_indices",
     "zigzag_points",
     "poly_smoothness",
@@ -81,4 +105,19 @@ __all__ = [
     "detect_vcp_micro_structure",
     "detect_ema8_swings",
     "analyze_wave_structure",
+    "cdl_doji",
+    "cdl_engulfing",
+    "cdl_evening_star",
+    "cdl_hammer",
+    "cdl_harami",
+    "cdl_marubozu",
+    "cdl_morning_star",
+    "cdl_piercing",
+    "cdl_spinning_top",
+    "cdl_three_black_crows",
+    "cdl_three_white_soldiers",
+    "get_latest_signals",
+    "near_pivot_signals",
+    "scan_candle_patterns",
+    "trend_aware_hammer_star",
 ]

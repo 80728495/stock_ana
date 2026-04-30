@@ -1,8 +1,8 @@
 # 美股宇宙池（US Universe ~1500）
 
-> 自动生成，最后更新：2026-04-12
+> 自动生成，最后更新：2026-04-30
 > 来源：Finviz（市值≥$2B，均量≥50万，股价≥$5，日交易额≥$10M）
-> 共 1553 只
+> 共 1559 只
 
 | # | 代码 | 公司 | 行业 | 市值(B) |
 |---|----|----|----|-------|
@@ -1559,3 +1559,9 @@
 | 1551 | EXTR | Extreme Networks Inc | Technology | 2.0 |
 | 1552 | DRVN | Driven Brands Holdings Inc | Consumer Cyclical | 2.0 |
 | 1553 | CPRI | Capri Holdings Ltd | Consumer Cyclical | 2.0 |
+| 1554 | NVTS | 纳微半导体 | - | - |
+| 1555 | POET | POET Technologies | - | - |
+| 1556 | RDW | Redwire | - | - |
+| 1557 | MPNGY | 美团(ADR) | - | - |
+| 1558 | GCT | 大健云仓 | - | - |
+| 1559 | MNSO | 名创优品 | - | - |

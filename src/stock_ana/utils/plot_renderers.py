@@ -2306,3 +2306,390 @@ def plot_triangle_vcp_backtest_signals(
             logger.debug(f"{ticker}: 绘图失败 - {e}")
 
     logger.info(f"  已保存 {chart_count} 张信号图 → {output_dir}")
+
+
+def plot_swing_pivots_chart(
+    sym: str,
+    df_price: "pd.DataFrame",
+    out_dir: Path,
+    threshold_pct: float = 7.0,
+    lookback_bars: int | None = None,
+    candle_window: int = 3,
+    show_candle_patterns: bool = True,
+) -> "Path | None":
+    """
+    绘制 ZigZag 小波段高低点图（raw H/L，含右侧当前状态标注 + 蜡烛图形态标注）。
+
+    Args:
+        sym:                  股票代码（用于文件名和标题）
+        df_price:             包含 open/high/low/close/volume 的 DataFrame
+        out_dir:              图片输出目录
+        threshold_pct:        ZigZag 反转阈值（%），默认 7.0
+        lookback_bars:        只显示最近 N 根 K 线（None = 全部）
+        candle_window:        在每个 pivot 前后各扫描多少根 K 线的形态（默认 3）
+        show_candle_patterns: 是否在图上标注蜡烛图形态（默认 True）
+
+    Returns:
+        保存的 PNG 路径，失败返回 None
+    """
+    from stock_ana.strategies.primitives.pivots import swing_current_state, trend_series_from_pivots
+    from stock_ana.strategies.primitives.candle_patterns import trend_aware_hammer_star
+
+    df = df_price.copy()
+    df.columns = [c.lower() for c in df.columns]
+    df.index = pd.to_datetime(df.index)
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    df = df.sort_index()[["open", "high", "low", "close", "volume"]]
+
+    if len(df) < 30:
+        return None
+
+    # 用全量数据计算 state（确保 zigzag 从头开始识别）
+    state = swing_current_state(df, threshold_pct=threshold_pct)
+    all_pivots = state["confirmed_pivots"]
+
+    # 截取显示窗口
+    if lookback_bars is not None and lookback_bars < len(df):
+        df_view = df.iloc[-lookback_bars:].copy()
+        start_iloc = len(df) - lookback_bars
+    else:
+        df_view = df
+        start_iloc = 0
+
+    # 筛选落在显示窗口内的 pivot
+    pivots = [p for p in all_pivots if p["iloc"] >= start_iloc]
+
+    # 趋势序列（每根 K 线的方向：up / down / unknown）
+    trend_s = trend_series_from_pivots(df, all_pivots, state["trend"])
+
+    # 锤子线 / 墓碑线（基于趋势段，而非单根 K 线前后关系）
+    cdl_sig = trend_aware_hammer_star(df, trend_s)
+
+    # 筛选到显示窗口内
+    cdl_sig_view = cdl_sig.iloc[start_iloc:]
+
+    # EMA8 辅助线
+    ema8 = df_view["close"].ewm(span=8, adjust=False).mean()
+
+    # scatter 序列
+    H_series = pd.Series(np.nan, index=df_view.index)
+    L_series = pd.Series(np.nan, index=df_view.index)
+    for p in pivots:
+        ri = p["iloc"] - start_iloc
+        if p["type"] == "H":
+            H_series.iloc[ri] = df_view["high"].iloc[ri] * 1.012
+        else:
+            L_series.iloc[ri] = df_view["low"].iloc[ri] * 0.988
+
+    # 候选极值（右侧盲区当前段的极值，尚未确认）
+    cand_iloc = state["candidate_iloc"]
+    cand_series = pd.Series(np.nan, index=df_view.index)
+    if cand_iloc >= start_iloc:
+        ri = cand_iloc - start_iloc
+        cand_val = state["candidate_value"]
+        if state["trend"] == "up":
+            cand_series.iloc[ri] = df_view["high"].iloc[ri] * 1.012
+        else:
+            cand_series.iloc[ri] = df_view["low"].iloc[ri] * 0.988
+
+    add_plots = [
+        mpf.make_addplot(ema8, color="#2196F3", width=0.8, linestyle="--"),
+        mpf.make_addplot(H_series, type="scatter", marker="v", markersize=80, color="#CC0000"),
+        mpf.make_addplot(L_series, type="scatter", marker="^", markersize=80, color="#00AA00"),
+    ]
+    if not cand_series.isna().all():
+        cand_color = "#FF6600" if state["trend"] == "up" else "#9933CC"
+        add_plots.append(
+            mpf.make_addplot(cand_series, type="scatter", marker="D", markersize=80, color=cand_color)
+        )
+
+    mc = mpf.make_marketcolors(
+        up="#CC3333", down="#00AA00", edge="inherit", wick="inherit", volume="in",
+    )
+    mpf_style = mpf.make_mpf_style(
+        marketcolors=mc, gridstyle=":", gridcolor="#E0E0E0",
+        rc={"font.sans-serif": plt.rcParams["font.sans-serif"], "axes.unicode_minus": False},
+    )
+
+    n_bars = len(df_view)
+    fig_width = max(24, n_bars * 0.055)
+
+    trend_label = {"up": "↑上升段", "down": "↓下降段", "unknown": "?未知"}.get(state["trend"], "")
+    pct_str = f"{state['pct_from_last']:+.1f}%" if state["pct_from_last"] else ""
+    confirm_str = (
+        f"  还差 {state['pct_to_confirm']:.1f}% 确认转折"
+        if state["pct_to_confirm"] is not None else ""
+    )
+    title = (
+        f"{sym}  ZigZag 小波段  threshold={threshold_pct}%  "
+        f"[当前: {trend_label}  候选极值 {state['candidate_date']} @{state['candidate_value']:.1f} {pct_str}{confirm_str}]"
+    )
+
+    try:
+        fig, axes = mpf.plot(
+            df_view[["open", "high", "low", "close", "volume"]],
+            type="candle", volume=True, style=mpf_style,
+            addplot=add_plots,
+            figsize=(fig_width, 10), returnfig=True, tight_layout=True,
+            warn_too_much_data=n_bars + 1,
+            title=title,
+        )
+        ax = axes[0]
+
+        # ZigZag 折线
+        if pivots:
+            px = [p["iloc"] - start_iloc for p in pivots]
+            py = [p["value"] for p in pivots]
+            last_p = pivots[-1]
+            if cand_iloc >= start_iloc:
+                ax.plot(
+                    [last_p["iloc"] - start_iloc, cand_iloc - start_iloc],
+                    [last_p["value"], state["candidate_value"]],
+                    color="#FF6600" if state["trend"] == "up" else "#9933CC",
+                    linewidth=1.2, linestyle="--", alpha=0.75, zorder=3,
+                )
+            ax.plot(px, py, color="#7B1FA2", linewidth=1.4, linestyle="-", alpha=0.8, zorder=3)
+
+        # 标注每个已确认 pivot
+        for p in pivots:
+            x, y, typ = p["iloc"] - start_iloc, p["value"], p["type"]
+            y_text = y * 1.028 if typ == "H" else y * 0.972
+            ax.annotate(
+                f"{typ}\n{p['date'][5:]}\n{y:.0f}",
+                xy=(x, y), xytext=(x, y_text),
+                fontsize=6.5, ha="center",
+                va="bottom" if typ == "H" else "top",
+                color="#CC0000" if typ == "H" else "#007700",
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.8, ec="none"),
+            )
+
+        # 标注候选极值
+        if cand_iloc >= start_iloc:
+            ri = cand_iloc - start_iloc
+            cv = state["candidate_value"]
+            y_text = cv * 1.028 if state["trend"] == "up" else cv * 0.972
+            clr = "#FF6600" if state["trend"] == "up" else "#9933CC"
+            ax.annotate(
+                f"候选\n{state['candidate_date'][5:]}\n{cv:.0f}\n({pct_str})",
+                xy=(ri, cv), xytext=(ri, y_text),
+                fontsize=6.5, ha="center",
+                va="bottom" if state["trend"] == "up" else "top",
+                color=clr, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.85, ec=clr, lw=1.2),
+            )
+
+        # ── 趋势背景色带 ────────────────────────────────────────────
+        # 上升段浅绿，下降段浅红，帮助直观判断每根K线所处趋势
+        trend_view = trend_s.iloc[start_iloc:]
+        in_up   = (trend_view == "up").values
+        in_down = (trend_view == "down").values
+        n_v = len(trend_view)
+
+        def _fill_segments(mask, color, alpha=0.06):
+            i = 0
+            while i < n_v:
+                if mask[i]:
+                    j = i
+                    while j < n_v and mask[j]:
+                        j += 1
+                    ax.axvspan(i - 0.5, j - 0.5, color=color, alpha=alpha, zorder=0)
+                    i = j
+                else:
+                    i += 1
+
+        _fill_segments(in_up,   "#00AA00")
+        _fill_segments(in_down, "#CC3333")
+
+        # ── 锤子线 / 墓碑线标注 ─────────────────────────────────────
+        # 锤子（下跌段）：绿色 ▲ 标在 K 线下方 + "锤" 标签
+        # 墓碑（上涨段）：红色 ▼ 标在 K 线上方 + "墓" 标签
+        if show_candle_patterns:
+            for ri, (idx_label, sig_val) in enumerate(cdl_sig_view.items()):
+                if sig_val == 0:
+                    continue
+                bar_i = ri  # 相对于 df_view 的位置
+                if sig_val == 1:  # 锤子线（下跌段）
+                    y_bar  = df_view["low"].iloc[bar_i]
+                    y_text = y_bar * 0.973
+                    ax.annotate(
+                        "锤",
+                        xy=(bar_i, y_bar), xytext=(bar_i, y_text),
+                        fontsize=7, ha="center", va="top", fontweight="bold",
+                        color="#007700",
+                        bbox=dict(boxstyle="round,pad=0.2", fc="#DFFFDF", alpha=0.92,
+                                  ec="#007700", lw=1.0),
+                        arrowprops=dict(arrowstyle="-", color="#007700", lw=0.6),
+                    )
+                else:  # -1：墓碑线（上涨段）
+                    y_bar  = df_view["high"].iloc[bar_i]
+                    y_text = y_bar * 1.027
+                    ax.annotate(
+                        "墓",
+                        xy=(bar_i, y_bar), xytext=(bar_i, y_text),
+                        fontsize=7, ha="center", va="bottom", fontweight="bold",
+                        color="#CC0000",
+                        bbox=dict(boxstyle="round,pad=0.2", fc="#FFDFDF", alpha=0.92,
+                                  ec="#CC0000", lw=1.0),
+                        arrowprops=dict(arrowstyle="-", color="#CC0000", lw=0.6),
+                    )
+
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{sym}_swing_pivots.png"
+        fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return out_path
+
+    except Exception as e:
+        logger.warning(f"plot_swing_pivots_chart [{sym}] 失败: {e}")
+        plt.close("all")
+        return None
+
+    df = df_price.copy()
+    df.columns = [c.lower() for c in df.columns]
+    df.index = pd.to_datetime(df.index)
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    df = df.sort_index()[["open", "high", "low", "close", "volume"]]
+
+    if len(df) < 30:
+        return None
+
+    # 用全量数据计算 state（确保 zigzag 从头开始识别）
+    state = swing_current_state(df, threshold_pct=threshold_pct)
+    all_pivots = state["confirmed_pivots"]
+
+    # 截取显示窗口
+    if lookback_bars is not None and lookback_bars < len(df):
+        df_view = df.iloc[-lookback_bars:].copy()
+        start_iloc = len(df) - lookback_bars
+    else:
+        df_view = df
+        start_iloc = 0
+
+    # 筛选落在显示窗口内的 pivot
+    pivots = [p for p in all_pivots if p["iloc"] >= start_iloc]
+
+    # EMA8 辅助线
+    ema8 = df_view["close"].ewm(span=8, adjust=False).mean()
+
+    # scatter 序列
+    H_series = pd.Series(np.nan, index=df_view.index)
+    L_series = pd.Series(np.nan, index=df_view.index)
+    for p in pivots:
+        ri = p["iloc"] - start_iloc
+        if p["type"] == "H":
+            H_series.iloc[ri] = df_view["high"].iloc[ri] * 1.012
+        else:
+            L_series.iloc[ri] = df_view["low"].iloc[ri] * 0.988
+
+    # 候选极值（右侧盲区当前段的极值，尚未确认）
+    cand_iloc = state["candidate_iloc"]
+    cand_series = pd.Series(np.nan, index=df_view.index)
+    if cand_iloc >= start_iloc:
+        ri = cand_iloc - start_iloc
+        cand_val = state["candidate_value"]
+        if state["trend"] == "up":
+            cand_series.iloc[ri] = df_view["high"].iloc[ri] * 1.012
+        else:
+            cand_series.iloc[ri] = df_view["low"].iloc[ri] * 0.988
+
+    add_plots = [
+        mpf.make_addplot(ema8, color="#2196F3", width=0.8, linestyle="--"),
+        mpf.make_addplot(H_series, type="scatter", marker="v", markersize=80, color="#CC0000"),
+        mpf.make_addplot(L_series, type="scatter", marker="^", markersize=80, color="#00AA00"),
+    ]
+    if not cand_series.isna().all():
+        cand_color = "#FF6600" if state["trend"] == "up" else "#9933CC"
+        add_plots.append(
+            mpf.make_addplot(cand_series, type="scatter", marker="D", markersize=80, color=cand_color)
+        )
+
+    mc = mpf.make_marketcolors(
+        up="#CC3333", down="#00AA00", edge="inherit", wick="inherit", volume="in",
+    )
+    mpf_style = mpf.make_mpf_style(
+        marketcolors=mc, gridstyle=":", gridcolor="#E0E0E0",
+        rc={"font.sans-serif": plt.rcParams["font.sans-serif"], "axes.unicode_minus": False},
+    )
+
+    n_bars = len(df_view)
+    fig_width = max(24, n_bars * 0.055)
+
+    trend_label = {"up": "↑上升段", "down": "↓下降段", "unknown": "?未知"}.get(state["trend"], "")
+    pct_str = f"{state['pct_from_last']:+.1f}%" if state["pct_from_last"] else ""
+    confirm_str = (
+        f"  还差 {state['pct_to_confirm']:.1f}% 确认转折"
+        if state["pct_to_confirm"] is not None else ""
+    )
+    title = (
+        f"{sym}  ZigZag 小波段  threshold={threshold_pct}%  "
+        f"[当前: {trend_label}  候选极值 {state['candidate_date']} @{state['candidate_value']:.1f} {pct_str}{confirm_str}]"
+    )
+
+    try:
+        fig, axes = mpf.plot(
+            df_view[["open", "high", "low", "close", "volume"]],
+            type="candle", volume=True, style=mpf_style,
+            addplot=add_plots,
+            figsize=(fig_width, 10), returnfig=True, tight_layout=True,
+            warn_too_much_data=n_bars + 1,
+            title=title,
+        )
+        ax = axes[0]
+
+        # ZigZag 折线
+        if pivots:
+            px = [p["iloc"] - start_iloc for p in pivots]
+            py = [p["value"] for p in pivots]
+            # 延伸到候选极值（虚线，代表未确认段）
+            last_p = pivots[-1]
+            if cand_iloc >= start_iloc:
+                ax.plot(
+                    [last_p["iloc"] - start_iloc, cand_iloc - start_iloc],
+                    [last_p["value"], state["candidate_value"]],
+                    color="#FF6600" if state["trend"] == "up" else "#9933CC",
+                    linewidth=1.2, linestyle="--", alpha=0.75, zorder=3,
+                )
+            ax.plot(px, py, color="#7B1FA2", linewidth=1.4, linestyle="-", alpha=0.8, zorder=3)
+
+        # 标注每个已确认 pivot
+        for p in pivots:
+            x, y, typ = p["iloc"] - start_iloc, p["value"], p["type"]
+            y_text = y * 1.028 if typ == "H" else y * 0.972
+            ax.annotate(
+                f"{typ}\n{p['date'][5:]}\n{y:.0f}",
+                xy=(x, y), xytext=(x, y_text),
+                fontsize=6.5, ha="center",
+                va="bottom" if typ == "H" else "top",
+                color="#CC0000" if typ == "H" else "#007700",
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.8, ec="none"),
+            )
+
+        # 标注候选极值（橙色/紫色菱形）
+        if cand_iloc >= start_iloc:
+            ri = cand_iloc - start_iloc
+            cv = state["candidate_value"]
+            y_text = cv * 1.028 if state["trend"] == "up" else cv * 0.972
+            clr = "#FF6600" if state["trend"] == "up" else "#9933CC"
+            ax.annotate(
+                f"候选\n{state['candidate_date'][5:]}\n{cv:.0f}\n({pct_str})",
+                xy=(ri, cv), xytext=(ri, y_text),
+                fontsize=6.5, ha="center",
+                va="bottom" if state["trend"] == "up" else "top",
+                color=clr, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.85, ec=clr, lw=1.2),
+            )
+
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{sym}_swing_pivots.png"
+        fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return out_path
+
+    except Exception as e:
+        logger.warning(f"plot_swing_pivots_chart [{sym}] 失败: {e}")
+        plt.close("all")
+        return None
