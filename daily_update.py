@@ -4,6 +4,7 @@
 
 更新各市场股票列表的 OHLCV 数据，并刷新技术指标与 Wave 结构：
 
+  0. Futu 自选股同步        → watchlist.md / big_a.md / universe 列表
   1. 美股宇宙池 ~1500 只    → data/cache/us/
   2. 纳指 100               → data/cache/ndx100/
   3. 港股宇宙池（~575 只）  → data/cache/hk/
@@ -13,7 +14,8 @@
   5. Wave 结构（全量 US+HK） → data/cache/wave_structure/{market}/
 
 用法：
-    python daily_update.py              # 全部更新（1-5 含CN）
+    python daily_update.py              # 全部更新（0-5 含Futu同步+CN）
+    python daily_update.py --futu       # 仅同步 Futu 自选股列表
     python daily_update.py --us         # 仅更新美股 OHLCV
     python daily_update.py --ndx        # 仅更新纳指100 OHLCV
     python daily_update.py --hk         # 仅更新港股 OHLCV
@@ -45,10 +47,37 @@ logger.add(
     retention="30 days",
     level="INFO",
     encoding="utf-8",
+    enqueue=True,   # 异步写入，防止多进程/多 sink 写入竞争
 )
 
 
 # ─────────────────────── 各步更新函数 ───────────────────────
+
+
+def sync_futu() -> dict:
+    """Step 0：从 Futu OpenD 同步自选股到 watchlist.md / big_a.md / universe 列表。"""
+    logger.info("=" * 60)
+    logger.info("【0/5】Futu 自选股同步 ...")
+    logger.info("=" * 60)
+    t0 = time.time()
+    try:
+        import sync_futu_watchlist as sfw
+        stocks = sfw._fetch_all_watchlist_stocks()
+        hk_stocks = [s for s in stocks if s["market"] == "HK"]
+        us_stocks = [s for s in stocks if s["market"] == "US"]
+        cn_stocks = [s for s in stocks if s["market"] == "CN"]
+        logger.info(f"  HK: {len(hk_stocks)} 只，US: {len(us_stocks)} 只，CN: {len(cn_stocks)} 只")
+        sfw.update_watchlist(hk_stocks, us_stocks, cn_stocks)
+        sfw.write_big_a(cn_stocks)
+        sfw.update_universes(hk_stocks, us_stocks)
+        elapsed = time.time() - t0
+        logger.success(f"✅ Futu 同步完成 ({elapsed:.0f}s)")
+        return {"ok": True, "elapsed": round(elapsed),
+                "hk": len(hk_stocks), "us": len(us_stocks), "cn": len(cn_stocks)}
+    except Exception as e:
+        elapsed = time.time() - t0
+        logger.warning(f"⚠️  Futu 同步失败（OpenD 未运行？）: {e}")
+        return {"ok": False, "elapsed": round(elapsed), "error": str(e)}
 
 
 def update_us() -> dict:
@@ -261,12 +290,39 @@ def sync_lists() -> dict:
         return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e)}
 
 
+def _refresh_gemini_cookies() -> None:
+    """
+    从 Chrome 读取最新 Gemini Cookie 并写入 .env。
+    仅当 Chrome 未运行（文件未锁）时才能成功；失败时静默跳过。
+    """
+    try:
+        from stock_ana.utils.chrome_cookies import get_gemini_cookies
+        from stock_ana.utils.scan_analyst import _update_env_cookies
+        cookies = get_gemini_cookies()
+        psid   = cookies.get("__Secure-1PSID", "")
+        psidts = cookies.get("__Secure-1PSIDTS", "")
+        if psid:
+            env_path = PROJECT_ROOT / ".env"
+            _update_env_cookies(psid, psidts, env_path)
+            logger.info("✅ Gemini Cookie 已从 Chrome 刷新并写入 .env")
+        else:
+            logger.warning("⚠️  Chrome 中未找到 Gemini Cookie（未登录 gemini.google.com？）")
+    except OSError as e:
+        if getattr(e, 'errno', None) == 32 or '32' in str(e):
+            logger.info("ℹ️  Chrome 正在运行（Cookie 文件锁定），跳过刷新，使用 .env 缓存")
+        else:
+            logger.warning(f"⚠️  Gemini Cookie 刷新失败: {e}")
+    except Exception as e:
+        logger.warning(f"⚠️  Gemini Cookie 刷新失败: {e}")
+
+
 # ─────────────────────── 主入口 ───────────────────────
 
 
 def main():
     """Run the daily update CLI for OHLCV, indicators, waves, and list sync tasks."""
     parser = argparse.ArgumentParser(description="每日股票数据更新")
+    parser.add_argument("--futu",       action="store_true", help="仅同步 Futu 自选股列表")
     parser.add_argument("--us",         action="store_true", help="仅更新美股 OHLCV")
     parser.add_argument("--ndx",        action="store_true", help="仅更新纳指100 OHLCV")
     parser.add_argument("--hk",         action="store_true", help="仅更新港股 OHLCV")
@@ -276,15 +332,22 @@ def main():
     parser.add_argument("--lists",      action="store_true", help="仅同步 MD 列表文件")
     args = parser.parse_args()
 
-    # 若无任何参数，执行 1-5 全流程
-    run_all = not any([args.us, args.ndx, args.hk, args.cn, args.indicators, args.waves, args.lists])
+    # 若无任何参数，执行全流程（含 Futu 同步）
+    run_all = not any([args.futu, args.us, args.ndx, args.hk, args.cn, args.indicators, args.waves, args.lists])
 
     logger.info(f"{'=' * 60}")
     logger.info(f"  每日数据更新 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"{'=' * 60}")
 
+    # ── Cookie 刷新（Chrome 未开时自动更新 .env）──
+    _refresh_gemini_cookies()
+
     t_total = time.time()
     results = {}
+
+    # ── Step 0：Futu 自选股同步（第一步，失败不阻断后续）──
+    if run_all or args.futu:
+        results["Futu同步"] = sync_futu()
 
     # ── Step 1-3：OHLCV 数据更新 ──
     # 注：纳指100 股票已包含在美股全量更新中（cache/us/），不再单独更新。
