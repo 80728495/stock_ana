@@ -43,9 +43,6 @@ _feishu_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 MID_SPANS = [34, 55, 60]    # Mid Vegas
 LONG_SPANS = [144, 169, 200]  # Long Vegas
 
-# 触碰判定：最新低价 <= EMA * (1 + TOUCH_BAND)，即 EMA 上方 TOUCH_BAND 以内也算
-TOUCH_BAND = 0.02  # 2%
-
 
 # ═══════════════════════════════════════════════════════
 #  核心检测逻辑
@@ -61,19 +58,16 @@ def _detect_vegas_touch(
     market: str,
     name: str,
     df: pd.DataFrame,
-    lookback: int = 1,
 ) -> list[dict]:
     """
-    检测最近 lookback 个交易日内是否有 Mid 或 Long Vegas 触碰。
+    检测最新一个交易日是否有 Mid 或 Long Vegas 首次触碰。
 
-    触碰条件（任意一根 K 线）：
-      - 当日低价 <= EMA * (1 + TOUCH_BAND)  （即进入通道或下穿通道）
-      - 且当日收盘价 >= EMA * (1 - TOUCH_BAND)（未大幅跌破，视为有效回踩）
+    触碰条件（仅检查最新一根 K 线）：
+      1. 当日低价 <= Vegas 通道最高 EMA（严格穿入通道，无缓冲）
+      2. 前一日收盘价 > 前一日通道最高 EMA（前日在通道之上，当日为首次触碰）
 
     Returns:
-        list of dicts，每条代表一个触碰事件，fields:
-            sym, market, name, date, vegas_type ("mid"/"long"),
-            touched_emas, close, low, ema_values
+        list of dicts，每条代表一个触碰事件
     """
     df = df.copy()
     df.columns = [c.lower() for c in df.columns]
@@ -87,53 +81,45 @@ def _detect_vegas_touch(
     low_s = df["low"].astype(float)
     emas = _compute_emas(close_s)
 
+    # 只检查最新一根 K 线
+    bar_idx = len(df) - 1
+    bar_date = df.index[bar_idx]
+    close_val = float(close_s.iloc[bar_idx])
+    low_val = float(low_s.iloc[bar_idx])
+    prev_close = float(close_s.iloc[bar_idx - 1])
+
     results = []
-    check_bars = df.iloc[-lookback:]
 
-    for bar_idx in range(len(df) - lookback, len(df)):
-        bar_date = df.index[bar_idx]
-        close_val = float(close_s.iloc[bar_idx])
-        low_val = float(low_s.iloc[bar_idx])
+    for vegas_type, spans in [("mid", MID_SPANS), ("long", LONG_SPANS)]:
+        ema_vals = {s: float(emas[s][bar_idx]) for s in spans}
+        prev_ema_vals = {s: float(emas[s][bar_idx - 1]) for s in spans}
 
-        for vegas_type, spans in [("mid", MID_SPANS), ("long", LONG_SPANS)]:
-            ema_vals = {s: float(emas[s][bar_idx]) for s in spans}
-            channel_top = max(ema_vals.values())
-            channel_bot = min(ema_vals.values())
+        channel_top = max(ema_vals.values())
+        channel_bot = min(ema_vals.values())
+        prev_channel_top = max(prev_ema_vals.values())
 
-            # 触碰：低价进入通道（含上方 TOUCH_BAND 缓冲）
-            touched = low_val <= channel_top * (1 + TOUCH_BAND)
-            # 未深度跌破：收盘在通道下沿附近以上
-            not_broken = close_val >= channel_bot * (1 - TOUCH_BAND)
+        # 条件1：当日低价严格穿入/触及通道（无缓冲）
+        touched = low_val <= channel_top
+        # 条件2：前一日收盘在通道之上（确保是首次触碰，而非已在通道内）
+        prev_above = prev_close > prev_channel_top
 
-            if touched and not_broken:
-                # 标注触碰了哪几条 EMA
-                touched_emas = [
-                    s for s, v in ema_vals.items()
-                    if low_val <= v * (1 + TOUCH_BAND) and close_val >= v * (1 - TOUCH_BAND)
-                ]
-                results.append({
-                    "sym": sym,
-                    "market": market,
-                    "name": name,
-                    "date": bar_date.strftime("%Y-%m-%d"),
-                    "vegas_type": vegas_type,
-                    "touched_emas": touched_emas,
-                    "close": round(close_val, 4),
-                    "low": round(low_val, 4),
-                    "ema_values": {str(s): round(v, 4) for s, v in ema_vals.items()},
-                    "channel_top": round(channel_top, 4),
-                    "channel_bot": round(channel_bot, 4),
-                })
+        if touched and prev_above:
+            results.append({
+                "sym": sym,
+                "market": market,
+                "name": name,
+                "date": bar_date.strftime("%Y-%m-%d"),
+                "vegas_type": vegas_type,
+                "close": round(close_val, 4),
+                "low": round(low_val, 4),
+                "prev_close": round(prev_close, 4),
+                "prev_channel_top": round(prev_channel_top, 4),
+                "ema_values": {str(s): round(v, 4) for s, v in ema_vals.items()},
+                "channel_top": round(channel_top, 4),
+                "channel_bot": round(channel_bot, 4),
+            })
 
-    # 同一标的同一类型只保留最近一条（去重）
-    seen = set()
-    deduped = []
-    for r in results:
-        key = (r["sym"], r["market"], r["vegas_type"])
-        if key not in seen:
-            seen.add(key)
-            deduped.append(r)
-    return deduped
+    return results
 
 
 # ═══════════════════════════════════════════════════════
@@ -280,15 +266,13 @@ def _format_and_send(signals: list[dict], dry_run: bool = False) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="watchlist Vegas 触碰每日扫描")
-    parser.add_argument("--lookback", type=int, default=1,
-                        help="检查最近几个交易日（默认 1 = 仅当天）")
     parser.add_argument("--dry-run", action="store_true",
                         help="只打印，不推送飞书")
     args = parser.parse_args()
 
     logger.info("=" * 60)
     logger.info(f"Watchlist Vegas 扫描 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"lookback={args.lookback}")
+    logger.info("策略：当日低价严格穿入通道 + 前日收盘在通道上方")
     logger.info("=" * 60)
 
     items = _load_watchlist()
@@ -307,7 +291,6 @@ def main() -> None:
             df = pd.read_parquet(path)
             signals = _detect_vegas_touch(
                 item["sym"], item["market"], item["name"], df,
-                lookback=args.lookback,
             )
             all_signals.extend(signals)
         except Exception as e:
