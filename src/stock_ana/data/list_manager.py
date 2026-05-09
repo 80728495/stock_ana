@@ -264,6 +264,23 @@ def load_hk_universe_list() -> list[str]:
     return codes
 
 
+def load_cn_list() -> list[str]:
+    """加载A股关注列表代码（来源：data/lists/big_a.md，由 Futu OpenD 同步生成）。
+
+    big_a.md 表格格式：| 代码 | 中文名 | 市场 |
+    第0列即为6位股票代码。
+    """
+    path = LISTS_DIR / "big_a.md"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"A股列表不存在: {path}，请先运行 python daily_update.py --futu"
+        )
+    rows = _read_md_table(path)
+    codes = [r[0] for r in rows if len(r) >= 1]
+    logger.info(f"A股列表：{len(codes)} 只")
+    return codes
+
+
 # ─────────────────────── 同步（自动生成）接口 ───────────────────────
 
 

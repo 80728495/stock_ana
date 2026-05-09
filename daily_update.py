@@ -4,11 +4,12 @@
 
 更新各市场股票列表的 OHLCV 数据，并刷新技术指标与 Wave 结构：
 
-  0. Futu 自选股同步        → watchlist.md / big_a.md / universe 列表
-  1. 美股宇宙池 ~1500 只    → data/cache/us/
+  0. Futu 自选股同步        → watchlist.md / big_a.md / us_universe_list.md / hk_universe_list.md
+                             （新股只增不减）
+  1. 美股宇宙池             → data/cache/us/（读取 us_universe_list.md，含 Futu 新增）
   2. 纳指 100               → data/cache/ndx100/
-  3. 港股宇宙池（~575 只）  → data/cache/hk/
-  3b. A 股（watchlist CN）  → data/cache/cn/
+  3. 港股宇宙池（~575 只）  → data/cache/hk/（读取 hk_universe_list.md，含 Futu 新增）
+  3b. A 股（watchlist CN）  → data/cache/cn/（读取 watchlist.md CN区段，含 Futu 新增）
   4. 技术指标               → data/cache/indicators/{market}/
      (EMA8/21/34/55/60/144/169/200/250；成交量MA5/10/50；前高252日)
   5. Wave 结构（全量 US+HK） → data/cache/wave_structure/{market}/

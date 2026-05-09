@@ -307,7 +307,7 @@ def update_us_data(
     3. 未过期 -> 跳过
 
     Args:
-        tickers: 目标 ticker 列表；None 时读取 data/us_sec_profiles.csv
+        tickers: 目标 ticker 列表；None 时读取 data/lists/us_universe_list.md
         force: 是否强制刷新
         max_stale_days: 允许最大陈旧天数
 
@@ -315,10 +315,8 @@ def update_us_data(
         {"updated": int, "skipped": int, "failed": int}
     """
     if tickers is None:
-        from stock_ana.config import DATA_DIR
-        profiles_path = DATA_DIR / "us_sec_profiles.csv"
-        profiles = pd.read_csv(profiles_path, encoding="utf-8-sig")
-        tickers = profiles["ticker"].dropna().astype(str).tolist()
+        from stock_ana.data.list_manager import load_us_universe_list
+        tickers = load_us_universe_list()
 
     return _update_bucket_data(
         tickers,

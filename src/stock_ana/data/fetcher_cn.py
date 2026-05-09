@@ -183,9 +183,8 @@ def update_cn_data(
         {code: DataFrame}，包含本次成功更新的标的。
     """
     if codes is None:
-        from stock_ana.data.list_manager import parse_watchlist
-        parsed = parse_watchlist()
-        codes = [e["symbol"] for e in parsed.get("cn", [])]
+        from stock_ana.data.list_manager import load_cn_list
+        codes = load_cn_list()
 
     if not codes:
         logger.info("CN: 无需更新（列表为空）")
