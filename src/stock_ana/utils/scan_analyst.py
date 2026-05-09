@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -75,52 +76,177 @@ def build_prompt(signals: list[dict]) -> str:
 
 # ─── Gemini 调用 ─────────────────────────────────────────────────────────────
 
+def _update_env_cookies(psid: str, psidts: str, env_path: "Path") -> None:
+    """将最新的 Cookie 写回 .env 文件，保留文件中其他内容。"""
+    import re
+    text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    for key, val in [("GEMINI_PSID", psid), ("GEMINI_PSIDTS", psidts)]:
+        pattern = rf"^{key}=.*$"
+        replacement = f"{key}={val}"
+        if re.search(pattern, text, flags=re.MULTILINE):
+            text = re.sub(pattern, replacement, text, flags=re.MULTILINE)
+        else:
+            text = text.rstrip("\n") + f"\n{replacement}\n"
+    env_path.write_text(text, encoding="utf-8")
+
+
 async def _init_client(model: str = DEFAULT_MODEL):
     """初始化 Gemini 客户端。
 
-    优先从环境变量 GEMINI_PSID / GEMINI_PSIDTS 读取 Cookie，
-    避免 cron 等非 GUI session 下 browser-cookie3 无法访问 Keychain 的问题。
-    若环境变量未设置，回退到 browser-cookie3 自动读取（仅限交互式 session）。
+    优先顺序：
+    1. 从 Chrome 直接读取最新 Cookie（自动更新 .env）
+    2. 仅当 Chrome 文件被锁（Chrome 正在运行）时，回退到 .env 缓存
+
+    若 PSIDTS 已被 Google 服务端轮换（约每 1-3 小时），会自动打开浏览器访问
+    Gemini，等 Chrome 拿到新 Cookie 后重新读取并重试（最多 2 次）。
     """
     import os
+    from pathlib import Path
+    from dotenv import load_dotenv
     from gemini_webapi import GeminiClient
+    from gemini_webapi.exceptions import AuthError as _AuthError
 
-    psid   = os.environ.get("GEMINI_PSID", "").strip()
-    psidts = os.environ.get("GEMINI_PSIDTS", "").strip()
+    env_path = Path(__file__).resolve().parents[3] / ".env"
 
-    if psid:
-        client = GeminiClient(secure_1psid=psid, secure_1psidts=psidts or None)
-        logger.info("Gemini 客户端：使用环境变量 Cookie 初始化")
-    else:
-        client = GeminiClient()
-        logger.info("Gemini 客户端：使用 browser-cookie3 自动读取 Cookie")
+    async def _read_cookies() -> tuple[str, str]:
+        """从 Chrome 读取 PSID / PSIDTS（Chrome 被锁时会自动关闭 Chrome 后读取）。"""
+        psid = psidts = ""
+        from stock_ana.utils.chrome_cookies import get_gemini_cookies
+        chrome = get_gemini_cookies()
+        psid   = chrome.get("__Secure-1PSID", "").strip()
+        psidts = chrome.get("__Secure-1PSIDTS", "").strip()
+        if psid:
+            _update_env_cookies(psid, psidts, env_path)
+        return psid, psidts
 
-    await client.init(timeout=180, auto_close=False, auto_refresh=True, verbose=False)
-    logger.info(f"Gemini 客户端初始化成功（模型：{model}）")
-    return client
+    async def _try_rotate(psid: str, psidts: str) -> str:
+        """尝试用 RotateCookies 端点刷新 PSIDTS，写入 gemini_webapi 缓存。"""
+        if not psid:
+            return psidts
+        try:
+            from httpx import Cookies as _HxCookies
+            from gemini_webapi.utils.rotate_1psidts import rotate_1psidts as _rotate
+            _jar = _HxCookies()
+            _jar.set("__Secure-1PSID", psid, domain=".google.com")
+            if psidts:
+                _jar.set("__Secure-1PSIDTS", psidts, domain=".google.com")
+            _new, _ = await _rotate(_jar)
+            if _new:
+                _update_env_cookies(psid, _new, env_path)
+                logger.info(f"PSIDTS 已通过 RotateCookies 刷新（{len(_new)} 字符）")
+                return _new
+        except Exception as _e:
+            logger.debug(f"PSIDTS 预刷新失败: {_e}")
+        return psidts
+
+    psid, psidts = await _read_cookies()
+    logger.info("Gemini 客户端：从 Chrome 读取最新 Cookie 并已更新 .env")
+    psidts = await _try_rotate(psid, psidts)
+
+    for attempt in range(4):  # 最多重试 3 次（等 Chrome flush 3 次机会）
+        try:
+            client = GeminiClient(
+                secure_1psid=psid or None,
+                secure_1psidts=psidts or None,
+            )
+            await client.init(timeout=900, auto_close=False, auto_refresh=True, verbose=False)
+            logger.info(f"Gemini 客户端初始化成功（模型：{model}）")
+            return client
+        except _AuthError:
+            # Mac 下 Cookie 从不过期（用户持续登录），直接抛出
+            if sys.platform != "win32" or attempt >= 2:
+                raise
+            # Windows：PSIDTS 已被 Google 服务端轮换 → 打开 Chrome 刷新后重读
+            logger.warning(
+                f"Gemini Cookie 已过期（第{attempt+1}次尝试），"
+                "正在自动打开 Chrome 刷新 Gemini 登录态，请稍候 35 秒..."
+            )
+            import subprocess
+            _chrome_paths = [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            ]
+            for _p in _chrome_paths:
+                if Path(_p).exists():
+                    subprocess.Popen([_p, "https://gemini.google.com/app"])
+                    break
+            await asyncio.sleep(35)          # 等 Chrome 将新 Cookie 写入 SQLite
+            psid, psidts = await _read_cookies()
+            psidts = await _try_rotate(psid, psidts)
+            logger.info("已重新读取 Cookie，准备重试初始化...")
+
+    raise RuntimeError("Gemini 客户端初始化失败，已穷尽所有重试")
 
 
 async def _call_gemini(
     prompt: str,
     client,
     model: str = DEFAULT_MODEL,
-    max_retries: int = 2,
+    max_retries: int = 0,
 ) -> str:
+    """
+    发送 prompt 到 Gemini，返回文本结果。
+
+    gemini_webapi 内部有时会在内容已经完整返回后，因缺少"完成标记"帧
+    而抛出 APIError("Stream interrupted or truncated.")。
+    此时 generate_content 的异常向上传播，但实际文本已经在最后一个
+    yield 的 ModelOutput 里。
+
+    解法：在 _generate 层把 APIError 改成在已有候选文本时直接 return，
+    而不是重试或丢弃。我们在这里用 monkey-patch 替换 _generate 的收集逻辑。
+    """
+    import gemini_webapi.exceptions as _gex
+
     last_err = None
     for attempt in range(max_retries + 1):
         try:
-            response = await client.generate_content(prompt, model=model)
-            text = response.text or ""
+            # 直接 iterate _generate，遇到 APIError("interrupted") 时
+            # 如果已经拿到文本就视为成功，否则重新抛出。
+            last_output = None
+            async for last_output in client._generate(prompt=prompt, model=model):
+                pass
+            # 正常完成
+            text = (last_output.text if last_output else "") or ""
             logger.success(f"Gemini 分析完成，共 {len(text)} 字符")
             return text
+        except _gex.APIError as e:
+            msg = str(e)
+            if "interrupted" in msg.lower() or "truncated" in msg.lower():
+                if last_output is not None:
+                    text = last_output.text or ""
+                    if text.strip():
+                        logger.info(
+                            f"Gemini 流标记缺失但内容已完整（{len(text)} 字符），视为成功"
+                        )
+                        return text
+            last_err = e
+            if attempt < max_retries:
+                wait = 15 * (attempt + 1)
+                logger.warning(f"请求失败 [{type(e).__name__}]: {msg[:80]}，{wait}s 后重试...")
+                await asyncio.sleep(wait)
+            else:
+                logger.error(f"分析失败（重试{max_retries}次）[{type(e).__name__}]: {msg[:200]}")
+        except (asyncio.TimeoutError, TimeoutError) as e:
+            # asyncio.TimeoutError / Python 内置 TimeoutError:
+            # 在 Python 3.11+ 两者是同一个类，str(e) 为空字符串。
+            # httpx 在 Windows 上某些路径走 asyncio.timeout() 而非 ReadTimeout，
+            # 会绕过 gemini_webapi 的 except ReadTimeout，以空消息穿透上来。
+            last_err = e
+            msg = f"请求超时（timeout=900s），attempt={attempt+1}/{max_retries+1}"
+            if attempt < max_retries:
+                wait = 30 * (attempt + 1)
+                logger.warning(f"{msg}，{wait}s 后重试...")
+                await asyncio.sleep(wait)
+            else:
+                logger.error(f"分析失败（重试{max_retries}次）[TimeoutError]: {msg}")
         except Exception as e:
             last_err = e
             if attempt < max_retries:
                 wait = 15 * (attempt + 1)
-                logger.warning(f"请求失败: {str(e)[:80]}，{wait}s 后重试...")
+                logger.warning(f"请求失败 [{type(e).__name__}]: {str(e)[:80]}，{wait}s 后重试...")
                 await asyncio.sleep(wait)
             else:
-                logger.error(f"分析失败（重试{max_retries}次）: {str(e)[:200]}")
+                logger.error(f"分析失败（重试{max_retries}次）[{type(e).__name__}]: {str(e)[:200]}")
     raise last_err  # type: ignore[misc]
 
 
@@ -199,7 +325,7 @@ async def analyze_signals(
 
     client = await _init_client(model)
     try:
-        text = await _call_gemini(prompt, client, model=model)
+        text = await _call_gemini(prompt, client, model=model, max_retries=1)
         path = _save_result(targets, text, out_dir)
     finally:
         await client.close()

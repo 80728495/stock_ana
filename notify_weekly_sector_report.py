@@ -168,6 +168,7 @@ def build_blocks(summary: dict, workflow_exit_code: int) -> tuple[str, list[list
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Notify weekly sector report to main agent")
     parser.add_argument("--workflow-exit-code", type=int, default=0)
+    parser.add_argument("--no-email", action="store_true", help="Skip email, Feishu only")
     return parser.parse_args()
 
 

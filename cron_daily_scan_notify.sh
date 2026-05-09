@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/Users/wl/stock_ana"
-PYTHON_BIN="/Users/wl/.pyenv/shims/python3"
+# 脚本所在目录即为项目根目录（无论从哪里调用）
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 优先用项目 venv，回退到系统 python3
+if [[ -f "$PROJECT_DIR/.venv/bin/python3" ]]; then
+    PYTHON_BIN="$PROJECT_DIR/.venv/bin/python3"
+else
+    PYTHON_BIN="$(command -v python3)"
+fi
 STAMP_FILE="$PROJECT_DIR/data/logs/.last_scan_stamp"
 
 cd "$PROJECT_DIR"

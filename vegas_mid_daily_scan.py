@@ -49,6 +49,7 @@ logger.add(
     retention="30 days",
     level="INFO",
     encoding="utf-8",
+    enqueue=True,
 )
 
 DAILY_SCAN_DIR = PROJECT_ROOT / "data" / "output" / "daily_scan"
@@ -225,6 +226,7 @@ def save_summary(
     lookback: int,
     market_label: str = "",
     filename: str = "summary.json",
+    data_stale: bool = False,
 ) -> Path:
     """生成 summary JSON，为 clawbot 提供消费入口。"""
     today = date.today().isoformat()
@@ -265,6 +267,7 @@ def save_summary(
         "lookback_days":        lookback,
         "total_scanned":        total_scanned,
         "signals_found":        len(signals),
+        "data_stale":           data_stale,
         "has_gemini_analysis":  gemini_path is not None and gemini_path.exists(),
         "gemini_report_path":   str(gemini_path) if gemini_path else None,
         "gemini_summary_table": gemini_summary_table,
@@ -290,7 +293,35 @@ async def _run_single_market(
     filename: str,
 ) -> Path:
     """扫描单个市场并保存 summary，返回 summary 路径。"""
+    from datetime import timedelta
+
     signals, total_scanned = run_daily_scan(lookback=lookback, list_mode=list_mode)
+
+    # ── 陈旧数据检测：补跑场景下若 HK 信号与前一天完全相同，跳过 Gemini 和通知 ──
+    data_stale = False
+    if signals and list_mode == "hk":
+        prev_date = (date.today() - timedelta(days=1)).isoformat()
+        prev_summary_path = DAILY_SCAN_DIR / prev_date / filename
+        if prev_summary_path.exists():
+            try:
+                prev_summary = json.loads(prev_summary_path.read_text(encoding="utf-8"))
+                prev_key = {
+                    (s["symbol"], s["entry_date"])
+                    for s in prev_summary.get("signals", [])
+                }
+                curr_key = {
+                    (s.get("symbol", ""), s.get("entry_date", "").split("(")[0])
+                    for s in signals
+                }
+                if curr_key and curr_key == prev_key:
+                    logger.warning(
+                        f"[{market_label}] 港股数据未更新（信号与昨日 {prev_date} 完全相同），"
+                        "跳过 Gemini 分析，summary 标记 data_stale=True"
+                    )
+                    data_stale = True
+                    scan_only = True  # 不再调用 Gemini
+            except Exception as e:
+                logger.debug(f"陈旧检测读取失败，跳过检测: {e}")
 
     gemini_path: Path | None = None
     if not scan_only and signals:
@@ -299,6 +330,7 @@ async def _run_single_market(
     return save_summary(
         signals, total_scanned, gemini_path, lookback,
         market_label=market_label, filename=filename,
+        data_stale=data_stale,
     )
 
 
@@ -337,6 +369,7 @@ async def _main_async(lookback: int, scan_only: bool, list_mode: str = "tech") -
     summary_path = save_summary(
         signals, total_scanned, gemini_path, lookback,
         market_label=market_label, filename=filename,
+        data_stale=False,
     )
 
     elapsed = (datetime.now() - t0).seconds

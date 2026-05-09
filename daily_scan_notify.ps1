@@ -33,7 +33,7 @@ Write-Host "[daily-scan] New data detected, starting scan..."
 
 # Check proxy/network reachability to Google before running Gemini-dependent scan
 try {
-    $null = Invoke-WebRequest -Uri "https://gemini.google.com" -UseDefaultCredentials -TimeoutSec 10 -ErrorAction Stop
+    $null = Invoke-WebRequest -Uri "https://gemini.google.com" -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
 } catch {
     Write-Host "[daily-scan] WARNING: gemini.google.com unreachable (VPN may not be active). Proceeding anyway..."
 }
@@ -42,28 +42,42 @@ try {
 $logDir = Join-Path $ProjectDir "data\logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 
-# 1) Vegas scan + Gemini analysis
-$scanExit = 0
-try {
-    & $PythonBin vegas_mid_daily_scan.py --list combined
-    $scanExit = $LASTEXITCODE
-} catch {
-    $scanExit = 1
-    Write-Host "[daily-scan] Scan error: $_"
-}
-
-# 2) Notify main agent via Feishu (always runs regardless of scan exit code)
-& $PythonBin notify_daily_scan_result.py --scan-exit-code $scanExit --no-email
-
-# 3) Watchlist Vegas touch scan (Mid + Long) → Feishu push if any signals
+# 1) Watchlist Vegas touch scan (Mid + Long) — 不依赖 Gemini，最先运行，完成即推送飞书
+Write-Host "[daily-scan] Step 1/3: Watchlist Vegas scan..."
 try {
     & $PythonBin watchlist_vegas_scan.py
 } catch {
     Write-Host "[daily-scan] watchlist_vegas_scan error: $_"
 }
 
+# 2) 美股 scan + Gemini → 完成后立即发飞书（含每日数据更新状态）
+Write-Host "[daily-scan] Step 2/3: US scan + Gemini..."
+$usScanExit = 0
+try {
+    & $PythonBin vegas_mid_daily_scan.py --list tech
+    $usScanExit = $LASTEXITCODE
+} catch {
+    $usScanExit = 1
+    Write-Host "[daily-scan] US scan error: $_"
+}
+& $PythonBin notify_daily_scan_result.py --market us --scan-exit-code $usScanExit --no-email
+
+# 3) 港股 scan + Gemini → 完成后立即发飞书（跳过重复的数据更新状态）
+Write-Host "[daily-scan] Step 3/3: HK scan + Gemini..."
+$hkScanExit = 0
+try {
+    & $PythonBin vegas_mid_daily_scan.py --list hk
+    $hkScanExit = $LASTEXITCODE
+} catch {
+    $hkScanExit = 1
+    Write-Host "[daily-scan] HK scan error: $_"
+}
+& $PythonBin notify_daily_scan_result.py --market hk --skip-update --no-email
+
 # 4) Update timestamp
 Set-Content -Path $StampFile -Value (Get-Date -Format "o") -Encoding ASCII
 
+# 整体退出码：任一非零则返回非零
+$scanExit = if ($usScanExit -ne 0) { $usScanExit } elseif ($hkScanExit -ne 0) { $hkScanExit } else { 0 }
 exit $scanExit
 

@@ -329,6 +329,11 @@ def parse_args() -> argparse.Namespace:
         default="combined",
         help="指定发哪个市场的扫描通知（默认 combined = 全部）",
     )
+    parser.add_argument(
+        "--skip-update",
+        action="store_true",
+        help="跳过每日数据更新状态通知（分步发送时避免重复）",
+    )
     return parser.parse_args()
 
 
@@ -408,11 +413,12 @@ def main() -> int:
 
     ok = True
 
-    # Notification 1: update report
-    title1, blocks1 = build_update_blocks(status)
-    if not send_post_message(token, title1, blocks1):
-        print("❌ 数据更新消息发送失败")
-        ok = False
+    # Notification 1: update report（可通过 --skip-update 跳过，避免分步发送时重复）
+    if not args.skip_update:
+        title1, blocks1 = build_update_blocks(status)
+        if not send_post_message(token, title1, blocks1):
+            print("❌ 数据更新消息发送失败")
+            ok = False
 
     # Notification 2 & 3: 美股 + 港股扫描（combined 模式）；如仅有一个则单独发
     summary_us_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_us.json")
@@ -434,7 +440,9 @@ def main() -> int:
         elif send_us and not summary_us:
             print("⚠️ 未找到 summary_us.json，跳过美股通知")
         if send_hk and summary_hk:
-            if not _send_scan_notification(token, summary_hk, 0, args.no_email):
+            if summary_hk.get("data_stale"):
+                print("[daily-scan] 港股数据未更新（data_stale=True），跳过港股通知")
+            elif not _send_scan_notification(token, summary_hk, 0, args.no_email):
                 ok = False
         elif send_hk and not summary_hk:
             print("⚠️ 未找到 summary_hk.json，跳过港股通知")

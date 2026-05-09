@@ -241,32 +241,10 @@ _WEEKLY_PROMPT = """角色设定：你是一位顶级宏观策略分析师和行
 
 
 async def _init_client() -> GeminiClient:
-    """Initialize the Gemini client used for weekly sector commentary.
-
-    优先从环境变量 GEMINI_PSID / GEMINI_PSIDTS 读取 Cookie，
-    避免 cron 等非 GUI session 下 browser-cookie3 无法访问 Keychain 的问题。
-    若环境变量未设置，回退到 browser-cookie3 自动读取（仅限交互式 session）。
-    """
-    import os
-
-    psid   = os.environ.get("GEMINI_PSID", "").strip()
-    psidts = os.environ.get("GEMINI_PSIDTS", "").strip()
-
-    if psid:
-        client = GeminiClient(secure_1psid=psid, secure_1psidts=psidts or None)
-        logger.info("Gemini 客户端：使用环境变量 Cookie 初始化")
-    else:
-        client = GeminiClient()
-        logger.info("Gemini 客户端：使用 browser-cookie3 自动读取 Cookie")
-
-    await client.init(
-        timeout=180,
-        auto_close=False,
-        auto_refresh=True,
-        verbose=False,
-    )
-    logger.info(f"Gemini 客户端初始化成功 (模型: {ANALYSIS_MODEL})")
-    return client
+    """Initialize Gemini client — delegates to scan_analyst._init_client for
+    consistent Chrome-cookie reading, Windows kill-on-lock support, and retry."""
+    from stock_ana.utils.scan_analyst import _init_client as _shared_init
+    return await _shared_init(model=ANALYSIS_MODEL)
 
 
 async def analyze_weekly(
@@ -279,6 +257,8 @@ async def analyze_weekly(
     Returns:
         Gemini 返回的分析文本
     """
+    import gemini_webapi.exceptions as _gex
+
     week_label = _week_label()
     prompt = _WEEKLY_PROMPT.format(
         week_label=week_label,
@@ -290,10 +270,28 @@ async def analyze_weekly(
 
     client = await _init_client()
     try:
-        response = await client.generate_content(prompt, model=model)
-        text = response.text or ""
-        logger.success(f"Gemini 分析完成，返回 {len(text)} 字符")
-        return text
+        for attempt in range(2):
+            last_text = ""
+            try:
+                async for output in client._generate(prompt, model=model):
+                    if output.text:
+                        last_text = output.text
+            except _gex.APIError as e:
+                if "interrupted" in str(e).lower() and last_text:
+                    logger.info(f"Gemini 流标记缺失但内容已完整（{len(last_text)} 字符），视为成功")
+                    logger.success(f"Gemini 分析完成，返回 {len(last_text)} 字符")
+                    return last_text
+                if attempt == 0:
+                    logger.warning(f"Gemini 请求失败 ({e})，15s 后重试...")
+                    import asyncio as _asyncio
+                    await _asyncio.sleep(15)
+                    continue
+                raise
+            else:
+                if last_text:
+                    logger.success(f"Gemini 分析完成，返回 {len(last_text)} 字符")
+                    return last_text
+                raise _gex.APIError("Gemini returned empty response")
     finally:
         await client.close()
 

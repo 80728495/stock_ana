@@ -8,6 +8,7 @@ project uses a consistent CJK-capable font stack without per-call repetition.
 
 from __future__ import annotations
 
+import sys
 import warnings
 from functools import lru_cache
 from pathlib import Path
@@ -24,8 +25,21 @@ import pandas as pd
 from loguru import logger
 
 # ── Canonical font config (applied once at import time) ──────────────────────
-plt.rcParams["font.sans-serif"] = ["Heiti TC", "PingFang HK", "STHeiti", "Songti SC",
-                                    "Arial Unicode MS", "Arial"]
+# Font priority is platform-specific: put natively available fonts first so
+# matplotlib doesn't emit 'findfont: Font family not found' warnings.
+if sys.platform == "win32":
+    # Windows — Microsoft YaHei is bundled with Windows and supports CJK
+    _SANS_SERIF_FONTS = ["Microsoft YaHei", "SimHei", "Arial Unicode MS", "Arial"]
+elif sys.platform == "darwin":
+    # macOS — Heiti TC / PingFang are system fonts
+    _SANS_SERIF_FONTS = ["Heiti TC", "PingFang HK", "STHeiti", "Songti SC",
+                         "Arial Unicode MS", "Arial"]
+else:
+    # Linux — Noto fonts are common; fall back to generic sans-serif
+    _SANS_SERIF_FONTS = ["Noto Sans CJK SC", "WenQuanYi Micro Hei",
+                         "Arial Unicode MS", "Arial"]
+
+plt.rcParams["font.sans-serif"] = _SANS_SERIF_FONTS
 plt.rcParams["axes.unicode_minus"] = False
 
 # ── Shared style constants ────────────────────────────────────────────────────
@@ -50,8 +64,13 @@ _EMA_COLORS = {
     "EMA200": "#E64A19",
 }
 
-# CJK font probe (runtime, cached)
-_CJK_FONTS = ["PingFang HK", "Heiti TC", "Arial Unicode MS"]
+# CJK font probe (runtime, cached) — mirrors the platform priority above
+if sys.platform == "win32":
+    _CJK_FONTS = ["Microsoft YaHei", "SimHei", "Arial Unicode MS"]
+elif sys.platform == "darwin":
+    _CJK_FONTS = ["PingFang HK", "Heiti TC", "Arial Unicode MS"]
+else:
+    _CJK_FONTS = ["Noto Sans CJK SC", "WenQuanYi Micro Hei", "Arial Unicode MS"]
 
 
 @lru_cache(maxsize=1)
