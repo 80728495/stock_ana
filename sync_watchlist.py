@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""sync_holdings.py — 每日同步 Futu OpenD 账户持仓到 watchlist.md
+"""sync_watchlist.py — 每日同步 Futu OpenD 账户持仓到 watchlist.md
 
 运行方式：
-    python sync_holdings.py
-    python sync_holdings.py --sim        # 使用模拟账户
-    python sync_holdings.py --dry-run    # 只打印，不写文件
+    python sync_watchlist.py
+    python sync_watchlist.py --sim        # 使用模拟账户
+    python sync_watchlist.py --dry-run    # 只打印，不写文件
 
 持仓写入 watchlist.md 的 "## 持仓 (Holdings)" 区段。
 已有区段时替换，不存在时追加到文件末尾。
@@ -170,15 +170,15 @@ def main() -> int:
     args = parse_args()
 
     env_label = "模拟账户" if args.sim else "真实账户"
-    print(f"[sync_holdings] 连接 Futu OpenD @ {OPEND_HOST}:{OPEND_PORT}（{env_label}）...")
+    print(f"[sync_watchlist] 连接 Futu OpenD @ {OPEND_HOST}:{OPEND_PORT}（{env_label}）...")
 
     holdings = fetch_holdings(use_sim=args.sim)
 
     if not holdings:
-        print("[sync_holdings] 没有持仓数据，跳过写入。")
+        print("[sync_watchlist] 没有持仓数据，跳过写入。")
         return 0
 
-    print(f"[sync_holdings] 获取到 {len(holdings)} 只持仓：")
+    print(f"[sync_watchlist] 获取到 {len(holdings)} 只持仓：")
     for h in holdings:
         pl_str = f"{h['pl_ratio']:+.2f}%" if h["pl_ratio"] is not None else "N/A"
         print(f"  {h['market']:2}:{h['symbol']:<8}  {h['name']:<20}  "

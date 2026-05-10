@@ -3,7 +3,7 @@
 
 每日更新后，对每只股票计算并保存：
   - 扩展 EMA（8/21/34/55/60/144/169/200/250）
-  - 成交量均线（vol_ma_5, vol_ma_10, vol_ma_50）
+  - 成交量均线（vol_ma_5, vol_ma_10, vol_ma_20, vol_ma_50）
   - 前高价格（prev_high_252d）
 
 存储路径：data/cache/indicators/{market}/{symbol}.parquet
@@ -59,7 +59,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     从 OHLCV DataFrame 计算全部每日指标。
 
     输入：含 open/high/low/close/volume 列，index 为日期
-    输出：含 EMA×9 + vol_ma×3 + prev_high 列的 DataFrame
+    输出：含 EMA×9 + vol_ma×4 + prev_high 列的 DataFrame
     """
     df = df.copy()
     df.columns = [c.lower() for c in df.columns]

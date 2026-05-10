@@ -20,6 +20,9 @@
   - cdl_three_white_soldiers  三白兵
   - cdl_three_black_crows     三乌鸦
 
+顶部专用：
+  - cdl_shooting_star      射击之星（长上影、小实体、高位出现）
+
 批量扫描：
   - scan_candle_patterns  扫描所有形态，返回 DataFrame
 """
@@ -433,6 +436,46 @@ def cdl_three_black_crows(
 
 
 # ─────────────────────────────────────────────────────────────────
+#  顶部专用形态
+# ─────────────────────────────────────────────────────────────────
+
+def cdl_shooting_star(
+    df: pd.DataFrame,
+    upper_shadow_ratio_min: float = 2.0,
+    body_ratio_max: float = 0.30,
+    lower_shadow_ratio_max: float = 0.5,
+) -> pd.Series:
+    """
+    射击之星（顶部看跌单根K线）：
+
+    条件：
+      - 上影线长度 >= body * upper_shadow_ratio_min（默认2倍实体）
+      - 实体占总振幅 < body_ratio_max（实体较小）
+      - 下影线 <= body * lower_shadow_ratio_max（几乎无下影）
+      - 前一根为阳线（上涨中出现的高位信号）
+
+    返回 -1（看跌信号） / 0（无形态）。
+    不返回 +1，因为射击之星只有看跌含义。
+    """
+    o, h, l, c = df["open"], df["high"], df["low"], df["close"]
+    body = _body(o, c).replace(0, 1e-8)
+    upper = _upper_shadow(o, h, c)
+    lower = _lower_shadow(o, l, c)
+    br = _body_ratio(o, h, l, c)
+
+    is_star = (
+        (upper >= body * upper_shadow_ratio_min)   # 长上影
+        & (br < body_ratio_max)                    # 小实体
+        & (lower <= body * lower_shadow_ratio_max) # 短或无下影
+    )
+    prev_bullish = c.shift(1) > o.shift(1)  # 前一根阳线（上涨趋势中）
+
+    result = pd.Series(0, index=df.index, name="cdl_shooting_star")
+    result[is_star & prev_bullish] = -1
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────
 #  批量扫描入口
 # ─────────────────────────────────────────────────────────────────
 
@@ -449,6 +492,7 @@ _PATTERN_FUNCS: dict[str, callable] = {
     "evening_star":          cdl_evening_star,
     "three_white_soldiers":  cdl_three_white_soldiers,
     "three_black_crows":     cdl_three_black_crows,
+    "shooting_star":         cdl_shooting_star,
 }
 
 

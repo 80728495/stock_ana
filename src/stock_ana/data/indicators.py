@@ -13,7 +13,7 @@ from ta.volume import OnBalanceVolumeIndicator
 _EMA_EXTENDED_WINDOWS = [8, 21, 34, 55, 60, 144, 169, 200, 250]
 
 # 成交量均值窗口
-_VOL_MA_WINDOWS = [5, 10, 50]
+_VOL_MA_WINDOWS = [5, 10, 20, 50]
 
 # 前高回望窗口（交易日）
 PREV_HIGH_WINDOW = 252   # ≈1 年
@@ -47,7 +47,7 @@ def add_ema_extended(df: pd.DataFrame, windows: list[int] | None = None) -> pd.D
 
 def add_volume_ma(df: pd.DataFrame, windows: list[int] | None = None) -> pd.DataFrame:
     """
-    添加成交量移动平均：vol_ma_5, vol_ma_10, vol_ma_50。
+    添加成交量移动平均：vol_ma_5, vol_ma_10, vol_ma_20, vol_ma_50。
 
     使用简单移动平均（SMA），min_periods=1 防止头部 NaN。
     """
@@ -122,7 +122,7 @@ def add_daily_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     添加每日更新所需的全部指标：
       - 扩展 EMA（8/21/34/55/60/144/169/200/250）
-      - 成交量均线（vol_ma_5/10/50）
+      - 成交量均线（vol_ma_5/10/20/50）
       - 前高价格（prev_high_252d）
 
     这是 indicators_store 每日批量计算时调用的主入口。

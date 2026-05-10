@@ -115,7 +115,6 @@ def analyze_wave_structure(
 	_emas = vegas_ema_series(close)
 	ema34 = _emas[34]
 	ema55 = _emas[55]
-	ema60 = _emas[60]
 	ema144 = _emas[144]
 	ema169 = _emas[169]
 	ema200 = _emas[200]
@@ -261,7 +260,6 @@ def analyze_wave_structure(
 				seg_highs,
 				ema34,
 				ema55,
-				ema60,
 				ema144,
 				ema169,
 				ema200,
@@ -384,7 +382,7 @@ def analyze_wave_structure(
 		last_ema169 = float(ema169.iloc[-1])
 		last_ema144 = float(ema144.iloc[-1])
 		last_ema200 = float(ema200.iloc[-1])
-		last_ema60 = float(ema60.iloc[-1])
+		last_ema55 = float(ema55.iloc[-1])
 		long_upper = max(last_ema144, last_ema169, last_ema200)
 
 		if last_wave["end_pivot"] is not None:
@@ -417,7 +415,7 @@ def analyze_wave_structure(
 					break
 		elif long_upper > 0 and last_close <= long_upper * (1 + long_vegas_margin_pct / 100):
 			curr_status = "long_pullback"
-		elif last_ema60 > 0 and last_close <= last_ema60 * (1 + mid_vegas_margin_pct / 100):
+		elif last_ema55 > 0 and last_close <= last_ema55 * (1 + mid_vegas_margin_pct / 100):
 			curr_status = "mid_pullback"
 		else:
 			curr_status = "rising"
@@ -442,7 +440,6 @@ def _build_major_wave_v2(
 	wave_highs: list[dict],
 	ema34: pd.Series,
 	ema55: pd.Series,
-	ema60: pd.Series,
 	ema144: pd.Series,
 	ema169: pd.Series,
 	ema200: pd.Series,
@@ -460,14 +457,13 @@ def _build_major_wave_v2(
 	"""
 
 	def _touches_mid(pivot: dict) -> bool:
-		e60 = float(ema60.iloc[pivot["iloc"]])
-		return e60 > 0 and pivot["value"] <= e60 * (1 + mid_margin / 100)
+		e55 = float(ema55.iloc[pivot["iloc"]])
+		return e55 > 0 and pivot["value"] <= e55 * (1 + mid_margin / 100)
 
 	def _mid_band(pivot: dict) -> str:
 		e34 = float(ema34.iloc[pivot["iloc"]])
 		e55 = float(ema55.iloc[pivot["iloc"]])
-		e60 = float(ema60.iloc[pivot["iloc"]])
-		bands = {"ema34": e34, "ema55": e55, "ema60": e60}
+		bands = {"ema34": e34, "ema55": e55}
 		return min(bands, key=lambda name: abs(pivot["value"] - bands[name]))
 
 	def _long_band(pivot: dict) -> str:

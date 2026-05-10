@@ -2,7 +2,7 @@
 Vegas 均线区带定义与 EMA 计算工具。
 
 Vegas 体系由两组 EMA 构成：
-  - Mid Vegas：EMA34 / EMA55 / EMA60（中期通道，用于升浪中的回踩触碰）
+  - Mid Vegas：EMA34 / EMA55（中期通道，用于升浪中的回踩触碰）
   - Long Vegas：EMA144 / EMA169 / EMA200（长期通道，用于浪结构起点与趋势判断）
 
 本模块是这两组 EMA 的唯一计算来源，供以下模块共用：
@@ -24,7 +24,7 @@ import pandas as pd
 
 # ── Vegas EMA 配置 ──────────────────────────────────────────────────────────
 
-MID_EMAS: list[int] = [34, 55, 60]
+MID_EMAS: list[int] = [34, 55]
 LONG_EMAS: list[int] = [144, 169, 200]
 ALL_VEGAS_EMAS: list[int] = MID_EMAS + LONG_EMAS
 
