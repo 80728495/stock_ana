@@ -143,6 +143,15 @@ async def _init_client(model: str = DEFAULT_MODEL):
     logger.info("Gemini 客户端：从 Chrome 读取最新 Cookie 并已更新 .env")
     psidts = await _try_rotate(psid, psidts)
 
+    def _is_cookie_error(exc: Exception) -> bool:
+        """判断异常是否属于 Cookie 过期类错误（含 gemini_webapi 内部重试耗尽）。"""
+        if isinstance(exc, _AuthError):
+            return True
+        if isinstance(exc, RuntimeError):
+            msg = str(exc).lower()
+            return "failed to initialize" in msg or "psidts" in msg or "expired" in msg
+        return False
+
     for attempt in range(4):  # 最多重试 3 次（等 Chrome flush 3 次机会）
         try:
             client = GeminiClient(
@@ -152,7 +161,9 @@ async def _init_client(model: str = DEFAULT_MODEL):
             await client.init(timeout=900, auto_close=False, auto_refresh=True, verbose=False)
             logger.info(f"Gemini 客户端初始化成功（模型：{model}）")
             return client
-        except _AuthError:
+        except Exception as _exc:
+            if not _is_cookie_error(_exc):
+                raise
             # Mac 下 Cookie 从不过期（用户持续登录），直接抛出
             if sys.platform != "win32" or attempt >= 2:
                 raise
