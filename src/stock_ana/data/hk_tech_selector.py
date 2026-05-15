@@ -230,19 +230,24 @@ def run_hk_tech_selector(config: SelectorConfig) -> pd.DataFrame:
 
 
 def _write_md(df: pd.DataFrame) -> None:
+    from datetime import date
+
     name_col = "name_zh" if "name_zh" in df.columns else "name"
     cap_col = "market_cap_yi" if "market_cap_yi" in df.columns else None
     turn_col = "avg_turnover_20d" if "avg_turnover_20d" in df.columns else None
 
+    today = date.today().strftime("%Y-%m-%d")
     lines = [
         "# 港股高科技与制造业选股",
         "",
-        f"共 **{len(df)}** 只 | 来源：hk_universe.csv | 策略：富途行业板块过滤",
+        f"> 自动生成，最后更新：{today}",
+        "> 来源：富途 OpenD 行业板块过滤，港股主板",
+        f"> 共 {len(df)} 只",
         "",
-        "| 代码 | 名称 | 市值(亿HKD) | 均成交额(万/日) | 行业 |",
-        "|------|------|------------|----------------|------|",
+        "| # | 代码 | 中文名 | 市值(亿) | 20日均成交(万) | 行业 |",
+        "|---|------|--------|---------|--------------|------|",
     ]
-    for _, row in df.iterrows():
+    for i, (_, row) in enumerate(df.iterrows(), 1):
         code = row.get("code", "")
         name = row.get(name_col, "")
         cap = f"{row[cap_col]:.0f}" if cap_col and pd.notna(row.get(cap_col)) else "-"
@@ -252,7 +257,7 @@ def _write_md(df: pd.DataFrame) -> None:
             else "-"
         )
         industry = row.get("industry", "")
-        lines.append(f"| {code} | {name} | {cap} | {turn} | {industry} |")
+        lines.append(f"| {i} | {code} | {name} | {cap} | {turn} | {industry} |")
 
     OUT_MD.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
