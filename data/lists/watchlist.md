@@ -1,6 +1,6 @@
 # Shawn 关注股票列表
 
-> 人工维护，最后更新：2026-04-30
+> 人工维护，最后更新：2026-05-05
 >
 > 重点跟踪标的，兼顾港股、美股与大A。
 
@@ -136,6 +136,10 @@
 | SPY | 标普500ETF-SPDR | 标普500ETF-SPDR |
 | GLD | 黄金ETF-SPDR | 黄金ETF-SPDR |
 | EWY | 韩国ETF-iShares MSCI | 韩国ETF-iShares MSCI |
+| ASML | 阿斯麦 | 阿斯麦 |
+| SNDK | 闪迪 | 闪迪 |
+| SIRI | Sirius XM | Sirius XM |
+| INGM | 英迈科技 | 英迈科技 |
 
 ## 大A (CN)
 

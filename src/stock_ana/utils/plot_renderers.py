@@ -48,6 +48,7 @@ SIGNAL_STYLE = {
     "BUY":        {"marker": "^", "color": "#66DD66", "edge": "#228B22", "size": 160},
     "HOLD":       {"marker": "o", "color": "#FFD700", "edge": "#B8860B", "size": 100},
     "AVOID":      {"marker": "v", "color": "#FF6666", "edge": "#CC0000", "size": 120},
+    "OBSERVE":    {"marker": "D", "color": "#CE93D8", "edge": "#7B1FA2", "size": 120},
 }
 
 _EMA_SPANS = {
@@ -227,7 +228,7 @@ def plot_vegas_mid_scan_chart(
 
     if idx_pos < len(df_view):
         low_val = float(df_view.iloc[idx_pos]["low"])
-        sig_short = {"STRONG_BUY": "SB", "BUY": "B", "HOLD": "H", "AVOID": "A"}[sig_type]
+        sig_short = {"STRONG_BUY": "SB", "BUY": "B", "HOLD": "H", "AVOID": "A", "OBSERVE": "OB"}[sig_type]
         ax.annotate(f"{sig_short}{score:+d}", xy=(idx_pos, low_val * 0.94),
                     fontsize=10, fontweight="bold", color=style["edge"],
                     ha="center", va="top")
@@ -474,7 +475,7 @@ def plot_stock_all_signals_chart(
     ax = axes[0]
 
     # Annotate each signal with a small label
-    SIG_SHORT = {"STRONG_BUY": "SB", "BUY": "B", "HOLD": "H", "AVOID": "A"}
+    SIG_SHORT = {"STRONG_BUY": "SB", "BUY": "B", "HOLD": "H", "AVOID": "A", "OBSERVE": "OB"}
     for idx_pos, sig in valid_sigs:
         sig_type = sig.get("signal", "HOLD")
         score    = sig.get("score", 0)

@@ -152,6 +152,14 @@ async def _init_client(model: str = DEFAULT_MODEL):
             return "failed to initialize" in msg or "psidts" in msg or "expired" in msg
         return False
 
+    def _is_network_error(exc: Exception) -> bool:
+        """判断是否为网络连接类错误（代理未就绪、ConnectTimeout 等）。"""
+        try:
+            import httpx as _httpx
+            return isinstance(exc, (_httpx.ConnectTimeout, _httpx.ConnectError, _httpx.NetworkError))
+        except ImportError:
+            return False
+
     for attempt in range(4):  # 最多重试 3 次（等 Chrome flush 3 次机会）
         try:
             client = GeminiClient(
@@ -162,6 +170,16 @@ async def _init_client(model: str = DEFAULT_MODEL):
             logger.info(f"Gemini 客户端初始化成功（模型：{model}）")
             return client
         except Exception as _exc:
+            if _is_network_error(_exc):
+                if attempt >= 2:
+                    raise
+                wait = 30 * (attempt + 1)
+                logger.warning(
+                    f"Gemini 初始化网络错误（第{attempt+1}次，{type(_exc).__name__}），"
+                    f"{wait}s 后重试..."
+                )
+                await asyncio.sleep(wait)
+                continue
             if not _is_cookie_error(_exc):
                 raise
             # Mac 下 Cookie 从不过期（用户持续登录），直接抛出

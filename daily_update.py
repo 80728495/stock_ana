@@ -71,6 +71,7 @@ def sync_futu() -> dict:
         sfw.update_watchlist(hk_stocks, us_stocks, cn_stocks)
         sfw.write_big_a(cn_stocks)
         sfw.update_universes(hk_stocks, us_stocks)
+        sfw.merge_cn_to_hightech_watchlist(cn_stocks)
         elapsed = time.time() - t0
         logger.success(f"✅ Futu 同步完成 ({elapsed:.0f}s)")
         return {"ok": True, "elapsed": round(elapsed),
@@ -151,6 +152,25 @@ def update_cn() -> dict:
         return {"ok": True, "elapsed": round(elapsed), "count": len(data)}
     except Exception as e:
         logger.error(f"❌ A股更新失败: {e}")
+        return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e)}
+
+
+def update_cn_hightech() -> dict:
+    """更新沪深高新技术关注列表（cn_hightech_watchlist.md）的 OHLCV 数据。"""
+    logger.info("=" * 60)
+    logger.info("【3c/5】更新A股高新技术列表 ...")
+    logger.info("=" * 60)
+    t0 = time.time()
+    try:
+        from stock_ana.data.fetcher_cn import update_cn_data
+        from stock_ana.data.list_manager import load_cn_hightech_list
+        codes = load_cn_hightech_list()
+        data = update_cn_data(codes=codes, max_stale_days=1)
+        elapsed = time.time() - t0
+        logger.success(f"✅ A股高新技术列表更新完成 ({elapsed:.0f}s): {len(data)}/{len(codes)} 只股票")
+        return {"ok": True, "elapsed": round(elapsed), "count": len(data)}
+    except Exception as e:
+        logger.error(f"❌ A股高新技术列表更新失败: {e}")
         return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e)}
 
 
@@ -328,13 +348,16 @@ def main():
     parser.add_argument("--ndx",        action="store_true", help="仅更新纳指100 OHLCV")
     parser.add_argument("--hk",         action="store_true", help="仅更新港股 OHLCV")
     parser.add_argument("--cn",         action="store_true", help="仅更新A股 OHLCV")
+    parser.add_argument("--cn-hightech", action="store_true", help="仅更新A股高新技术列表 OHLCV")
     parser.add_argument("--indicators", action="store_true", help="仅更新技术指标")
     parser.add_argument("--waves",      action="store_true", help="仅更新 Wave 结构（全量 US+HK）")
     parser.add_argument("--lists",      action="store_true", help="仅同步 MD 列表文件")
     args = parser.parse_args()
 
     # 若无任何参数，执行全流程（含 Futu 同步）
-    run_all = not any([args.futu, args.us, args.ndx, args.hk, args.cn, args.indicators, args.waves, args.lists])
+    run_all = not any([args.futu, args.us, args.ndx, args.hk, args.cn,
+                       getattr(args, "cn_hightech", False),
+                       args.indicators, args.waves, args.lists])
 
     logger.info(f"{'=' * 60}")
     logger.info(f"  每日数据更新 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -364,6 +387,9 @@ def main():
 
     if run_all or args.cn:
         results["A股OHLCV"] = update_cn()
+
+    if run_all or getattr(args, "cn_hightech", False):
+        results["A股高新技术OHLCV"] = update_cn_hightech()
 
     # ── Step 4：技术指标 ──
     if run_all or args.indicators:

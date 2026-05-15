@@ -64,12 +64,14 @@ def run_daily_scan(lookback: int = 1, list_mode: str = "tech") -> tuple[list[dic
 
     Args:
         list_mode: "tech"（科技/通信，339只）| "full"（全量，~1550只）| "hk"（港股宇宙池，575只）
+                   | "cn_hightech"（沪深高新技术列表）
     """
     from stock_ana.scan.vegas_mid_scan import (
         run_scan,
         _build_us_universe_watchlist,
         _build_us_full_watchlist,
         _build_hk_universe_watchlist,
+        _build_cn_hightech_watchlist,
     )
 
     if list_mode == "full":
@@ -82,6 +84,11 @@ def run_daily_scan(lookback: int = 1, list_mode: str = "tech") -> tuple[list[dic
         logger.info("【1/3】构建港股宇宙池 watchlist ...")
         logger.info("=" * 60)
         watchlist = _build_hk_universe_watchlist()
+    elif list_mode == "cn_hightech":
+        logger.info("=" * 60)
+        logger.info("【1/3】构建A股高新技术 watchlist ...")
+        logger.info("=" * 60)
+        watchlist = _build_cn_hightech_watchlist()
     else:
         logger.info("=" * 60)
         logger.info("【1/3】构建美股科技板块 watchlist ...")
@@ -130,7 +137,7 @@ async def run_gemini_analysis(signals: list[dict]) -> Path | None:
         logger.success(f"Gemini 分析完成 → {path}")
         return path
     except Exception as e:
-        logger.error(f"Gemini 分析失败: {e}")
+        logger.error(f"Gemini 分析失败 [{type(e).__name__}]: {e}")
         return None
 
 
@@ -351,9 +358,31 @@ async def _main_async(lookback: int, scan_only: bool, list_mode: str = "tech") -
         logger.info("=" * 60)
         return
 
+    if list_mode == "combined_cn":
+        # 美股 + 港股 + A股高新技术
+        logger.info("【完整组合模式】美股科技 + 港股 + A股高新技术")
+        await _run_single_market(lookback, scan_only, "tech",       "每日美股扫描",       "summary_us.json")
+        await _run_single_market(lookback, scan_only, "hk",        "每日港股扫描",       "summary_hk.json")
+        await _run_single_market(lookback, scan_only, "cn_hightech", "每日A股高新技术扫描", "summary_cn.json")
+        elapsed = (datetime.now() - t0).seconds
+        logger.info("=" * 60)
+        logger.info(f"  完整组合流水线完成 — 总耗时 {elapsed}s")
+        logger.info("=" * 60)
+        return
+
     # 单市场模式
-    _label_map = {"tech": "每日美股扫描", "full": "每日美股扫描（全量）", "hk": "每日港股扫描"}
-    _file_map  = {"tech": "summary_us.json", "full": "summary_us.json", "hk": "summary_hk.json"}
+    _label_map = {
+        "tech": "每日美股扫描",
+        "full": "每日美股扫描（全量）",
+        "hk":   "每日港股扫描",
+        "cn_hightech": "每日A股高新技术扫描",
+    }
+    _file_map  = {
+        "tech": "summary_us.json",
+        "full": "summary_us.json",
+        "hk":   "summary_hk.json",
+        "cn_hightech": "summary_cn.json",
+    }
     market_label = _label_map.get(list_mode, "每日扫描")
     filename     = _file_map.get(list_mode, "summary.json")
 
@@ -388,9 +417,10 @@ def main() -> None:
     parser.add_argument(
         "--list",
         dest="list_mode",
-        choices=["tech", "full", "hk", "combined"],
+        choices=["tech", "full", "hk", "combined", "cn_hightech", "combined_cn"],
         default="tech",
-        help="扫描标的池：tech（科技/通信339只，默认）| full（全量~1550只）| hk（港股宇宙池575只）| combined（先美股tech再港股）",
+        help="扫描标的池：tech（科技/通信339只，默认）| full（全量~1550只）| hk（港股宇宙池575只）"
+             " | cn_hightech（A股高新技术）| combined（先美股tech再港股）| combined_cn（美股+港股+A股）",
     )
     args = parser.parse_args()
 

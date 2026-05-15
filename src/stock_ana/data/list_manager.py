@@ -281,6 +281,29 @@ def load_cn_list() -> list[str]:
     return codes
 
 
+def load_cn_hightech_list() -> list[str]:
+    """加载沪深高新技术关注列表代码（来源：data/lists/cn_hightech_watchlist.md）。
+
+    包含两类来源：
+      1. 高新技术筛选器（cn_high_tech_selector.py）筛出的 A 股
+      2. Futu 自选股中以 60 / 00 开头的 A 股（运行 daily_update.py --futu 追加）
+
+    表格格式：| # | 代码 | 名称 | 来源 |
+    Returns:
+        6 位股票代码列表，如 ["001266", "600641", ...]
+    """
+    path = LISTS_DIR / "cn_hightech_watchlist.md"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"A股高新技术列表不存在: {path}，请先运行 python daily_update.py --futu"
+        )
+    rows = _read_md_table(path)
+    # 表格格式：| # | 代码 | 名称 | 来源 |，代码在第1列
+    codes = [r[1].strip() for r in rows if len(r) >= 2 and r[1].strip().isdigit()]
+    logger.info(f"A股高新技术列表：{len(codes)} 只")
+    return codes
+
+
 # ─────────────────────── 同步（自动生成）接口 ───────────────────────
 
 
@@ -357,6 +380,138 @@ _TECH_SECTORS = {
     "Financial",
 }
 
+# ─── 收敛排除名单 ────────────────────────────────────────────────────────────
+# 各行业内技术含量低、弹性差的传统型标的，在生成 us_tech_list.md 时排除。
+# 原则：保留具有强科技属性或高弹性（数字化/生物科技/AI/新能源/国防科技）的公司，
+#       剔除传统银行、保险、餐饮零售、航空铁路、废物处理、大宗药厂等低科技型标的。
+_TECH_EXCLUDE_TICKERS: frozenset[str] = frozenset({
+    # ── Financial：传统银行 / 保险 / 传统资管 / 贵金属 ──
+    # 美国传统商业 & 区域银行
+    "JPM", "BAC", "WFC", "C", "USB", "PNC", "TFC", "RF", "CFG", "HBAN",
+    "KEY", "MTB", "FITB", "EWBC", "PNFP", "WBS", "FHN", "COF",
+    # 外资银行
+    "HSBC", "RY", "TD", "CM", "BNS", "MUFG", "SMFG", "MFG", "NMR",
+    "SAN", "BBVA", "UBS", "DB", "ING", "BCS", "NWG", "IBN", "HDB",
+    "ITUB", "BMO",
+    # 传统保险公司
+    "CB", "PGR", "AFL", "TRV", "HIG", "ALL", "PRU", "MET", "AIG", "GL",
+    "CINF", "WRB", "ACGL", "SIGI", "MFC", "SLF", "PUK", "AEG", "UNM",
+    "AFG", "BHF", "CNO", "FG", "MTG", "RDN", "JXN", "SLDE", "HG",
+    "SPNT", "ARX", "BWIN", "GNW",
+    # 保险经纪
+    "AON", "AJG", "WTW", "BRO", "MRSH",
+    # 传统投行 / PE / 资产管理
+    "GS", "MS", "BX", "KKR", "APO", "ARES", "BLK", "SCHW",
+    "BEN", "TROW", "JHG", "EVR", "VOYA", "AMP", "STT", "BK", "RJF",
+    "IVZ", "NTRS", "LPLA", "BAM", "BN", "CG", "HLI", "HLNE", "VCTR",
+    "FHI", "LAZ", "MC", "SF", "STEP", "APAM", "GBDC", "HTGC", "FSK",
+    "SEIC", "L",
+    # BDC / 特殊目的金融载体
+    "ARCC", "MAIN", "OWL", "BXSL", "OTF", "OBDC", "HASI",
+    # 其他传统金融
+    "XP", "WU", "FAF", "FNF", "ORI", "SLM", "LNC", "EQH", "CRBG",
+    "PIPR", "AXS", "JEF", "BGC", "SNEX",
+    # 补充：保险经纪/传统信贷/抵押
+    "RYAN", "SYF", "ALLY", "OMF", "ESNT", "RLI", "PFSI", "BFH",
+    "MRX", "TPG", "PFG",
+    # 贵金属信托
+    "PHYS", "PSLV", "CEF",
+
+    # ── Healthcare：HMO / 药品分销 / 传统大药厂 / 仿制药 / 传统耗材 ──
+    # 医院连锁 / HMO / 管理式医疗
+    "UNH", "CI", "ELV", "HUM", "CNC", "HCA", "THC", "DVA", "MOH",
+    "UHS", "EHC", "OPCH", "ALHC", "BTSG", "PACS", "ACHC", "BKD",
+    "CON", "PRVA",
+    # 药品分销 / 零售药房
+    "MCK", "CAH", "COR", "CVS",
+    # 传统跨国大药厂（无突出生物科技管线）
+    "JNJ", "AZN", "NVS", "GSK", "SNY", "TAK", "PFE", "RPRX",
+    # 仿制药
+    "TEVA", "VTRS", "AMRX", "INDV",
+    # 传统检验 / 殡葬服务
+    "LH", "DGX", "SCI",
+    # 传统医疗耗材 / 低科技含量医疗器械
+    "HSIC", "BAX", "ATR", "TFX", "SNN", "ZBH", "SOLV", "HLN", "COO",
+    "RDY",
+
+    # ── Industrials：航空 / 铁路 / 货运 / 废物 / 传统制造 / 传统服务 ──
+    # 航空公司
+    "DAL", "UAL", "LUV", "AAL", "RYAAY", "ALK", "LTM",
+    # 铁路运营
+    "UNP", "NSC", "CSX", "CP", "CNI",
+    # 货运物流 / 卡车运输
+    "FDX", "UPS", "JBHT", "CHRW", "ODFL", "EXPD", "ZTO", "KNX",
+    "SAIA", "LSTR", "SNDR", "XPO", "GXO", "ZIM", "SBLK", "HAFN",
+    "KEX", "HUBG", "RXO",
+    # 废物处理
+    "WM", "RSG", "WCN", "CLH", "GFL", "CWST",
+    # 传统重工业制造（无突出自动化/智能化属性）
+    "CAT", "DE", "MMM", "PCAR", "AGCO", "FAST", "MSM", "FLS", "OSK",
+    "GGG", "PNR", "IEX", "TKR", "CMC", "MLI", "ITW", "DOV", "CMI",
+    "SWK", "ESAB",
+    # 建材 / 工业分销 / 工程施工
+    "FERG", "CNM", "WCC", "BLDR", "ACM", "ARMK", "MAS", "MIDD",
+    "TREX", "OC", "LPX", "MWA", "WMS", "DCI", "RTO", "ROAD", "GVA",
+    "LGN", "WSC", "DNOW", "TPC", "ABM", "KFY", "RHI", "KBR", "FLR",
+    "TTEK",
+    # 设备租赁 / 飞机租赁
+    "URI", "SUNB", "HRI", "EQPT", "CAR", "AER", "AL",
+    # 其他低科技工业
+    "POOL", "TTC", "BC", "CTAS", "AWI", "ZWS", "TRN", "HAYW",
+    "MTZ",
+    # 补充：传统工业/建设服务/采购
+    "OTIS", "XYL", "GTES", "ADT", "RBA", "APG", "ULS", "SITE",
+    "ECG", "GPGI", "VSEC", "FBIN", "GEO", "KMT", "AOS", "AAON",
+    "JBTM", "TEX", "MMS", "PRIM", "CPRT",
+
+    # ── Consumer Cyclical：传统零售 / 餐饮 / 酒店 / 传统整车 / 包装 ──
+    # 传统线下零售
+    "TJX", "LOW", "HD", "ORLY", "NKE", "LULU", "ROST", "BBY", "ANF",
+    "BOOT", "BIRK", "DECK", "DKS", "TSCO", "ULTA", "FIVE", "GAP",
+    "AEO", "M", "BKE", "VSCO", "HAS", "MAT", "RH", "VFC", "GIL",
+    "LEVI", "RL", "CROX", "ASO", "FIGS", "SHOO", "KTB", "UA", "UAA",
+    "LKQ", "ROL", "CALY", "YETI", "COLM", "VVV", "ONON",
+    # 餐饮连锁
+    "MCD", "SBUX", "CMG", "YUM", "DPZ", "DRI", "EAT", "TXRH", "QSR",
+    "SHAK", "CAKE", "YUMC", "BROS", "WING",
+    # 酒店 / 度假 / 博彩（实体经营为主）
+    "MAR", "HLT", "H", "CHH", "WH", "MTN", "HGV", "WYNN", "LVS",
+    "MGM", "VAC", "RRR", "CHDN", "LTH", "HTHT",
+    # 邮轮
+    "RCL", "CCL", "CUK", "NCLH", "VIK",
+    # 传统整车 / 传统汽车零部件（非EV/AV）
+    "GM", "F", "STLA", "LEA", "MGA", "BWA", "ALV", "HMC", "ALSN",
+    "GTX", "RACE",
+    # 建筑商
+    "DHI", "LEN", "TOL", "PHM", "MTH", "TPH", "KBH", "TMHC", "SKY",
+    # 包装材料
+    "AVY", "AMCR", "PKG", "IP", "REYN", "CCK", "GPK", "SON", "SLGN",
+    # 其他传统消费 / 休闲娱乐 / 汽车服务
+    "TNL", "THO", "HOG", "ALH", "ATAT", "FTDR", "HNI", "DAN",
+    "MCW", "BFAM", "GPC", "ATMU", "BC", "BRSL", "SGI", "SW",
+    # 补充：奢侈品/服装零售
+    "TPR", "CPRI", "AS", "PVH",
+    # 补充：传统零售/家居/汽配
+    "WSM", "BURL", "URBN", "FND", "MHK", "BBWI", "SIG", "AAP", "KMX",
+    # 补充：餐饮/健身/娱乐（实体）
+    "CAVA", "PLNT", "BYD", "CZR", "GME", "HRB", "W",
+    # 补充：工业包装
+    "BALL", "SEE", "WHR",
+    # 补充：其他
+    "OSW", "DRVN", "CPRI", "PII",
+
+    # ── Communication Services：传统电信 / 传统媒体 ──
+    # 传统电信运营商
+    "VZ", "T", "AMX", "TU", "BCE", "RCI", "VIV", "VOD", "TLK", "SKM",
+    "KT", "KYIV", "TDS", "TIGO",
+    # 传统有线电视 / 广播媒体
+    "WBD", "CMCSA", "CHTR", "DIS", "OMC", "FOX", "FOXA",
+    "NWS", "NWSA", "TKO", "WMG", "PSKY", "VSNT", "LBTYK", "LBTYA",
+    "LYV",
+    # 其他低弹性媒体 / 传统通信
+    "CNK", "SPHR", "SIRI", "FWONK", "IMAX", "LUMN",
+})
+
 
 def sync_us_tech_list_md() -> Path:
     """
@@ -373,6 +528,9 @@ def sync_us_tech_list_md() -> Path:
         raise FileNotFoundError(f"请先运行 build_us_stock_universe() 生成: {csv}")
     df = pd.read_csv(csv, dtype={"ticker": str})
     df = df[df["sector"].isin(_TECH_SECTORS)].copy()
+
+    # 排除低科技含量的传统型标的
+    df = df[~df["ticker"].str.upper().isin(_TECH_EXCLUDE_TICKERS)].copy()
 
     # 补入 NDX100 里属于科技/通信但不在 universe 的（理论上极少）
     ndx_dir = CACHE_DIR / "ndx100"
@@ -420,6 +578,33 @@ def sync_us_tech_list_md() -> Path:
         rows=rows,
     )
     logger.info(f"已同步 us_tech_list.md（{len(df)} 只）")
+    return path
+
+
+def filter_us_tech_list_md() -> Path:
+    """
+    对已有的 us_tech_list.md 就地应用 _TECH_EXCLUDE_TICKERS 排除名单，
+    重新编号并写回文件（在无法重新拉取 us_universe.csv 时使用）。
+    """
+    path = LISTS_DIR / "us_tech_list.md"
+    if not path.exists():
+        raise FileNotFoundError("us_tech_list.md 不存在，请先运行 sync_us_tech_list_md()")
+    raw_rows = _read_md_table(path)
+    kept = [
+        row for row in raw_rows
+        if len(row) >= 2 and row[1].strip().upper() not in _TECH_EXCLUDE_TICKERS
+    ]
+    renumbered = [[str(i)] + row[1:] for i, row in enumerate(kept, 1)]
+    _write_md_table(
+        path,
+        title="美股高弹性板块列表（US Active Universe）",
+        subtitle="来源：US Universe 过滤 Technology / Communication Services / Consumer Cyclical / Healthcare / Industrials / Financial（已收敛科技属性）",
+        count=len(renumbered),
+        headers=["#", "代码", "公司", "行业", "市値(B)"],
+        rows=renumbered,
+    )
+    removed = len(raw_rows) - len(kept)
+    logger.info(f"filter_us_tech_list_md: 排除 {removed} 只 → 剩余 {len(kept)} 只")
     return path
 
 

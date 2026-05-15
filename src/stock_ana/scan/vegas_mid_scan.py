@@ -38,6 +38,7 @@ from stock_ana.strategies.impl.vegas_mid import (
     score_pullback,
     classify_signal,
 )
+from stock_ana.strategies.impl.vegas_long import detect_long_touch_immediate
 
 from stock_ana.utils.plot_renderers import plot_vegas_mid_scan_chart
 from stock_ana.data.market_data import build_watchlist
@@ -198,6 +199,37 @@ def _build_us_full_watchlist() -> dict:
     return watchlist
 
 
+def _build_cn_hightech_watchlist() -> dict:
+    """A股高新技术关注列表（from cn_hightech_watchlist.md）。
+
+    列表来源：data/lists/cn_hightech_watchlist.md（高新技术筛选器 + Futu 追加）。
+    """
+    from stock_ana.data.list_manager import _read_md_table
+    from stock_ana.config import DATA_DIR
+
+    path = DATA_DIR / "lists" / "cn_hightech_watchlist.md"
+    if not path.exists():
+        logger.warning("未找到 cn_hightech_watchlist.md，请先运行 daily_update.py --futu")
+        return {}
+
+    rows = _read_md_table(path)
+    # 表格格式：| # | 代码 | 名称 | 来源 |
+    watchlist = {}
+    for r in rows:
+        if len(r) < 3:
+            continue
+        ticker = r[1].strip()
+        if not ticker.isdigit() or len(ticker) != 6:
+            continue
+        name = r[2].strip() or ticker
+        cache_path = CACHE_DIR / "cn" / f"{ticker}.parquet"
+        if not cache_path.exists():
+            continue
+        watchlist[ticker] = ("CN", name, cache_path, "")
+    logger.info(f"A股高新技术列表：共 {len(watchlist)} 只有缓存数据的标的")
+    return watchlist
+
+
 # ═══════════════════════════════════════════════════════
 #  内部工具：信号注释处理（局灯hold和touch两种策略共用）
 # ═══════════════════════════════════════════════════════
@@ -248,11 +280,13 @@ def _process_touch_signals(
     cutoff_bar: int,
     n: int,
     touch_strategy: str,
+    skip_scoring: bool = False,
 ) -> list[dict]:
     """将原始信号列表经过波浪上下文注释、结构检查、打分，返回完整信号字典列表。
 
     hold策略：entry_bar 在確认日（T+1/T+2）。
     touch策略：entry_bar == touch_bar，当日即出。
+    long_touch策略：skip_scoring=True，跳过 mid 结构检查和打分，信号标 OBSERVE。
     """
     wave_touch_counter: dict[int, int] = {}
     prev_touch_bar: int = -1
@@ -281,12 +315,32 @@ def _process_touch_signals(
         if entry_bar >= n:
             confirm_bar = sig["confirm_bar"]
             entry_price = float(close[confirm_bar])
-            struct = _check_structure(confirm_bar, close, emas)
             entry_date = str(dates[confirm_bar].date()) + "(T+1)"
+            check_bar = confirm_bar
         else:
             entry_price = float(close[entry_bar])
-            struct = _check_structure(entry_bar, close, emas)
             entry_date = str(dates[entry_bar].date())
+            check_bar = entry_bar
+
+        if skip_scoring:
+            # Long touch: 跳过 mid 结构检查，用 Long 上升作为唯一门控
+            long_upper = max(emas[s][check_bar] for s in LONG_EMAS)
+            long_prev = max(emas[s][max(0, check_bar - 20)] for s in LONG_EMAS)
+            long_slope_pct = (long_upper / long_prev - 1) * 100 if long_prev > 0 else 0.0
+            mid_upper = max(emas[s][check_bar] for s in MID_EMAS)
+            struct = {
+                "passed": long_slope_pct > 0,
+                "mid_above_long": mid_upper > long_upper,
+                "price_above_long": close[check_bar] >= long_upper,
+                "price_above_long_3m": False,
+                "long_rising": long_slope_pct > 0,
+                "gap_enough": False,
+                "long_slope_strong": long_slope_pct >= 2.0,
+                "mid_long_gap_pct": round((mid_upper / long_upper - 1) * 100, 2) if long_upper > 0 else 0.0,
+                "long_slope_pct": round(long_slope_pct, 2),
+            }
+        else:
+            struct = _check_structure(check_bar, close, emas)
         structure_passed = struct["passed"]
 
         wave_rise_so_far = 0.0
@@ -312,17 +366,21 @@ def _process_touch_signals(
 
         touch_seq_ok = touch_seq <= 3
 
-        score, score_details = score_pullback(
-            sub_number=sub_number,
-            wave_rise_pct=wave_rise_so_far,
-            wave_number=wave_number,
-            market=market,
-            consecutive_wave_count=consec_count,
-            mid_long_gap_pct=struct["mid_long_gap_pct"],
-            orderly_pullback=orderly,
-        )
-
-        signal = classify_signal(score) if structure_passed else "AVOID"
+        if skip_scoring:
+            score = 0
+            score_details = {}
+            signal = "OBSERVE" if structure_passed else "AVOID"
+        else:
+            score, score_details = score_pullback(
+                sub_number=sub_number,
+                wave_rise_pct=wave_rise_so_far,
+                wave_number=wave_number,
+                market=market,
+                consecutive_wave_count=consec_count,
+                mid_long_gap_pct=struct["mid_long_gap_pct"],
+                orderly_pullback=orderly,
+            )
+            signal = classify_signal(score) if structure_passed else "AVOID"
 
         results.append({
             "symbol": sym,
@@ -414,8 +472,14 @@ def scan_one(
         touch_strategy="touch",
         **common,
     )
+    long_touch_signals = _process_touch_signals(
+        detect_long_touch_immediate(close, low_arr, emas),
+        touch_strategy="long_touch",
+        skip_scoring=True,
+        **common,
+    )
 
-    return hold_signals + touch_signals
+    return hold_signals + touch_signals + long_touch_signals
 
 
 def generate_signal_chart(

@@ -31,11 +31,24 @@ if (Test-Path $StampFile) {
 
 Write-Host "[daily-scan] New data detected, starting scan..."
 
-# Check proxy/network reachability to Google before running Gemini-dependent scan
-try {
-    $null = Invoke-WebRequest -Uri "https://gemini.google.com" -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-} catch {
-    Write-Host "[daily-scan] WARNING: gemini.google.com unreachable (VPN may not be active). Proceeding anyway..."
+# Wait for Google/Gemini to be reachable (proxy may need a moment to become active)
+$maxWaitSec = 180   # 最多等 3 分钟
+$intervalSec = 20
+$elapsed = 0
+$reachable = $false
+while (-not $reachable -and $elapsed -lt $maxWaitSec) {
+    try {
+        $null = Invoke-WebRequest -Uri "https://gemini.google.com" -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+        $reachable = $true
+        Write-Host "[daily-scan] gemini.google.com reachable."
+    } catch {
+        Write-Host "[daily-scan] gemini.google.com unreachable, waiting ${intervalSec}s... (${elapsed}/${maxWaitSec}s)"
+        Start-Sleep -Seconds $intervalSec
+        $elapsed += $intervalSec
+    }
+}
+if (-not $reachable) {
+    Write-Host "[daily-scan] WARNING: gemini.google.com still unreachable after ${maxWaitSec}s, proceeding anyway..."
 }
 
 # Ensure log dir exists

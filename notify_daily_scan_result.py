@@ -325,9 +325,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-email", action="store_true", help="跳过邮件发送，仅发飞书消息")
     parser.add_argument(
         "--market",
-        choices=["us", "hk", "combined"],
+        choices=["us", "hk", "cn", "combined", "combined_cn"],
         default="combined",
-        help="指定发哪个市场的扫描通知（默认 combined = 全部）",
+        help="指定发哪个市场的扫描通知（默认 combined = 美股+港股；combined_cn = 美股+港股+A股）",
     )
     parser.add_argument(
         "--skip-update",
@@ -423,16 +423,19 @@ def main() -> int:
     # Notification 2 & 3: 美股 + 港股扫描（combined 模式）；如仅有一个则单独发
     summary_us_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_us.json")
     summary_hk_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_hk.json")
+    summary_cn_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_cn.json")
     summary_legacy_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary.json")
 
     summary_us = _read_json(summary_us_path) if summary_us_path else None
     summary_hk = _read_json(summary_hk_path) if summary_hk_path else None
+    summary_cn = _read_json(summary_cn_path) if summary_cn_path else None
     summary_legacy = _read_json(summary_legacy_path) if summary_legacy_path else None
 
-    send_us = args.market in ("us", "combined")
-    send_hk = args.market in ("hk", "combined")
+    send_us = args.market in ("us", "combined", "combined_cn")
+    send_hk = args.market in ("hk", "combined", "combined_cn")
+    send_cn = args.market in ("cn", "combined_cn")
 
-    if summary_us or summary_hk:
+    if summary_us or summary_hk or summary_cn:
         # 按 --market 参数决定发哪个市场
         if send_us and summary_us:
             if not _send_scan_notification(token, summary_us, args.scan_exit_code, args.no_email):
@@ -446,6 +449,13 @@ def main() -> int:
                 ok = False
         elif send_hk and not summary_hk:
             print("⚠️ 未找到 summary_hk.json，跳过港股通知")
+        if send_cn and summary_cn:
+            if summary_cn.get("data_stale"):
+                print("[daily-scan] A股数据未更新（data_stale=True），跳过A股通知")
+            elif not _send_scan_notification(token, summary_cn, 0, args.no_email):
+                ok = False
+        elif send_cn and not summary_cn:
+            print("⚠️ 未找到 summary_cn.json，跳过A股高新技术通知")
     else:
         # 向后兼容：读旧 summary.json
         if not _send_scan_notification(token, summary_legacy, args.scan_exit_code, args.no_email):
