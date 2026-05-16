@@ -429,17 +429,12 @@ def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: in
                 )
         return ok
 
-    # ── 分支 C：Gemini 成功 → 摘要卡片 + PDF（飞书 + 邮件） ─────────────
+    # ── 分支 C：Gemini 成功 → 直接发 PDF（飞书 + 邮件），不发文字卡 ──────
     md_content = ""
     if report_path_raw:
         rp = Path(report_path_raw)
         if rp.exists():
             md_content = rp.read_text(encoding="utf-8")
-
-    summary_text = head_text + "  |  Gemini：完成  |  PDF 见附件\n\n" + sig_text
-    if not send_post_message(token, title, [[{"tag": "text", "text": summary_text}]]):
-        print(f"❌ 扫描消息发送失败（{title}）")
-        ok = False
 
     # 生成 PDF
     pdf_bytes: bytes | None = None
