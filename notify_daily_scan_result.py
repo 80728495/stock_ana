@@ -338,7 +338,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: int = 0, no_email: bool = False) -> bool:
-    """发送单个市场的扫描通知（飞书 + 邮件）。返回是否成功。"""
+    """发送单个市场的扫描通知（飞书 PDF + 邮件 PDF）。返回是否成功。"""
     ok = True
     title2, blocks2 = build_scan_blocks(summary, token)
     if scan_exit_code != 0:
@@ -352,51 +352,74 @@ def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: in
         print(f"❌ 扫描消息发送失败（{title2}）")
         ok = False
 
+    # 生成 PDF（含图表 + Gemini 文本，按股票组织）
     report_path_raw = summary.get("gemini_report_path") if summary else None
-    if report_path_raw:
-        report_path = Path(report_path_raw)
-        file_key = upload_report_file(token, report_path)
-        if file_key:
-            market_label = (summary or {}).get("market_label") or "每日扫描"
-            send_post_message(
-                token,
-                f"📎 {market_label} Gemini 报告文件",
-                [[{"tag": "text", "text": "已附上 Gemini Markdown 报告文件。"}]],
-            )
-            if not send_file_message(token, file_key):
-                print("⚠️ 报告文件卡片发送失败")
+    signals = (summary or {}).get("signals", [])
+    market_label = (summary or {}).get("market_label") or "每日扫描"
+    scan_date_str = (summary or {}).get("scan_date", date.today().isoformat())
+    signals_found = (summary or {}).get("signals_found", 0)
 
-    # 邮件
-    if not no_email and report_path_raw:
+    pdf_bytes: bytes | None = None
+    chart_paths: list[Path] = []
+    chart_labels: list[str] = []
+    md_content: str = ""
+
+    if report_path_raw:
         report_path = Path(report_path_raw)
         if report_path.exists():
             try:
-                from stock_ana.utils.email_sender import send_report_with_charts
                 md_content = report_path.read_text(encoding="utf-8")
-                scan_date_str = (summary or {}).get("scan_date", date.today().isoformat())
-                signals_found = (summary or {}).get("signals_found", 0)
-                signals = (summary or {}).get("signals", [])
-                market_label = (summary or {}).get("market_label") or "每日扫描"
-
-                chart_paths, chart_labels = [], []
                 for s in signals:
                     cp = Path(s.get("chart_path", ""))
                     if cp.exists():
                         chart_paths.append(cp)
                         chart_labels.append(f"{s.get('symbol','')} ({s.get('name','')})")
-
-                email_sent = send_report_with_charts(
-                    subject=f"📊 {market_label} {scan_date_str}（{signals_found} 只信号）",
+                from stock_ana.utils.pdf_builder import build_scan_pdf
+                pdf_bytes = build_scan_pdf(
                     md_content=md_content,
                     chart_paths=chart_paths,
                     signal_labels=chart_labels,
-                    to=["99772120@qq.com", "80728495@qq.com", "185182@qq.com"],
+                    title=f"📊 {market_label} {scan_date_str}（{signals_found} 只信号）",
                     signals=signals,
                 )
-                if not email_sent:
-                    print("⚠️ 邮件发送失败")
             except Exception as e:
-                print(f"⚠️ 邮件发送异常: {e}")
+                print(f"⚠️ PDF 生成失败: {e}")
+
+    # 飞书：上传并发送 PDF
+    if pdf_bytes:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False,
+                                         prefix=f"scan_{scan_date_str}_") as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = Path(tmp.name)
+        try:
+            file_key = upload_report_file(token, tmp_path)
+            if file_key:
+                if send_file_message(token, file_key):
+                    print(f"✅ 飞书 PDF 已发送：{market_label} {scan_date_str}")
+                else:
+                    print("⚠️ 飞书 PDF 文件消息发送失败")
+            else:
+                print("⚠️ 飞书 PDF 上传失败")
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    # 邮件：发送 PDF 附件
+    if not no_email and md_content:
+        try:
+            from stock_ana.utils.email_sender import send_report_with_charts
+            email_sent = send_report_with_charts(
+                subject=f"📊 {market_label} {scan_date_str}（{signals_found} 只信号）",
+                md_content=md_content,
+                chart_paths=chart_paths,
+                signal_labels=chart_labels,
+                to=["99772120@qq.com", "80728495@qq.com", "185182@qq.com"],
+                signals=signals,
+            )
+            if not email_sent:
+                print("⚠️ 邮件发送失败")
+        except Exception as e:
+            print(f"⚠️ 邮件发送异常: {e}")
 
     return ok
 
