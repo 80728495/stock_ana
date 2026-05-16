@@ -51,15 +51,14 @@ SCAN_OUT_DIR = OUTPUT_DIR / "vegas_scan"
 # a curated CSV (hk_main_largecap_list.csv) with name metadata — the generic
 # build_watchlist() covers all cache-dir–based sources automatically.
 
-def _build_hk_universe_watchlist() -> dict:
-    """港股全量宇宙池（from hk_universe_list.md，市值≥100亿，575只）。"""
+def _build_hk_watchlist_from_md(md_filename: str, label: str) -> dict:
+    """通用：从 data/lists/<md_filename> 读取港股列表。表格格式：| # | 代码 | 名称 | ... |"""
     from stock_ana.data.list_manager import _read_md_table
     from stock_ana.config import DATA_DIR
-    path = DATA_DIR / "lists" / "hk_universe_list.md"
+    path = DATA_DIR / "lists" / md_filename
     if not path.exists():
-        logger.warning(f"未找到港股宇宙池列表: {path}，回退到大市值列表")
-        return _build_hk_largecap_watchlist()
-
+        logger.warning(f"未找到港股列表: {path}")
+        return {}
     rows = _read_md_table(path)
     watchlist = {}
     for r in rows:
@@ -71,8 +70,18 @@ def _build_hk_universe_watchlist() -> dict:
         if not path_p.exists():
             continue
         watchlist[code] = ("HK", name_zh, path_p, "")
-    logger.info(f"港股宇宙池列表：共 {len(watchlist)} 只有缓存数据的标的")
+    logger.info(f"{label}：共 {len(watchlist)} 只有缓存数据的标的")
     return watchlist
+
+
+def _build_hk_universe_watchlist() -> dict:
+    """港股全量宇宙池（from hk_universe_list.md，市值≥100亿）。"""
+    return _build_hk_watchlist_from_md("hk_universe_list.md", "港股宇宙池列表")
+
+
+def _build_hk_techman_watchlist() -> dict:
+    """港股高科技与制造业精选（from hk_techman.md，~366只）。"""
+    return _build_hk_watchlist_from_md("hk_techman.md", "港股高科技与制造业列表")
 
 
 def _build_hk_largecap_watchlist() -> dict:

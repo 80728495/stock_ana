@@ -30,18 +30,41 @@ DEFAULT_TO = "80728495@qq.com"
 
 
 def _get_password() -> str:
-    """从 macOS Keychain 读取 SMTP 授权码。"""
+    """读取 SMTP 授权码。
+    优先级：环境变量 SMTP_PASSWORD → .env 文件 → macOS Keychain。
+    Windows 上请在 .env 中设置 SMTP_PASSWORD=<授权码>。
+    """
+    import os
+    # 1. 环境变量
+    pw = os.environ.get("SMTP_PASSWORD", "").strip()
+    if pw:
+        return pw
+
+    # 2. .env 文件（项目根 = src/stock_ana/utils 的 parents[3]）
+    env_path = Path(__file__).resolve().parents[3] / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("SMTP_PASSWORD="):
+                pw = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if pw:
+                    return pw
+
+    # 3. macOS Keychain（仅 macOS）
     result = subprocess.run(
         ["security", "find-generic-password", "-a", SMTP_USER, "-s", KEYCHAIN_SERVICE, "-w"],
         capture_output=True,
         text=True,
     )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Keychain 读取失败，请先运行：\n"
-            f'security add-generic-password -a "{SMTP_USER}" -s "{KEYCHAIN_SERVICE}" -w "<授权码>" -U'
-        )
-    return result.stdout.strip()
+    if result.returncode == 0:
+        return result.stdout.strip()
+
+    raise RuntimeError(
+        "未找到 SMTP 授权码，请在 .env 中设置：\n"
+        "SMTP_PASSWORD=<QQ邮箱授权码>\n"
+        "或 macOS Keychain：\n"
+        f'security add-generic-password -a "{SMTP_USER}" -s "{KEYCHAIN_SERVICE}" -w "<授权码>" -U'
+    )
 
 
 def _md_to_html(md_content: str) -> str:

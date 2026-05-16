@@ -390,7 +390,7 @@ def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: in
                     md_content=md_content,
                     chart_paths=chart_paths,
                     signal_labels=chart_labels,
-                    to=["99772120@qq.com", "80728495@qq.com"],
+                    to=["99772120@qq.com", "80728495@qq.com", "185182@qq.com"],
                 )
                 if not email_sent:
                     print("⚠️ 邮件发送失败")

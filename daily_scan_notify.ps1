@@ -73,7 +73,7 @@ try {
     $usScanExit = 1
     Write-Host "[daily-scan] US scan error: $_"
 }
-& $PythonBin notify_daily_scan_result.py --market us --scan-exit-code $usScanExit --no-email
+& $PythonBin notify_daily_scan_result.py --market us --scan-exit-code $usScanExit
 
 # 3) 港股 scan + Gemini → 完成后立即发飞书（跳过重复的数据更新状态）
 Write-Host "[daily-scan] Step 3/3: HK scan + Gemini..."
@@ -85,7 +85,7 @@ try {
     $hkScanExit = 1
     Write-Host "[daily-scan] HK scan error: $_"
 }
-& $PythonBin notify_daily_scan_result.py --market hk --skip-update --no-email
+& $PythonBin notify_daily_scan_result.py --market hk --skip-update
 
 # 4) Update timestamp
 Set-Content -Path $StampFile -Value (Get-Date -Format "o") -Encoding ASCII

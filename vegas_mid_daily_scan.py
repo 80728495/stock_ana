@@ -70,7 +70,7 @@ def run_daily_scan(lookback: int = 1, list_mode: str = "tech") -> tuple[list[dic
         run_scan,
         _build_us_universe_watchlist,
         _build_us_full_watchlist,
-        _build_hk_universe_watchlist,
+        _build_hk_techman_watchlist,
         _build_cn_hightech_watchlist,
     )
 
@@ -81,9 +81,9 @@ def run_daily_scan(lookback: int = 1, list_mode: str = "tech") -> tuple[list[dic
         watchlist = _build_us_full_watchlist()
     elif list_mode == "hk":
         logger.info("=" * 60)
-        logger.info("【1/3】构建港股宇宙池 watchlist ...")
+        logger.info("【1/3】构建港股高科技与制造业 watchlist ...")
         logger.info("=" * 60)
-        watchlist = _build_hk_universe_watchlist()
+        watchlist = _build_hk_techman_watchlist()
     elif list_mode == "cn_hightech":
         logger.info("=" * 60)
         logger.info("【1/3】构建A股高新技术 watchlist ...")
