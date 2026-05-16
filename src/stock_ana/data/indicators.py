@@ -131,3 +131,68 @@ def add_daily_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = add_volume_ma(df)
     df = add_prev_high(df)
     return df
+
+
+# ─────────────────────── 周线层 ───────────────────────
+
+# 周线前高回望窗口（交易周）
+PREV_HIGH_WINDOW_WEEKLY = 52   # ≈1 年
+
+
+def resample_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    将日线 OHLCV DataFrame 重采样为周线（按周五收盘聚合）。
+
+    输入：含 open/high/low/close/volume 列，index 为 DatetimeIndex
+    输出：同结构，每行代表一个完整的交易周
+    规则：
+      - open  = 周内第一根日线开盘
+      - high  = 周内最高
+      - low   = 周内最低
+      - close = 周内最后一根日线收盘
+      - volume = 周内成交量之和
+      - 删除当前未收盘的不完整周（dropna on close）
+    """
+    agg_dict: dict[str, str] = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }
+    # 只聚合存在的列（兼容不含 volume 的 DataFrame）
+    exist = {k: v for k, v in agg_dict.items() if k in df.columns}
+    weekly = df.resample("W-FRI").agg(exist)
+    weekly = weekly.dropna(subset=["close"])
+    return weekly
+
+
+def add_weekly_indicators(df_weekly: pd.DataFrame) -> pd.DataFrame:
+    """
+    在周线 OHLCV DataFrame 上计算与日线体系对应的全套指标。
+
+    列名统一加 ``w_`` 前缀，避免与日线指标列冲突：
+      - w_ema_8 / 21 / 34 / 55 / 60 / 144 / 169 / 200 / 250
+      - w_vol_ma_5 / 10 / 20 / 50
+      - w_prev_high_52w（近52周收盘最高价，≈1年）
+
+    与日线 add_daily_indicators() 使用相同的 ewm(span, adjust=False) 计算逻辑，
+    保证策略层在日线/周线之间切换时行为一致。
+    """
+    df = df_weekly.copy()
+    close = df["close"].astype(float)
+
+    # 扩展 EMA（与日线窗口一致）
+    for w in _EMA_EXTENDED_WINDOWS:
+        df[f"w_ema_{w}"] = close.ewm(span=w, adjust=False).mean()
+
+    # 成交量均线（仅在含 volume 列时计算）
+    if "volume" in df.columns:
+        vol = df["volume"].astype(float)
+        for w in _VOL_MA_WINDOWS:
+            df[f"w_vol_ma_{w}"] = vol.rolling(window=w, min_periods=1).mean()
+
+    # 周线前高
+    df[f"w_prev_high_52w"] = close.rolling(window=PREV_HIGH_WINDOW_WEEKLY, min_periods=1).max()
+
+    return df
