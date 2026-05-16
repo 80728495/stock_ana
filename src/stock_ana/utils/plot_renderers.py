@@ -2713,3 +2713,227 @@ def plot_swing_pivots_chart(
         logger.warning(f"plot_swing_pivots_chart [{sym}] 失败: {e}")
         plt.close("all")
         return None
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Weekly Vegas Short scan chart
+# ═════════════════════════════════════════════════════════════════════════════
+
+# EMA 颜色定义（周线 Short/Mid Vegas）
+_W_EMA_COLORS = {
+    "w_ema8":  "#64B5F6",   # Short Vegas — 浅蓝（虚线）
+    "w_ema21": "#1976D2",   # Short Vegas — 深蓝（虚线）
+    "w_ema34": "#FFB74D",   # Mid Vegas   — 浅橙（实线）
+    "w_ema55": "#E65100",   # Mid Vegas   — 深橙（实线）
+}
+
+
+def plot_w_vegas_short_chart(
+    sym: str,
+    market: str,
+    name: str,
+    df_weekly: pd.DataFrame,
+    signal_info: dict,
+    out_dir: Path,
+    context_bars: int = 104,
+    name_en: str = "",
+) -> Path | None:
+    """渲染 Weekly Vegas Short 回踩扫描信号图（周线 K 线 + w_ema_8/21/34/55）。
+
+    Args:
+        sym: 股票代码。
+        market: "US" / "HK" / "CN"。
+        name: 显示名称（可含中文）。
+        df_weekly: 预计算周线 DataFrame（含 open/high/low/close/volume）。
+        signal_info: scan_one_weekly 返回的信号字典。
+        out_dir: 输出目录，PNG 写入此处。
+        context_bars: 显示多少根周线（默认 104 ≈ 2 年）。
+        name_en: ASCII 名称（用于文件名，默认回退到 sym）。
+
+    Returns:
+        保存的 PNG 路径，失败返回 None。
+    """
+    try:
+        df = df_weekly.copy()
+        df.columns = [c.lower() for c in df.columns]
+        df.index = pd.to_datetime(df.index)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        df.index.name = "date"
+        df = df.sort_index()
+
+        ohlcv_cols = ["open", "high", "low", "close", "volume"]
+        missing = [c for c in ohlcv_cols if c not in df.columns]
+        if missing:
+            logger.warning(f"plot_w_vegas_short_chart [{sym}] 缺少列: {missing}")
+            return None
+
+        df_ohlcv = df[ohlcv_cols].copy()
+
+        # 视图窗口：以信号入场日为基准，前 context_bars 根 + 后 8 根
+        entry_date_str = signal_info["entry_date"].split("(")[0]
+        entry_date = pd.Timestamp(entry_date_str)
+        post_bars = 8
+        entry_pos = df_ohlcv.index.searchsorted(entry_date, side="left")
+        if entry_pos >= len(df_ohlcv):
+            entry_pos = len(df_ohlcv) - 1
+        view_end = min(entry_pos + post_bars + 1, len(df_ohlcv))
+        view_start = max(view_end - context_bars, 0)
+        df_view = df_ohlcv.iloc[view_start:view_end].copy()
+        if len(df_view) < 10:
+            return None
+
+        # 计算 EMA（从完整序列计算后切片，保证 warm-up 充足）
+        close_full = df_ohlcv["close"].astype(float)
+        ema_series: dict[str, pd.Series] = {}
+        for span, key in [(8, "w_ema8"), (21, "w_ema21"), (34, "w_ema34"), (55, "w_ema55")]:
+            ema_series[key] = close_full.ewm(span=span, adjust=False).mean().reindex(df_view.index)
+
+        add_plots = []
+        for key, ema_s in ema_series.items():
+            is_short = key in ("w_ema8", "w_ema21")
+            add_plots.append(mpf.make_addplot(
+                ema_s,
+                color=_W_EMA_COLORS[key],
+                width=1.4 if not is_short else 1.2,
+                linestyle="--" if is_short else "-",
+            ))
+
+        sig_type = signal_info["signal"]
+        style = SIGNAL_STYLE.get(sig_type, SIGNAL_STYLE["BUY"])
+
+        marker_series = pd.Series(np.nan, index=df_view.index)
+        idx_pos = df_view.index.searchsorted(entry_date, side="left")
+        if idx_pos >= len(df_view):
+            idx_pos = len(df_view) - 1
+        marker_series.iloc[idx_pos] = float(df_view.iloc[idx_pos]["low"]) * 0.97
+
+        if marker_series.notna().any():
+            add_plots.append(mpf.make_addplot(
+                marker_series, type="scatter", markersize=style["size"],
+                marker=style["marker"], color=style["color"],
+                edgecolors=style["edge"], linewidths=1.5,
+            ))
+
+        mc = mpf.make_marketcolors(
+            up="#CC3333", down="#00AA00", edge="inherit", wick="inherit", volume="in",
+        )
+        mpf_style = mpf.make_mpf_style(
+            marketcolors=mc, gridstyle=":", gridcolor="#E0E0E0",
+            rc={"font.sans-serif": plt.rcParams["font.sans-serif"],
+                "axes.unicode_minus": False},
+        )
+
+        score = signal_info["score"]
+        sig_color = {
+            "STRONG_BUY": "#006400", "BUY": "#228B22",
+            "HOLD": "#B8860B", "AVOID": "#CC0000",
+        }.get(sig_type, "#333333")
+
+        fig, axes = mpf.plot(
+            df_view, type="candle", volume=True, style=mpf_style,
+            addplot=add_plots, figsize=(20, 9), returnfig=True,
+            tight_layout=False,
+            scale_padding={"left": 0.05, "right": 0.36, "top": 0.6, "bottom": 0.5},
+        )
+        ax = axes[0]
+
+        if idx_pos < len(df_view):
+            low_val = float(df_view.iloc[idx_pos]["low"])
+            sig_short = {"STRONG_BUY": "SB", "BUY": "B", "HOLD": "H",
+                         "AVOID": "A", "OBSERVE": "OB"}.get(sig_type, sig_type[:2])
+            ax.annotate(f"{sig_short}{score:+d}", xy=(idx_pos, low_val * 0.94),
+                        fontsize=10, fontweight="bold", color=style["edge"],
+                        ha="center", va="top")
+
+        fig.suptitle(
+            f"{market}:{sym}  {name}  [周线]  [{sig_type}  score={score:+d}]",
+            fontsize=17, fontweight="bold", y=0.98, color=sig_color,
+        )
+        ax.set_title(
+            f"{signal_info['support_band']}  @ {signal_info['entry_date']}",
+            fontsize=11, color="#555555", pad=4,
+        )
+
+        # ── 右侧信息面板 ──────────────────────────────────────
+        def _yn(v) -> str:
+            return "[Y]" if v else "[N]"
+
+        si = signal_info
+        mid_slope = si.get("mid_slope_pct", 0.0)
+        gap_pct   = si.get("short_mid_gap_pct", 0.0)
+        struct_ok = si.get("structure_passed", False)
+
+        panel_lines = [
+            "--- 周线结构条件 ---",
+            f"  Short > Mid:         {_yn(si.get('short_above_mid'))}",
+            f"  价格 > Mid:          {_yn(si.get('price_above_mid'))}",
+            f"  Mid 上升:            {_yn(si.get('mid_rising'))}  ({mid_slope:.2f}%/10w)",
+            f"  价格 8w > Mid:       {_yn(si.get('price_above_mid_nw'))}",
+            f"  Short/Mid 间距:      {gap_pct:.1f}%  {_yn(si.get('gap_enough'))}(>=5%)",
+            f"  Mid 斜率强:          {_yn(si.get('mid_slope_strong'))}(>=2%)",
+            "",
+            "--- 评分明细 ---",
+            f"  市场({market}):      {si.get('factor_mkt', 0):+d}",
+            f"  Mid 斜率:            {si.get('factor_mid_slope', 0):+d}",
+            f"  通道间距:            {si.get('factor_gap', 0):+d}",
+            "  " + "-" * 22,
+            f"  总分: {score:+d} -> {sig_type}",
+            f"  结构: {'[Y] 通过' if struct_ok else '[N] 未通过 -> AVOID'}",
+            "",
+            "--- 通道说明 ---",
+            "  蓝虚线: w_ema_8/21 (Short Vegas)",
+            "  橙实线: w_ema_34/55 (Mid Vegas 守卫)",
+        ]
+
+        panel_text = "\n".join(panel_lines)
+        ax.text(
+            1.01, 0.99, panel_text,
+            transform=ax.transAxes,
+            fontsize=7.5, ha="left", va="top",
+            fontfamily=plt.rcParams["font.sans-serif"][0],
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="#E8F5E9", alpha=0.92,
+                      edgecolor="#A5D6A7", linewidth=0.8),
+        )
+
+        legend_elements = [
+            Line2D([0], [0], color=_W_EMA_COLORS["w_ema8"],  linewidth=1.2,
+                   linestyle="--", label="w_EMA8"),
+            Line2D([0], [0], color=_W_EMA_COLORS["w_ema21"], linewidth=1.2,
+                   linestyle="--", label="w_EMA21"),
+            Line2D([0], [0], color=_W_EMA_COLORS["w_ema34"], linewidth=1.4,
+                   linestyle="-",  label="w_EMA34"),
+            Line2D([0], [0], color=_W_EMA_COLORS["w_ema55"], linewidth=1.4,
+                   linestyle="-",  label="w_EMA55"),
+            Line2D([0], [0], marker=style["marker"], color="w",
+                   markerfacecolor=style["color"], markeredgecolor=style["edge"],
+                   markersize=10, label=sig_type),
+        ]
+        ax.legend(handles=legend_elements, loc="upper left", fontsize=8, framealpha=0.8)
+
+        # ── 保存 ────────────────────────────────────────────
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _UNSAFE = set('/\\:*?"<>|')
+        if market in ("HK", "CN"):
+            safe_name = "".join(c for c in name if c not in _UNSAFE).strip()[:20] or sym
+            if name_en:
+                safe_name = name_en[:20] + "_" + safe_name
+        else:
+            _name_for_file = name_en or name
+            safe_name = "".join(
+                c if c.isascii() and (c.isalnum() or c in "-_") else ""
+                for c in _name_for_file
+            ).strip("-_") or sym
+            safe_name = safe_name[:30]
+
+        out_path = out_dir / f"W_{sig_type}_{market}_{sym}_{safe_name}_{entry_date_str}.png"
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Glyph.*missing from font")
+            fig.savefig(out_path, dpi=130, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        return out_path
+
+    except Exception as e:
+        logger.warning(f"plot_w_vegas_short_chart [{sym}] 失败: {e}")
+        plt.close("all")
+        return None

@@ -2,11 +2,19 @@
 指标持久化存储模块
 
 每日更新后，对每只股票计算并保存：
-  - 扩展 EMA（8/21/34/55/60/144/169/200/250）
-  - 成交量均线（vol_ma_5, vol_ma_10, vol_ma_20, vol_ma_50）
-  - 前高价格（prev_high_252d）
+  日线指标（{symbol}.parquet）：
+    - 扩展 EMA（8/21/34/55/60/144/169/200/250）
+    - 成交量均线（vol_ma_5, vol_ma_10, vol_ma_20, vol_ma_50）
+    - 前高价格（prev_high_252d）
+
+  周线指标（{symbol}_w.parquet）：
+    - 周线 OHLCV（open/high/low/close/volume，按周五收盘聚合）
+    - 扩展 w_ema_*（窗口与日线一致：8/21/34/55/60/144/169/200/250）
+    - w_vol_ma_5/10/20/50
+    - w_prev_high_52w（近52周最高收盘）
 
 存储路径：data/cache/indicators/{market}/{symbol}.parquet
+          data/cache/indicators/{market}/{symbol}_w.parquet
   market: "us" | "hk" | "ndx100"
 
 每次计算从对应市场的 OHLCV parquet 读取原始数据，
@@ -22,7 +30,7 @@ import pandas as pd
 from loguru import logger
 
 from stock_ana.config import CACHE_DIR
-from stock_ana.data.indicators import add_daily_indicators
+from stock_ana.data.indicators import add_daily_indicators, add_weekly_indicators, resample_to_weekly
 
 # 指标缓存根目录
 IND_DIR = CACHE_DIR / "indicators"
@@ -44,6 +52,13 @@ def _ind_path(symbol: str, market: str) -> Path:
     d = IND_DIR / market
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{symbol}.parquet"
+
+
+def _weekly_ind_path(symbol: str, market: str) -> Path:
+    """Return the parquet path for weekly OHLCV + indicators for one symbol."""
+    d = IND_DIR / market
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{symbol}_w.parquet"
 
 
 def _ohlcv_path(symbol: str, market: str) -> Path:
@@ -70,15 +85,50 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df[keep_cols]
 
 
+def compute_weekly_indicators(df_daily: pd.DataFrame) -> pd.DataFrame:
+    """
+    从日线 OHLCV DataFrame 计算周线 OHLCV 及周线指标。
+
+    输入：含 open/high/low/close/volume 列，index 为 DatetimeIndex（日线）
+    输出：周线 OHLCV + w_ema_* + w_vol_ma_* + w_prev_high_52w
+
+    周线 OHLCV 保留在结果中（与日线不同，周线没有独立缓存文件可引用）。
+    """
+    df = df_daily.copy()
+    df.columns = [c.lower() for c in df.columns]
+    df = df.sort_index()
+    df_w = resample_to_weekly(df)
+    if len(df_w) < 2:
+        return df_w
+    df_w = add_weekly_indicators(df_w)
+    return df_w
+
+
 def save_indicators(symbol: str, market: str, df: pd.DataFrame) -> None:
-    """保存指标数据到 parquet。"""
+    """保存日线指标数据到 parquet。"""
     path = _ind_path(symbol, market)
     df.to_parquet(path, engine="pyarrow", compression="snappy")
 
 
+def save_weekly_indicators(symbol: str, market: str, df: pd.DataFrame) -> None:
+    """保存周线 OHLCV + 指标数据到 parquet。"""
+    path = _weekly_ind_path(symbol, market)
+    df.to_parquet(path, engine="pyarrow", compression="snappy")
+
+
 def load_indicators(symbol: str, market: str) -> pd.DataFrame | None:
-    """加载指标 parquet；不存在则返回 None。"""
+    """加载日线指标 parquet；不存在则返回 None。"""
     path = _ind_path(symbol, market)
+    if not path.exists():
+        return None
+    df = pd.read_parquet(path)
+    df.index = pd.to_datetime(df.index)
+    return df
+
+
+def load_weekly_indicators(symbol: str, market: str) -> pd.DataFrame | None:
+    """加载周线 OHLCV + 指标 parquet；不存在则返回 None。"""
+    path = _weekly_ind_path(symbol, market)
     if not path.exists():
         return None
     df = pd.read_parquet(path)
@@ -95,7 +145,7 @@ def update_indicators_for_symbols(
     delay: float = 0.0,
 ) -> dict[str, str]:
     """
-    批量计算并保存指标。
+    批量计算并保存日线 + 周线指标（每只股票只读一次 OHLCV）。
 
     Args:
         symbols: 股票代码列表
@@ -122,8 +172,15 @@ def update_indicators_for_symbols(
                 skip.append(symbol)
                 continue
 
+            # 日线指标
             df_ind = compute_indicators(df_raw)
             save_indicators(symbol, market, df_ind)
+
+            # 周线指标（同次 OHLCV，无额外 I/O）
+            df_wind = compute_weekly_indicators(df_raw)
+            if len(df_wind) >= 2:
+                save_weekly_indicators(symbol, market, df_wind)
+
             ok.append(symbol)
 
             if i % 50 == 0 or i == len(symbols):
