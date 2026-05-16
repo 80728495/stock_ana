@@ -112,43 +112,44 @@ def send_report_with_charts(
     sender_name: str = "Stock-Ana",
 ) -> bool:
     """
-    将 Markdown 报告渲染为 HTML，并将图表以 CID 内嵌方式附加到邮件正文中。
+    将 Markdown 报告 + 图表打包为 PDF 附件发送邮件。
+    邮件正文为 HTML 摘要，PDF 附件包含完整分析文本和所有图表（每张独页）。
 
     Args:
         subject:       邮件主题
-        md_content:    Markdown 格式正文
+        md_content:    Markdown 格式正文（Gemini 分析结果）
         chart_paths:   图表文件路径列表（PNG）
-        signal_labels: 每张图表对应的标签（如 "NVDA (NVIDIA)"），与 chart_paths 等长
+        signal_labels: 每张图表对应的标签，与 chart_paths 等长
         to:            收件人列表，默认发给 DEFAULT_TO
         sender_name:   发件人显示名称
     """
     import smtplib
-    from email.mime.image import MIMEImage
+    from email.mime.application import MIMEApplication
 
     recipients = to or [DEFAULT_TO]
     try:
         password = _get_password()
     except RuntimeError as e:
-        logger.error(f"邮件发送失败（Keychain）: {e}")
+        logger.error(f"邮件发送失败（密码读取）: {e}")
         return False
+
+    # 生成 PDF
+    pdf_bytes: bytes | None = None
+    try:
+        from stock_ana.utils.pdf_builder import build_scan_pdf
+        valid_charts = [cp for cp in chart_paths if cp.exists()]
+        pdf_bytes = build_scan_pdf(
+            md_content=md_content,
+            chart_paths=valid_charts,
+            signal_labels=signal_labels,
+            title=subject,
+        )
+    except Exception as e:
+        logger.warning(f"PDF 生成失败，将退回纯 HTML 邮件: {e}")
 
     html_body = _md_to_html(md_content)
 
-    # 在 HTML 末尾拼入图表（CID 内嵌）
-    chart_cid_map: dict[str, Path] = {}
-    if chart_paths:
-        charts_html = "<hr><h2>图表</h2>"
-        for i, cp in enumerate(chart_paths):
-            if not cp.exists():
-                continue
-            cid = f"chart_{i}_{cp.stem}"
-            chart_cid_map[cid] = cp
-            label = (signal_labels[i] if signal_labels and i < len(signal_labels) else cp.stem)
-            charts_html += f"<h3>{label}</h3>"
-            charts_html += f'<img src="cid:{cid}" style="max-width:100%;"><br><br>'
-        html_body = html_body.replace("</body>", charts_html + "</body>")
-
-    msg = MIMEMultipart("related")
+    msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
     msg["From"]    = f"{sender_name} <{SMTP_USER}>"
     msg["To"]      = ", ".join(recipients)
@@ -158,11 +159,12 @@ def send_report_with_charts(
     alt.attach(MIMEText(html_body, "html", "utf-8"))
     msg.attach(alt)
 
-    for cid, cp in chart_cid_map.items():
-        img = MIMEImage(cp.read_bytes(), "png")
-        img.add_header("Content-ID", f"<{cid}>")
-        img.add_header("Content-Disposition", "inline", filename=cp.name)
-        msg.attach(img)
+    if pdf_bytes:
+        pdf_attach = MIMEApplication(pdf_bytes, _subtype="pdf")
+        from datetime import date
+        pdf_name = f"scan_report_{date.today().isoformat()}.pdf"
+        pdf_attach.add_header("Content-Disposition", "attachment", filename=pdf_name)
+        msg.attach(pdf_attach)
 
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
@@ -171,7 +173,8 @@ def send_report_with_charts(
             server.ehlo()
             server.login(SMTP_USER, password)
             server.sendmail(SMTP_USER, recipients, msg.as_bytes())
-        logger.success(f"邮件已发送（含{len(chart_cid_map)}张图表）：{subject} → {recipients}")
+        pdf_note = f"含PDF附件({len(valid_charts)}张图表)" if pdf_bytes else "无PDF"
+        logger.success(f"邮件已发送（{pdf_note}）：{subject} → {recipients}")
         return True
     except Exception as e:
         logger.error(f"邮件发送失败: {e}")
