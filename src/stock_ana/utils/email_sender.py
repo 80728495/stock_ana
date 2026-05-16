@@ -110,6 +110,7 @@ def send_report_with_charts(
     signal_labels: list[str] | None = None,
     to: list[str] | None = None,
     sender_name: str = "Stock-Ana",
+    signals: list[dict] | None = None,
 ) -> bool:
     """
     将 Markdown 报告 + 图表打包为 PDF 附件发送邮件。
@@ -143,6 +144,7 @@ def send_report_with_charts(
             chart_paths=valid_charts,
             signal_labels=signal_labels,
             title=subject,
+            signals=signals,
         )
     except Exception as e:
         logger.warning(f"PDF 生成失败，将退回纯 HTML 邮件: {e}")
