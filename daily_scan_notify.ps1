@@ -24,7 +24,8 @@ if (Test-Path $StampFile) {
         }
     }
     if (-not $hasNew) {
-        Write-Host "[daily-scan] No new data since last scan, skipping."
+        Write-Host "[daily-scan] No new data since last scan, sending Feishu notification..."
+        & $PythonBin notify_daily_scan_result.py --no-new-data
         exit 0
     }
 }

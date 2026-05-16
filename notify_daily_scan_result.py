@@ -192,8 +192,8 @@ def _step_line(step: dict) -> str:
 def build_update_blocks(status: dict | None) -> tuple[str, list[list[dict]]]:
     if not status:
         return (
-            "🗄 数据更新报告（未找到结果）",
-            [[{"tag": "text", "text": "⚠️ 未找到 status.json，请检查 07:00 数据更新任务是否成功运行。"}]],
+            "⚠️ 数据更新状态未知",
+            [[{"tag": "text", "text": "未找到 status.json。\n请检查每日数据更新任务是否已运行。"}]],
         )
 
     update_date = status.get("update_date", "unknown")
@@ -201,18 +201,25 @@ def build_update_blocks(status: dict | None) -> tuple[str, list[list[dict]]]:
     steps = status.get("steps", [])
     total_elapsed = status.get("total_elapsed", 0)
 
-    title = f"🗄 数据更新报告 {update_date} {'✅' if all_ok else '⚠️'}"
+    failed_steps = [s for s in steps if not s.get("ok", False)]
+
+    if all_ok:
+        title = f"✅ 数据更新完成 {update_date}"
+    else:
+        failed_names = "、".join(s.get("name", "?") for s in failed_steps[:3])
+        title = f"❌ 数据更新失败 {update_date}（{failed_names}）"
+
     lines = [_step_line(s) for s in steps]
-    lines.append(f"总耗时: {total_elapsed}s")
-
-    error_lines = []
-    for s in steps:
-        if not s.get("ok", False) and s.get("error"):
-            error_lines.append(f"{s.get('name', '步骤')}: {s.get('error')}")
-
+    lines.append(f"\n总耗时: {total_elapsed}s")
     blocks: list[list[dict]] = [[{"tag": "text", "text": "\n".join(lines)}]]
-    if error_lines:
-        blocks.append([{"tag": "text", "text": "错误详情:\n" + "\n".join(error_lines[:5])}])
+
+    if failed_steps:
+        err_lines = []
+        for s in failed_steps:
+            if s.get("error"):
+                err_lines.append(f"❌ {s.get('name', '?')}: {str(s.get('error', ''))[:120]}")
+        if err_lines:
+            blocks.append([{"tag": "text", "text": "失败详情:\n" + "\n".join(err_lines)}])
     return title, blocks
 
 
@@ -319,6 +326,32 @@ def build_scan_blocks(summary: dict | None, token: str) -> tuple[str, list[list[
     return title, blocks
 
 
+def _format_signals_text(signals: list[dict]) -> str:
+    """将信号列表格式化为简洁文本，用于飞书卡片摘要。"""
+    if not signals:
+        return "无触发信号"
+    icon = {"STRONG_BUY": "🟢", "BUY": "🔵", "HOLD": "🟡", "AVOID": "🔴"}
+    grouped: dict[str, list] = {"STRONG_BUY": [], "BUY": [], "HOLD": [], "AVOID": []}
+    for s in signals:
+        sig = s.get("signal", "HOLD")
+        grouped.get(sig, grouped["HOLD"]).append(s)
+    lines = []
+    for sig in ("STRONG_BUY", "BUY", "HOLD", "AVOID"):
+        rows = grouped[sig]
+        if not rows:
+            continue
+        lines.append(f"{icon.get(sig, '●')} {sig}")
+        for r in rows:
+            sym = r.get("symbol", "")
+            name = r.get("name", "")
+            score = r.get("score", "")
+            entry = r.get("entry_date", "")
+            band = r.get("support_band", "")
+            score_text = f"{score:+.0f}" if isinstance(score, (int, float)) else str(score)
+            lines.append(f"  • {sym} ({name})  score={score_text}  {band}  入场:{entry}")
+    return "\n".join(lines)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Notify daily update + Vegas scan result to main agent.")
     parser.add_argument("--scan-exit-code", type=int, default=0, help="Exit code of vegas_mid_daily_scan.py")
@@ -334,58 +367,96 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="跳过每日数据更新状态通知（分步发送时避免重复）",
     )
+    parser.add_argument(
+        "--no-new-data",
+        action="store_true",
+        help="数据未更新场景：只发飞书数据未更新通知，跳过所有扫描通知",
+    )
     return parser.parse_args()
 
 
 def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: int = 0, no_email: bool = False) -> bool:
-    """发送单个市场的扫描通知（飞书 PDF + 邮件 PDF）。返回是否成功。"""
+    """
+    扫描通知三分支：
+      A. scan 退出码非0：只发错误卡片
+      B. scan OK + Gemini 失败：飞书摘要卡片 + 逐张图表图片，不发 PDF，不发邮件
+      C. scan OK + Gemini 成功：飞书摘要卡片 + PDF 文件，邮件发 PDF，不单独发图片
+    """
     ok = True
-    title2, blocks2 = build_scan_blocks(summary, token)
-    if scan_exit_code != 0:
-        blocks2.insert(
-            0,
-            [{"tag": "text", "text": f"⚠️ 扫描脚本退出码: {scan_exit_code}，请检查日志。"}],
-        )
-        title2 = f"{title2} ⚠️"
-
-    if not send_post_message(token, title2, blocks2):
-        print(f"❌ 扫描消息发送失败（{title2}）")
-        ok = False
-
-    # 生成 PDF（含图表 + Gemini 文本，按股票组织）
-    report_path_raw = summary.get("gemini_report_path") if summary else None
-    signals = (summary or {}).get("signals", [])
     market_label = (summary or {}).get("market_label") or "每日扫描"
     scan_date_str = (summary or {}).get("scan_date", date.today().isoformat())
     signals_found = (summary or {}).get("signals_found", 0)
+    total_scanned = (summary or {}).get("total_scanned", 0)
+    signals       = (summary or {}).get("signals", [])
+    has_gemini    = bool((summary or {}).get("has_gemini_analysis", False))
+    report_path_raw = (summary or {}).get("gemini_report_path")
 
-    pdf_bytes: bytes | None = None
-    chart_paths: list[Path] = []
-    chart_labels: list[str] = []
-    md_content: str = ""
+    # 收集有效图表路径
+    chart_paths:  list[Path] = []
+    chart_labels: list[str]  = []
+    for s in signals:
+        cp = Path(s.get("chart_path", ""))
+        if cp.exists():
+            chart_paths.append(cp)
+            chart_labels.append(f"{s.get('symbol','')} ({s.get('name','')})")
 
-    if report_path_raw:
-        report_path = Path(report_path_raw)
-        if report_path.exists():
-            try:
-                md_content = report_path.read_text(encoding="utf-8")
-                for s in signals:
-                    cp = Path(s.get("chart_path", ""))
-                    if cp.exists():
-                        chart_paths.append(cp)
-                        chart_labels.append(f"{s.get('symbol','')} ({s.get('name','')})")
-                from stock_ana.utils.pdf_builder import build_scan_pdf
-                pdf_bytes = build_scan_pdf(
-                    md_content=md_content,
-                    chart_paths=chart_paths,
-                    signal_labels=chart_labels,
-                    title=f"📊 {market_label} {scan_date_str}（{signals_found} 只信号）",
-                    signals=signals,
+    # ── 分支 A：扫描本身失败 ────────────────────────────────────────────
+    if scan_exit_code != 0:
+        send_post_message(
+            token,
+            f"❌ {market_label} 扫描失败 {scan_date_str}",
+            [[{"tag": "text", "text": f"扫描脚本退出码: {scan_exit_code}，请检查日志。"}]],
+        )
+        return False
+
+    title = f"📊 {market_label} {scan_date_str}（{signals_found} 只信号）"
+    sig_text = _format_signals_text(signals)
+    head_text = f"扫描：{total_scanned} 只  |  信号：{signals_found} 只"
+
+    # ── 分支 B：Gemini 失败 → 飞书摘要 + 逐张图片，不发 PDF 不发邮件 ──
+    if not has_gemini:
+        summary_text = head_text + "  |  Gemini：未完成\n\n" + sig_text
+        if not send_post_message(token, title, [[{"tag": "text", "text": summary_text}]]):
+            print(f"❌ 扫描消息发送失败（{title}）")
+            ok = False
+
+        for cp, label in zip(chart_paths, chart_labels):
+            image_key = upload_chart_to_feishu(token, cp)
+            if image_key:
+                send_post_message(
+                    token, label,
+                    [[{"tag": "text", "text": label}], [{"tag": "img", "image_key": image_key}]],
                 )
-            except Exception as e:
-                print(f"⚠️ PDF 生成失败: {e}")
+        return ok
 
-    # 飞书：上传并发送 PDF
+    # ── 分支 C：Gemini 成功 → 摘要卡片 + PDF（飞书 + 邮件） ─────────────
+    md_content = ""
+    if report_path_raw:
+        rp = Path(report_path_raw)
+        if rp.exists():
+            md_content = rp.read_text(encoding="utf-8")
+
+    summary_text = head_text + "  |  Gemini：完成  |  PDF 见附件\n\n" + sig_text
+    if not send_post_message(token, title, [[{"tag": "text", "text": summary_text}]]):
+        print(f"❌ 扫描消息发送失败（{title}）")
+        ok = False
+
+    # 生成 PDF
+    pdf_bytes: bytes | None = None
+    try:
+        from stock_ana.utils.pdf_builder import build_scan_pdf
+        pdf_bytes = build_scan_pdf(
+            md_content=md_content,
+            chart_paths=chart_paths,
+            signal_labels=chart_labels,
+            title=title,
+            signals=signals,
+        )
+    except Exception as e:
+        print(f"⚠️ PDF 生成失败: {e}")
+        ok = False
+
+    # 飞书：发送 PDF 文件
     if pdf_bytes:
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False,
@@ -399,17 +470,19 @@ def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: in
                     print(f"✅ 飞书 PDF 已发送：{market_label} {scan_date_str}")
                 else:
                     print("⚠️ 飞书 PDF 文件消息发送失败")
+                    ok = False
             else:
                 print("⚠️ 飞书 PDF 上传失败")
+                ok = False
         finally:
             tmp_path.unlink(missing_ok=True)
 
     # 邮件：发送 PDF 附件
-    if not no_email and md_content:
+    if not no_email and md_content and pdf_bytes:
         try:
             from stock_ana.utils.email_sender import send_report_with_charts
             email_sent = send_report_with_charts(
-                subject=f"📊 {market_label} {scan_date_str}（{signals_found} 只信号）",
+                subject=title,
                 md_content=md_content,
                 chart_paths=chart_paths,
                 signal_labels=chart_labels,
@@ -436,6 +509,17 @@ def main() -> int:
         return 1
 
     ok = True
+
+    # ── --no-new-data：今日缓存无更新，直接发通知后退出，不发扫描结果 ──
+    if getattr(args, "no_new_data", False):
+        title_nd = "⚠️ 今日数据未更新，扫描已跳过"
+        text_nd  = "检测到缓存文件未刷新（daily_update 可能未运行或失败）。\n今日美股/港股扫描已跳过，不重复发送昨日结果。"
+        send_post_message(token, title_nd, [[{"tag": "text", "text": text_nd}]])
+        if status:
+            title1, blocks1 = build_update_blocks(status)
+            send_post_message(token, title1, blocks1)
+        print("⚠️ 今日数据未更新，已发飞书通知，退出。")
+        return 0
 
     # Notification 1: update report（可通过 --skip-update 跳过，避免分步发送时重复）
     if not args.skip_update:
