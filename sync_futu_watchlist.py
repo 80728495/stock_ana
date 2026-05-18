@@ -29,7 +29,7 @@ FUTU_WATCHLIST_PATH = LISTS_DIR / "futu_watchlist.md"
 BIG_A_PATH = LISTS_DIR / "big_a.md"
 HK_UNIVERSE_PATH = LISTS_DIR / "hk_universe_list.md"
 US_UNIVERSE_PATH = LISTS_DIR / "us_universe_list.md"
-CN_HIGHTECH_WATCHLIST_PATH = LISTS_DIR / "cn_hightech_watchlist.md"
+CN_HIGHTECH_LIST_PATH = LISTS_DIR / "cn_hightech_list.md"
 
 OPEND_HOST = "127.0.0.1"
 OPEND_PORT = 11111
@@ -469,15 +469,15 @@ def update_universes(
     _append_to_universe(US_UNIVERSE_PATH, us_new, "US", dry_run)
 
 
-# ─── cn_hightech_watchlist.md 维护 ───────────────────────────────────────────
+# ─── cn_hightech_list.md 维护 ────────────────────────────────────────────────
 
 
 def _read_cn_hightech_symbols() -> set[str]:
-    """读取 cn_hightech_watchlist.md 中已有的代码集合。"""
-    if not CN_HIGHTECH_WATCHLIST_PATH.exists():
+    """读取 cn_hightech_list.md 中已有的代码集合。"""
+    if not CN_HIGHTECH_LIST_PATH.exists():
         return set()
     symbols: set[str] = set()
-    for line in CN_HIGHTECH_WATCHLIST_PATH.read_text(encoding="utf-8").splitlines():
+    for line in CN_HIGHTECH_LIST_PATH.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped.startswith("|"):
             continue
@@ -488,8 +488,8 @@ def _read_cn_hightech_symbols() -> set[str]:
     return symbols
 
 
-def _init_cn_hightech_watchlist_from_csv() -> None:
-    """若 cn_hightech_watchlist.md 不存在，从 cn_hightech.csv 初始化。"""
+def _init_cn_hightech_list_from_csv() -> None:
+    """若 cn_hightech_list.md 不存在，从 cn_hightech.csv 初始化。"""
     csv_path = LISTS_DIR / "cn_hightech.csv"
     if not csv_path.exists():
         return
@@ -524,15 +524,15 @@ def _init_cn_hightech_watchlist_from_csv() -> None:
     for i, (ticker, name) in enumerate(rows_out, 1):
         lines.append(f"| {i} | {ticker} | {name} | 筛选器 |")
     lines.append("")
-    CN_HIGHTECH_WATCHLIST_PATH.write_text("\n".join(lines), encoding="utf-8")
-    print(f"  ✅ cn_hightech_watchlist.md 已初始化（{len(rows_out)} 只，来源：筛选器）")
+    CN_HIGHTECH_LIST_PATH.write_text("\n".join(lines), encoding="utf-8")
+    print(f"  ✅ cn_hightech_list.md 已初始化（{len(rows_out)} 只，来源：筛选器）")
 
 
-def merge_cn_to_hightech_watchlist(
+def merge_cn_to_hightech_list(
     cn_stocks: list[dict],
     dry_run: bool = False,
 ) -> list[str]:
-    """将富途自选 A 股中 60/00 开头的个股追加到 cn_hightech_watchlist.md（不在其中才追加）。
+    """将富途自选 A 股中 60/00 开头的个股追加到 cn_hightech_list.md（不在其中才追加）。
 
     Args:
         cn_stocks: Futu 中的 A 股列表，每条含 {symbol, name, mkt_prefix}
@@ -542,8 +542,8 @@ def merge_cn_to_hightech_watchlist(
         新追加的股票代码列表
     """
     # 初始化（若文件不存在则从 CSV 建立）
-    if not CN_HIGHTECH_WATCHLIST_PATH.exists():
-        _init_cn_hightech_watchlist_from_csv()
+    if not CN_HIGHTECH_LIST_PATH.exists():
+        _init_cn_hightech_list_from_csv()
 
     # 过滤：只要 60 / 00 开头的个股
     target = [
@@ -551,24 +551,24 @@ def merge_cn_to_hightech_watchlist(
         if s["symbol"].startswith(("60", "00"))
     ]
     if not target:
-        print("  cn_hightech_watchlist.md：富途自选中无 60/00 开头的 A 股")
+        print("  cn_hightech_list.md：富途自选中无 60/00 开头的 A 股")
         return []
 
     existing = _read_cn_hightech_symbols()
     new_stocks = [s for s in target if s["symbol"] not in existing]
 
     if not new_stocks:
-        print("  cn_hightech_watchlist.md：无新增标的")
+        print("  cn_hightech_list.md：无新增标的")
         return []
 
-    print(f"  cn_hightech_watchlist.md 富途追加 {len(new_stocks)} 只：{[s['symbol'] for s in new_stocks]}")
+    print(f"  cn_hightech_list.md 富途追加 {len(new_stocks)} 只：{[s['symbol'] for s in new_stocks]}")
     if dry_run:
         return [s["symbol"] for s in new_stocks]
 
     # 计算当前最大序号
     max_num = 0
-    if CN_HIGHTECH_WATCHLIST_PATH.exists():
-        for line in CN_HIGHTECH_WATCHLIST_PATH.read_text(encoding="utf-8").splitlines():
+    if CN_HIGHTECH_LIST_PATH.exists():
+        for line in CN_HIGHTECH_LIST_PATH.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped.startswith("|"):
                 parts = [p.strip() for p in stripped.strip("|").split("|")]
@@ -580,7 +580,7 @@ def merge_cn_to_hightech_watchlist(
         name = s.get("name", s["symbol"])
         append_lines.append(f"| {i} | {s['symbol']} | {name} | Futu |")
 
-    text = CN_HIGHTECH_WATCHLIST_PATH.read_text(encoding="utf-8")
+    text = CN_HIGHTECH_LIST_PATH.read_text(encoding="utf-8")
     new_text = text.rstrip("\n") + "\n" + "\n".join(append_lines) + "\n"
 
     # 更新文件头的"最后更新"和"共 N 只"
@@ -589,8 +589,8 @@ def merge_cn_to_hightech_watchlist(
     total = max_num + len(new_stocks)
     new_text = re.sub(r"共 \d+ 只", f"共 {total} 只", new_text, count=1)
 
-    CN_HIGHTECH_WATCHLIST_PATH.write_text(new_text, encoding="utf-8")
-    print(f"  ✅ cn_hightech_watchlist.md 已追加 {len(new_stocks)} 只（总计 {total} 只）")
+    CN_HIGHTECH_LIST_PATH.write_text(new_text, encoding="utf-8")
+    print(f"  ✅ cn_hightech_list.md 已追加 {len(new_stocks)} 只（总计 {total} 只）")
     return [s["symbol"] for s in new_stocks]
 
 
@@ -708,9 +708,9 @@ def main() -> None:
     print("\n📝 写入 big_a.md...")
     write_big_a(cn_stocks, dry_run=dry_run)
 
-    # 3. 更新 cn_hightech_watchlist.md（追加 60/00 开头的个股）
-    print("\n📝 更新 cn_hightech_watchlist.md...")
-    merge_cn_to_hightech_watchlist(cn_stocks, dry_run=dry_run)
+    # 3. 更新 cn_hightech_list.md（追加 60/00 开头的个股）
+    print("\n📝 更新 cn_hightech_list.md...")
+    merge_cn_to_hightech_list(cn_stocks, dry_run=dry_run)
 
     # 4. 更新 universe 列表
     print("\n📝 更新 universe 列表...")

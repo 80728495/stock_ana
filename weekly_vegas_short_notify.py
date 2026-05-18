@@ -319,9 +319,17 @@ async def main_async(
     signals = sorted(seen.values(), key=lambda s: s["score"], reverse=True)
     logger.info(f"去重后：{len(signals)} 只")
 
-    # ── 排除已在 watchlist.md 中的 symbol（不需要 Gemini）──────────────────
-    from stock_ana.data.market_data import build_watchlist as _build_personal_wl
-    personal_syms = set(_build_personal_wl().keys())
+    # ── 排除已在富途自选股中的 symbol（不需要 Gemini）────────────────────────
+    # 优先读 futu_watched_symbols.json（sync_futu_watchlist.py 每日保存）
+    # 若不存在则 fallback 到 watchlist.md
+    _futu_cache = PROJECT_ROOT / "data" / "lists" / "futu_watched_symbols.json"
+    if _futu_cache.exists():
+        personal_syms = set(json.loads(_futu_cache.read_text(encoding="utf-8")).get("symbols", []))
+        logger.info(f"富途自选股缓存：{len(personal_syms)} 只（来自 futu_watched_symbols.json）")
+    else:
+        from stock_ana.data.market_data import build_watchlist as _build_personal_wl
+        personal_syms = set(_build_personal_wl().keys())
+        logger.warning("未找到 futu_watched_symbols.json，fallback 到 watchlist.md")
     watchlist_signals = [s for s in signals if s.get("symbol", "") in personal_syms]
     new_signals       = [s for s in signals if s.get("symbol", "") not in personal_syms]
     if watchlist_signals:

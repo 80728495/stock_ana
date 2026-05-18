@@ -156,7 +156,7 @@ def update_cn() -> dict:
 
 
 def update_cn_hightech() -> dict:
-    """更新沪深高新技术关注列表（cn_hightech_watchlist.md）的 OHLCV 数据。"""
+    """更新沪深高新技术列表（cn_hightech_list.md）的 OHLCV 数据。"""
     logger.info("=" * 60)
     logger.info("【3c/5】更新A股高新技术列表 ...")
     logger.info("=" * 60)

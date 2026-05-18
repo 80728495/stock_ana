@@ -288,7 +288,7 @@ def load_cn_list() -> list[str]:
 
 
 def load_cn_hightech_list() -> list[str]:
-    """加载沪深高新技术关注列表代码（来源：data/lists/cn_hightech_watchlist.md）。
+    """加载沪深高新技术列表代码（来源：data/lists/cn_hightech_list.md）。
 
     包含两类来源：
       1. 高新技术筛选器（cn_high_tech_selector.py）筛出的 A 股
@@ -298,10 +298,10 @@ def load_cn_hightech_list() -> list[str]:
     Returns:
         6 位股票代码列表，如 ["001266", "600641", ...]
     """
-    path = LISTS_DIR / "cn_hightech_watchlist.md"
+    path = LISTS_DIR / "cn_hightech_list.md"
     if not path.exists():
         raise FileNotFoundError(
-            f"A股高新技术列表不存在: {path}，请先运行 python daily_update.py --futu"
+            f"A股高新技术列表不存在: {path}，请先运行 python sync_futu_watchlist.py"
         )
     rows = _read_md_table(path)
     # 表格格式：| # | 代码 | 名称 | 来源 |，代码在第1列

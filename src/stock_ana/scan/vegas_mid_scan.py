@@ -208,17 +208,17 @@ def _build_us_full_watchlist() -> dict:
     return watchlist
 
 
-def _build_cn_hightech_watchlist() -> dict:
-    """A股高新技术关注列表（from cn_hightech_watchlist.md）。
+def _build_cn_hightech_list() -> dict:
+    """A股高新技术列表（from cn_hightech_list.md）。
 
-    列表来源：data/lists/cn_hightech_watchlist.md（高新技术筛选器 + Futu 追加）。
+    列表来源：data/lists/cn_hightech_list.md（高新技术筛选器 + Futu 追加）。
     """
     from stock_ana.data.list_manager import _read_md_table
     from stock_ana.config import DATA_DIR
 
-    path = DATA_DIR / "lists" / "cn_hightech_watchlist.md"
+    path = DATA_DIR / "lists" / "cn_hightech_list.md"
     if not path.exists():
-        logger.warning("未找到 cn_hightech_watchlist.md，请先运行 daily_update.py --futu")
+        logger.warning("未找到 cn_hightech_list.md，请先运行 daily_update.py --futu")
         return {}
 
     rows = _read_md_table(path)
