@@ -498,6 +498,9 @@ def _init_cn_hightech_watchlist_from_csv() -> None:
     with open(csv_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            # 只取 final_passed=True 的行
+            if str(row.get("final_passed", "")).strip().lower() not in ("true", "1"):
+                continue
             ticker = str(row.get("ticker", "")).strip().zfill(6)
             name = str(row.get("company_name", "")).strip() or ticker
             if ticker and ticker.isdigit():
