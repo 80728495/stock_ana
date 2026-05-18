@@ -470,10 +470,13 @@ def apply_batch_filters(candidate_df: pd.DataFrame, config: ScreenConfig) -> pd.
     if df.empty:
         return df
 
-    # 只保留沪深主板：沪市 600xxx/601xxx/603xxx/605xxx，深市 000xxx/001xxx/002xxx/003xxx
-    # 排除科创板 688xxx 和创业板 300xxx/301xxx
+    # 保留沪深主板 + 创业板 + 科创板，排除北交所
+    # 沪市主板: 600xxx/601xxx/603xxx/605xxx
+    # 深市主板: 000xxx/001xxx/002xxx/003xxx
+    # 创业板:   300xxx/301xxx
+    # 科创板:   688xxx/689xxx
     df["is_mainland_a_share"] = df["ticker"].map(
-        lambda code: bool(re.match(r"^(60[013]|605|00[0-3])\d{3}$", str(code)))
+        lambda code: bool(re.match(r"^(60[013]|605|00[0-3]|30[01]|68[89])\d{3}$", str(code)))
     )
     df["name_ok"] = ~df["company_name"].fillna("").str.upper().str.contains(r"ST|退")
     df["theme_match_ok"] = (df["industry_match_count"].fillna(0) > 0) | (df["concept_match_count"].fillna(0) > 0)
