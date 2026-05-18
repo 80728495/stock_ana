@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""
+周线 Vegas Short 扫描 + Gemini 批量分析 + 飞书 PDF 推送
+
+流程：
+  1. 运行周线 Vegas Short 扫描，找出近期 touch 信号（scan 内置图表渲染）
+  2. 每最多 3 只一组发送 Gemini；每批结果返回后等 180s 再发下一批
+  3. 合并所有批次 Gemini 文本，生成统一 PDF（封面汇总表 + 逐只图表 + 分析）
+  4. 上传 PDF 到飞书并发送消息
+
+用法：
+    python weekly_vegas_short_notify.py                   # 扫描自选列表（watchlist.md）
+    python weekly_vegas_short_notify.py --list us         # 美股科技列表
+    python weekly_vegas_short_notify.py --list hk         # 港股宇宙池
+    python weekly_vegas_short_notify.py --lookback 2      # 最近 2 周
+    python weekly_vegas_short_notify.py --scan-only       # 仅扫描，不调 Gemini，不发通知
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from datetime import date, datetime
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from loguru import logger
+
+LOG_DIR = PROJECT_ROOT / "data" / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+logger.add(
+    LOG_DIR / "w_vegas_notify_{time:YYYY-MM-DD}.log",
+    rotation="1 day",
+    retention="30 days",
+    level="INFO",
+    encoding="utf-8",
+    enqueue=True,
+)
+
+# ── Feishu 配置（与 notify_daily_scan_result.py 相同）───────────────────────
+FEISHU_APP_ID       = "cli_a924285ae7f85cc7"
+FEISHU_APP_SECRET   = "53hrIbxJYHGGAI8qbndwofOzltJAkah0"
+FEISHU_USER_OPEN_ID = "ou_5489407346c5c13bc4687a83859d619b"
+FEISHU_API          = "https://open.feishu.cn/open-apis"
+_feishu_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+BATCH_SIZE  = 3    # 每批最多几只
+BATCH_DELAY = 180  # 批次间等待秒数
+
+W_SCAN_OUT_DIR     = PROJECT_ROOT / "data" / "output" / "w_vegas_scan"
+ANALYSIS_OUT_DIR   = PROJECT_ROOT / "data" / "output" / "scan_analysis"
+
+
+# ════════════════════════════════════════════════════════════════════
+#  周线指标刷新（仅对本次扫描用到的列表）
+# ════════════════════════════════════════════════════════════════════
+
+def refresh_weekly_indicators_for_lists() -> None:
+    """对美股科技列表 + 港股高科技列表刷新日线 + 周线指标。"""
+    from stock_ana.data.indicators_store import update_indicators_for_symbols
+    from stock_ana.config import CACHE_DIR, DATA_DIR
+    from stock_ana.data.list_manager import load_us_tech_list, _read_md_table
+
+    # ── 美股科技 (us_tech_list.md) ─────────────────────────────────
+    logger.info("刷新美股科技（us_tech_list.md）周线指标...")
+    us_entries = load_us_tech_list()
+    us_symbols  = [
+        e["ticker"] for e in us_entries
+        if e.get("ticker") and (CACHE_DIR / "us" / f"{e['ticker']}.parquet").exists()
+    ]
+    logger.info(f"  美股科技：{len(us_symbols)} 只有缓存")
+    update_indicators_for_symbols(us_symbols, "us")
+
+    # ── 港股高科技 (hk_techman.md) ────────────────────────────────
+    logger.info("刷新港股高科技（hk_techman.md）周线指标...")
+    techman_path = DATA_DIR / "lists" / "hk_techman.md"
+    rows = _read_md_table(techman_path) if techman_path.exists() else []
+    hk_symbols = [
+        r[1].strip().zfill(5) for r in rows
+        if len(r) >= 2 and (CACHE_DIR / "hk" / f"{r[1].strip().zfill(5)}.parquet").exists()
+    ]
+    logger.info(f"  港股高科技：{len(hk_symbols)} 只有缓存")
+    update_indicators_for_symbols(hk_symbols, "hk")
+
+    logger.success("周线指标刷新完成")
+
+
+# ════════════════════════════════════════════════════════════════════
+#  合并 watchlist（US tech + HK techman）
+# ════════════════════════════════════════════════════════════════════
+
+def _build_combined_watchlist() -> dict:
+    """美股科技列表 + 港股高科技列表合并。"""
+    from stock_ana.scan.w_vegas_short_scan import _build_us_universe_watchlist, _build_hk_techman_watchlist
+    wl: dict = {}
+    wl.update(_build_us_universe_watchlist())
+    wl.update(_build_hk_techman_watchlist())
+    logger.info(f"合并 watchlist：{len(wl)} 只（US tech + HK techman）")
+    return wl
+
+
+# ════════════════════════════════════════════════════════════════════
+#  飞书工具（与 notify_daily_scan_result 相同逻辑，独立副本）
+# ════════════════════════════════════════════════════════════════════
+
+def get_tenant_token() -> str | None:
+    url  = f"{FEISHU_API}/auth/v3/tenant_access_token/internal"
+    data = json.dumps({"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}).encode("utf-8")
+    req  = urllib.request.Request(url, data=data,
+                                  headers={"Content-Type": "application/json; charset=utf-8"})
+    with _feishu_opener.open(req, timeout=15) as resp:
+        return json.loads(resp.read()).get("tenant_access_token")
+
+
+def send_post_message(token: str, title: str, blocks: list[list[dict]]) -> bool:
+    url      = f"{FEISHU_API}/im/v1/messages?receive_id_type=open_id"
+    post_body = {"zh_cn": {"title": title, "content": blocks}}
+    payload  = {
+        "receive_id": FEISHU_USER_OPEN_ID,
+        "msg_type":   "post",
+        "content":    json.dumps(post_body, ensure_ascii=False),
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8",
+                 "Authorization": f"Bearer {token}"},
+    )
+    with _feishu_opener.open(req, timeout=20) as resp:
+        return json.loads(resp.read()).get("code") == 0
+
+
+def send_file_message(token: str, file_key: str) -> bool:
+    url     = f"{FEISHU_API}/im/v1/messages?receive_id_type=open_id"
+    payload = {
+        "receive_id": FEISHU_USER_OPEN_ID,
+        "msg_type":   "file",
+        "content":    json.dumps({"file_key": file_key}, ensure_ascii=False),
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8",
+                 "Authorization": f"Bearer {token}"},
+    )
+    with _feishu_opener.open(req, timeout=20) as resp:
+        return json.loads(resp.read()).get("code") == 0
+
+
+def upload_report_file(token: str, report_path: Path) -> str | None:
+    if not report_path.exists():
+        return None
+    cmd = [
+        "curl", "-sS", "-X", "POST",
+        f"{FEISHU_API}/im/v1/files",
+        "-H", f"Authorization: Bearer {token}",
+        "-F", "file_type=stream",
+        "-F", f"file_name={report_path.name}",
+        "-F", f"file=@{report_path}",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
+        if proc.returncode != 0:
+            logger.error(f"curl 上传失败: {proc.stderr[:200]}")
+            return None
+        result = json.loads(proc.stdout)
+        return result.get("data", {}).get("file_key")
+    except Exception as e:
+        logger.error(f"upload_report_file error: {e}")
+        return None
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Gemini 批量分析（每批 ≤ BATCH_SIZE 只，批间等 BATCH_DELAY 秒）
+# ════════════════════════════════════════════════════════════════════
+
+async def run_batched_gemini(signals: list[dict]) -> str:
+    """
+    将信号分成每批 ≤ BATCH_SIZE 只，依次发给 Gemini。
+    每批结果返回后等待 BATCH_DELAY 秒再发下一批。
+    返回所有批次合并的完整 Markdown 文本。
+    """
+    from stock_ana.utils.scan_analyst import build_prompt, _init_client, _call_gemini, DEFAULT_MODEL
+
+    batches = [signals[i : i + BATCH_SIZE] for i in range(0, len(signals), BATCH_SIZE)]
+    logger.info(
+        f"Gemini 批量分析：{len(signals)} 只，分 {len(batches)} 批"
+        f"（每批 ≤{BATCH_SIZE} 只，批间等待 {BATCH_DELAY}s）"
+    )
+
+    client = await _init_client(DEFAULT_MODEL)
+    all_texts: list[str] = []
+
+    try:
+        for idx, batch in enumerate(batches, 1):
+            syms = [s.get("symbol", "?") for s in batch]
+            logger.info(f"  第 {idx}/{len(batches)} 批：{syms}")
+            try:
+                prompt = build_prompt(batch)
+                text   = await _call_gemini(prompt, client, model=DEFAULT_MODEL, max_retries=1)
+                all_texts.append(text.strip())
+                logger.success(f"  第 {idx} 批完成，{len(text)} 字符")
+            except Exception as e:
+                logger.error(f"  第 {idx} 批 Gemini 调用失败 [{type(e).__name__}]: {e}")
+                # 继续尝试下一批，而不是中断整个流程
+                all_texts.append(
+                    f"<!-- 第 {idx} 批（{', '.join(syms)}）Gemini 分析失败: {e} -->"
+                )
+
+            if idx < len(batches):
+                logger.info(f"  等待 {BATCH_DELAY}s 再发下一批...")
+                await asyncio.sleep(BATCH_DELAY)
+    finally:
+        await client.close()
+
+    return "\n\n---\n\n".join(all_texts)
+
+
+# ════════════════════════════════════════════════════════════════════
+#  报告保存
+# ════════════════════════════════════════════════════════════════════
+
+def save_weekly_report(signals: list[dict], gemini_text: str, out_dir: Path) -> Path:
+    """将汇总表 + Gemini 合并文本保存为单一 .md 文件。"""
+    today  = date.today().isoformat()
+    syms   = "_".join(s.get("symbol", "") for s in signals[:5])
+    suffix = f"_plus{len(signals) - 5}more" if len(signals) > 5 else ""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path   = out_dir / f"W_{today}_{syms}{suffix}.md"
+
+    header = [
+        "# 周线 Vegas Short 信号分析报告",
+        "",
+        f"**日期**: {today}  |  **信号数**: {len(signals)}",
+        "",
+        "| 代码 | 名称 | 信号 | 评分 | 入场日 | 策略 |",
+        "|------|------|------|------|--------|------|",
+    ]
+    for s in signals:
+        header.append(
+            f"| {s.get('symbol','')} | {s.get('name','')} "
+            f"| {s.get('signal','')} | {s.get('score',0):+d} "
+            f"| {s.get('entry_date','').split('(')[0]} "
+            f"| {s.get('touch_strategy','')} |"
+        )
+    header += ["", "---", ""]
+
+    path.write_text("\n".join(header) + "\n" + gemini_text, encoding="utf-8")
+    logger.success(f"周线报告已保存 → {path}")
+    return path
+
+
+# ════════════════════════════════════════════════════════════════════
+#  主流程
+# ════════════════════════════════════════════════════════════════════
+
+async def main_async(
+    lookback: int = 1,
+    scan_only: bool = False,
+    list_mode: str = "combined",
+    skip_indicators: bool = False,
+) -> None:
+    t0    = datetime.now()
+    today = date.today().isoformat()
+
+    logger.info("=" * 60)
+    logger.info(f"  周线 Vegas Short 流水线 — {t0:%Y-%m-%d %H:%M:%S}")
+    logger.info("=" * 60)
+
+    # ── Step 0: 刷新周线指标 ──────────────────────────────────────────────────
+    if not skip_indicators and list_mode in ("combined", "us", "hk"):
+        logger.info("【0/3】刷新周线指标...")
+        refresh_weekly_indicators_for_lists()
+    else:
+        logger.info("【0/3】跳过指标刷新")
+
+    # ── Step 1: 扫描（含图表渲染）────────────────────────────────────────────
+    logger.info(f"【1/3】运行周线扫描（list={list_mode}, lookback={lookback}w）")
+    from stock_ana.scan.w_vegas_short_scan import (
+        run_scan,
+        _build_hk_techman_watchlist,
+        _build_us_full_watchlist,
+        _build_us_universe_watchlist,
+    )
+    from stock_ana.data.market_data import build_watchlist
+
+    if list_mode == "combined":
+        watchlist = _build_combined_watchlist()
+    elif list_mode == "hk":
+        watchlist = _build_hk_techman_watchlist()
+    elif list_mode == "us":
+        watchlist = _build_us_universe_watchlist()
+    elif list_mode == "us-full":
+        watchlist = _build_us_full_watchlist()
+    else:
+        watchlist = build_watchlist()
+
+    signals_raw = run_scan(
+        watchlist=watchlist,
+        lookback=lookback,
+        min_signal="BUY",
+        touch_only=True,   # 只要 touch 策略信号
+    )
+    logger.success(f"扫描完成：{len(watchlist)} 只 → {len(signals_raw)} 个原始信号")
+
+    # ── 按 symbol 去重（保留评分最高的那条）────────────────────────────────
+    seen: dict[str, dict] = {}
+    for s in signals_raw:
+        sym = s.get("symbol", "")
+        if sym not in seen or s["score"] > seen[sym]["score"]:
+            seen[sym] = s
+    signals = sorted(seen.values(), key=lambda s: s["score"], reverse=True)
+    logger.info(f"去重后：{len(signals)} 只")
+
+    # ── 排除已在 watchlist.md 中的 symbol（不需要 Gemini）──────────────────
+    from stock_ana.data.market_data import build_watchlist as _build_personal_wl
+    personal_syms = set(_build_personal_wl().keys())
+    watchlist_signals = [s for s in signals if s.get("symbol", "") in personal_syms]
+    new_signals       = [s for s in signals if s.get("symbol", "") not in personal_syms]
+    if watchlist_signals:
+        logger.info(
+            f"已在关注列表，跳过Gemini（{len(watchlist_signals)} 只）: "
+            + ", ".join(s.get("symbol","") for s in watchlist_signals)
+        )
+    logger.info(f"需要Gemini分析：{len(new_signals)} 只")
+
+    if not signals:
+        logger.info("本周无信号，流水线结束")
+        token = get_tenant_token()
+        if token:
+            send_post_message(
+                token,
+                f"📈 周线 Vegas Short {today}",
+                [[{"tag": "text", "text": f"本周（lookback={lookback}w）无 touch 信号触发"}]],
+            )
+        return
+
+    # 收集图表路径
+    chart_paths:  list[Path] = []
+    chart_labels: list[str]  = []
+    for s in signals:
+        cp = Path(s.get("chart_path", ""))
+        if cp.exists():
+            chart_paths.append(cp)
+            chart_labels.append(f"{s.get('symbol','')} ({s.get('name','')})")
+
+    # ── Step 2: Gemini 批量分析 ───────────────────────────────────────────────
+    report_path: Path | None = None
+    gemini_text = ""
+
+    if scan_only:
+        logger.info("【2/3】--scan-only 模式，跳过 Gemini 分析")
+    elif not new_signals:
+        logger.info("【2/3】无需 Gemini 分析的新信号，跳过")
+    else:
+        logger.info(f"【2/3】Gemini 批量分析（{len(new_signals)} 只，每批 ≤{BATCH_SIZE} 只）")
+        out_dir = ANALYSIS_OUT_DIR / today
+        try:
+            gemini_text = await run_batched_gemini(new_signals)
+            report_path = save_weekly_report(signals, gemini_text, out_dir)
+        except Exception as e:
+            logger.error(f"Gemini 分析整体失败: {e}")
+
+    # ── Step 3: 生成 PDF + 发飞书 ────────────────────────────────────────────
+    logger.info("【3/3】生成 PDF + 发送飞书")
+
+    token = get_tenant_token()
+    if not token:
+        logger.error("飞书 token 获取失败，终止")
+        return
+
+    title = f"📈 周线 Vegas Short 信号 {today}（{len(signals)} 只）"
+    md_content = ""
+    if report_path and report_path.exists():
+        md_content = report_path.read_text(encoding="utf-8")
+
+    # 如果没有 Gemini 文本（scan_only 或全部失败），发文字卡 + 图表列表
+    if not md_content.strip():
+        sig_lines = [f"• {s.get('signal')} {s.get('symbol')} {s.get('name','')} "
+                     f"@ {s.get('entry_date','').split('(')[0]} [{s.get('support_band','')}]"
+                     for s in signals]
+        body = "\n".join(sig_lines)
+        send_post_message(token, title, [[{"tag": "text", "text": body}]])
+        logger.info("已发飞书文字卡（无 Gemini 分析）")
+        return
+
+    # 生成 PDF
+    from stock_ana.utils.pdf_builder import build_scan_pdf
+    try:
+        pdf_bytes = build_scan_pdf(
+            md_content=md_content,
+            chart_paths=chart_paths,
+            signal_labels=chart_labels,
+            title=title,
+            signals=signals,
+        )
+    except Exception as e:
+        logger.error(f"PDF 生成失败: {e}")
+        send_post_message(token, title, [[{"tag": "text", "text": f"PDF 生成失败: {e}"}]])
+        return
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False,
+                                     prefix=f"w_scan_{today}_") as tmp:
+        tmp.write(pdf_bytes)
+        tmp_path = Path(tmp.name)
+
+    try:
+        file_key = upload_report_file(token, tmp_path)
+        if file_key and send_file_message(token, file_key):
+            logger.success(f"✅ 飞书 PDF 已发送：{title}")
+        else:
+            logger.error("飞书 PDF 上传或发送失败")
+            # fallback：发文字通知
+            send_post_message(token, title,
+                              [[{"tag": "text", "text": "PDF 上传失败，请查看日志"}]])
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    elapsed = int((datetime.now() - t0).total_seconds())
+    logger.info(f"周线流水线完成，总耗时 {elapsed}s")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="周线 Vegas Short 扫描 + Gemini + 飞书 PDF")
+    parser.add_argument("--lookback", type=int, default=1,
+                        help="最近几周（默认 1 = 仅当周）")
+    parser.add_argument("--scan-only", action="store_true",
+                        help="仅扫描，不调 Gemini，不发飞书通知")
+    parser.add_argument("--list", dest="list_mode", default="combined",
+                        choices=["combined", "shawn", "us", "hk", "us-full"],
+                        help="扫描标的列表（默认 combined = US tech + HK techman）")
+    parser.add_argument("--skip-indicators", action="store_true",
+                        help="跳过周线指标刷新（当日已刷新过时使用）")
+    args = parser.parse_args()
+    asyncio.run(main_async(
+        lookback=args.lookback,
+        scan_only=args.scan_only,
+        list_mode=args.list_mode,
+        skip_indicators=args.skip_indicators,
+    ))
+
+
+if __name__ == "__main__":
+    main()

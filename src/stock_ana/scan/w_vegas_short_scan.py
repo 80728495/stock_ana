@@ -68,13 +68,13 @@ def _came_from_above(touch_bar: int, close: np.ndarray, recent_bars: int = 12) -
 
 # ─────────────────────── watchlist 构建 ───────────────────────
 
-def _build_hk_universe_watchlist() -> dict:
-    """港股宇宙池（hk_universe_list.md，市值≥100亿）。"""
+def _build_hk_techman_watchlist() -> dict:
+    """港股科技股列表（hk_techman.md，366只）。"""
     from stock_ana.data.list_manager import _read_md_table
     from stock_ana.config import DATA_DIR
-    path = DATA_DIR / "lists" / "hk_universe_list.md"
+    path = DATA_DIR / "lists" / "hk_techman.md"
     if not path.exists():
-        logger.warning(f"未找到港股宇宙池列表: {path}")
+        logger.warning(f"未找到港股科技股列表: {path}")
         return {}
     rows = _read_md_table(path)
     watchlist = {}
@@ -87,7 +87,7 @@ def _build_hk_universe_watchlist() -> dict:
         if not ohlcv_path.exists():
             continue
         watchlist[code] = ("HK", name_zh, ohlcv_path, "")
-    logger.info(f"港股宇宙池：{len(watchlist)} 只有数据")
+    logger.info(f"港股科技股列表：{len(watchlist)} 只有数据")
     return watchlist
 
 
@@ -382,7 +382,7 @@ def main():
     parser.add_argument("--shawn", action="store_true",
                         help="扫描关注列表 (watchlist.md，默认)")
     parser.add_argument("--hk", action="store_true",
-                        help="扫描港股宇宙池 (hk_universe_list.md)")
+                        help="扫描港股科技股列表 (hk_techman.md, 366只)")
     parser.add_argument("--us", action="store_true",
                         help="扫描美股科技列表 (us_tech_list.md)")
     parser.add_argument("--us-full", action="store_true",
@@ -397,7 +397,7 @@ def main():
     if args.shawn or not any_explicit:
         combined.update(build_watchlist())
     if args.hk:
-        combined.update(_build_hk_universe_watchlist())
+        combined.update(_build_hk_techman_watchlist())
     if args.us:
         combined.update(_build_us_universe_watchlist())
     if args.us_full:
