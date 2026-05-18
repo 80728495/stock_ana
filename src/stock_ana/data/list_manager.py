@@ -100,9 +100,15 @@ def parse_watchlist(path: Path | None = None) -> dict[str, list[dict[str, str]]]
         {"us": [{"symbol": "PDD", "name": "拼多多"}, ...], "hk": [...], "cn": [...]}
     """
     if path is None:
+        futu_wl = LISTS_DIR / "futu_watchlist.md"
         default = LISTS_DIR / "watchlist.md"
         legacy = DATA_DIR / "stock_list.md"
-        path = default if default.exists() else legacy
+        if futu_wl.exists():
+            path = futu_wl
+        elif default.exists():
+            path = default
+        else:
+            path = legacy
 
     text = path.read_text(encoding="utf-8")
     result: dict[str, list[dict[str, str]]] = {"us": [], "hk": [], "cn": []}

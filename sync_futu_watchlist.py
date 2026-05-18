@@ -25,6 +25,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 LISTS_DIR = PROJECT_ROOT / "data" / "lists"
 WATCHLIST_PATH = LISTS_DIR / "watchlist.md"
+FUTU_WATCHLIST_PATH = LISTS_DIR / "futu_watchlist.md"
 BIG_A_PATH = LISTS_DIR / "big_a.md"
 HK_UNIVERSE_PATH = LISTS_DIR / "hk_universe_list.md"
 US_UNIVERSE_PATH = LISTS_DIR / "us_universe_list.md"
@@ -593,6 +594,78 @@ def merge_cn_to_hightech_watchlist(
     return [s["symbol"] for s in new_stocks]
 
 
+# ─── futu_watchlist.md 生成 ─────────────────────────────────────────────────
+
+
+def write_futu_watchlist_md(
+    hk_stocks: list[dict],
+    us_stocks: list[dict],
+    cn_stocks: list[dict],
+    dry_run: bool = False,
+) -> None:
+    """将富途全量自选个股写入 futu_watchlist.md（同格式 watchlist.md，全量覆盖写）。"""
+
+    def _is_individual(sym: str) -> bool:
+        if sym.startswith("."):
+            return False
+        if re.search(r"[A-Za-z]+\d{4}$", sym):  # 期货，如 GC2604
+            return False
+        return True
+
+    hk_f = [s for s in hk_stocks if _is_individual(s["symbol"])]
+    us_f = [s for s in us_stocks if _is_individual(s["symbol"])]
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    lines = [
+        "# Futu 自选股完整列表",
+        "",
+        f"> 自动生成，最后更新：{today_str}",
+        f"> 来源：Futu OpenD 所有 CUSTOM 分组（个股，已过滤指数/期货）",
+        f"> HK {len(hk_f)} 只 / US {len(us_f)} 只 / CN {len(cn_stocks)} 只",
+        "",
+        "## 港股 (HK)",
+        "",
+        "| 代码 | 中文名 | 英文名 |",
+        "|------|--------|--------|" ,
+    ]
+    for s in sorted(hk_f, key=lambda x: x["symbol"]):
+        name = s.get("name", s["symbol"])
+        lines.append(f"| {s['symbol']} | {name} | {name} |")
+
+    lines += [
+        "",
+        "## 美股 (US)",
+        "",
+        "| 代码 | 中文名 | 英文名 |",
+        "|------|--------|--------|" ,
+    ]
+    for s in sorted(us_f, key=lambda x: x["symbol"]):
+        name = s.get("name", s["symbol"])
+        lines.append(f"| {s['symbol']} | {name} | {name} |")
+
+    lines += [
+        "",
+        "## 大A (CN)",
+        "",
+        "| 代码 | 中文名 | 英文名 |",
+        "|------|--------|--------|" ,
+    ]
+    for s in sorted(cn_stocks, key=lambda x: x["symbol"]):
+        name = s.get("name", s["symbol"])
+        lines.append(f"| {s['symbol']} | {name} | {name} |")
+
+    lines.append("")
+    content = "\n".join(lines)
+
+    total = len(hk_f) + len(us_f) + len(cn_stocks)
+    if dry_run:
+        print(f"  [dry-run] futu_watchlist.md 将写入 {total} 只")
+        return
+
+    FUTU_WATCHLIST_PATH.write_text(content, encoding="utf-8")
+    print(f"  ✅ futu_watchlist.md 已写入 {total} 只（HK {len(hk_f)} / US {len(us_f)} / CN {len(cn_stocks)}）")
+
+
 # ─── 主流程 ───────────────────────────────────────────────────────────────────
 
 
@@ -615,9 +688,21 @@ def main() -> None:
 
     print(f"\n  HK: {len(hk_stocks)} 只，US: {len(us_stocks)} 只，CN: {len(cn_stocks)} 只\n")
 
-    # 1. 更新 watchlist.md
-    print("📝 更新 watchlist.md...")
-    update_watchlist(hk_stocks, us_stocks, cn_stocks, dry_run=dry_run)
+    # 0. 保存富途全量自选股缓存（供 weekly scan 等过滤用）
+    import json as _json
+    futu_cache_path = PROJECT_ROOT / "data" / "lists" / "futu_watched_symbols.json"
+    if not dry_run:
+        _json.dump(
+            {"symbols": sorted({s["symbol"] for s in stocks}),
+             "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+            open(futu_cache_path, "w", encoding="utf-8"),
+            ensure_ascii=False, indent=2,
+        )
+        print(f"  ✅ futu_watched_symbols.json 已保存（{len(stocks)} 只）")
+
+    # 1. 写入 futu_watchlist.md（富途完整自选个股，全量覆盖）
+    print("📝 写入 futu_watchlist.md...")
+    write_futu_watchlist_md(hk_stocks, us_stocks, cn_stocks, dry_run=dry_run)
 
     # 2. 写入 big_a.md
     print("\n📝 写入 big_a.md...")
