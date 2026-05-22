@@ -1,6 +1,6 @@
 # Shawn 关注股票列表
 
-> 人工维护，最后更新：2026-05-05
+> 人工维护，最后更新：2026-05-21
 >
 > 重点跟踪标的，兼顾港股、美股与大A。
 
@@ -27,6 +27,7 @@
 | 800000 | 恒生指数 | 恒生指数 |
 | 800700 | 恒生科技指数 | 恒生科技指数 |
 | HTImain | 恒生科技指数期货主连 (2605) | 恒生科技指数期货主连 (2605) |
+| 07552 | 南方两倍做空恒科 | 南方两倍做空恒科 |
 
 ## 美股 (US)
 
@@ -140,6 +141,56 @@
 | SNDK | 闪迪 | 闪迪 |
 | SIRI | Sirius XM | Sirius XM |
 | INGM | 英迈科技 | 英迈科技 |
+| NOW | ServiceNow | ServiceNow |
+| DXYZ | Destiny Tech100 | Destiny Tech100 |
+| BOT | RoboStrategy | RoboStrategy |
+| FSLY | Fastly | Fastly |
+| ZETA | Zeta Global | Zeta Global |
+| MSFU | 2倍做多MSFT ETF-Direxion | 2倍做多MSFT ETF-Direxion |
+| ESTC | Elastic | Elastic |
+| GEV | GE Vernova | GE Vernova |
+| CBRS | Cerebras Systems | Cerebras Systems |
+| FN | Fabrinet | Fabrinet |
+| FORM | FormFactor | FormFactor |
+| CRWD | CrowdStrike | CrowdStrike |
+| SNOW | Snowflake | Snowflake |
+| CSCO | 思科 | 思科 |
+| ANET | Arista Networks | Arista Networks |
+| CLS | 天弘科技 | 天弘科技 |
+| VRT | Vertiv Holdings | Vertiv Holdings |
+| ASX | 日月光半导体 | 日月光半导体 |
+| NXPI | 恩智浦 | 恩智浦 |
+| BE | Bloom Energy | Bloom Energy |
+| CAT | 卡特彼勒 | 卡特彼勒 |
+| CMI | 康明斯 | 康明斯 |
+| ET | Energy Transfer | Energy Transfer |
+| PLAB | 福尼克斯 | 福尼克斯 |
+| CRUS | 凌云半导体 | 凌云半导体 |
+| DT | Dynatrace | Dynatrace |
+| FROG | JFrog | JFrog |
+| BGC | BGC Group | BGC Group |
+| ADEA | Adeia | Adeia |
+| NTLA | Intellia Therapeutics | Intellia Therapeutics |
+| SIMO | 慧荣科技 | 慧荣科技 |
+| OKLO | Oklo Inc | Oklo Inc |
+| LEU | Centrus Energy | Centrus Energy |
+| LQDA | Liquidia | Liquidia |
+| KC | 金山云 | 金山云 |
+| TEAM | Atlassian | Atlassian |
+| DDOG | Datadog | Datadog |
+| YOU | Clear Secure | Clear Secure |
+| XYZ | Block | Block |
+| U | Unity Software | Unity Software |
+| TWLO | Twilio | Twilio |
+| TTWO | Take-Two互动软件 | Take-Two互动软件 |
+| TENB | Tenable Holdings | Tenable Holdings |
+| TDC | 天睿公司 | 天睿公司 |
+| S | SentinelOne | SentinelOne |
+| RBRK | Rubrik | Rubrik |
+| ORCL | 甲骨文 | 甲骨文 |
+| NTNX | Nutanix | Nutanix |
+| CDNS | 铿腾电子 | 铿腾电子 |
+| NET | Cloudflare | Cloudflare |
 
 ## 大A (CN)
 
@@ -182,3 +233,5 @@
 | 688347 | 华虹公司 | 华虹公司 |
 | 688981 | 中芯国际 | 中芯国际 |
 | 300850 | 新强联 | 新强联 |
+| 002409 | 雅克科技 | 雅克科技 |
+| 600487 | 亨通光电 | 亨通光电 |

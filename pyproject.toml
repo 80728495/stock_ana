@@ -14,6 +14,7 @@ dependencies = [
     "pandas>=2.1.0,<3.0.0",
     "numpy>=1.26.0,<2.5.0",
     "ta>=0.11.0",             # 技术指标库（纯 Python，跨平台无障碍）
+    "smartmoneyconcepts>=0.0.26",  # SMC 指标（FVG、Order Block、BOS/CHoCH、Liquidity 等）
 
     # 可视化
     "mplfinance>=0.12.9b7",   # K线图（最新稳定版为 pre-release）
