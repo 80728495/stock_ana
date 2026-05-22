@@ -304,9 +304,9 @@ async def _run_single_market(
 
     signals, total_scanned = run_daily_scan(lookback=lookback, list_mode=list_mode)
 
-    # ── 陈旧数据检测：补跑场景下若 HK 信号与前一天完全相同，跳过 Gemini 和通知 ──
+    # ── 陈旧数据检测：若信号与前一天完全相同，跳过 Gemini 和通知 ──
     data_stale = False
-    if signals and list_mode == "hk":
+    if signals:
         prev_date = (date.today() - timedelta(days=1)).isoformat()
         prev_summary_path = DAILY_SCAN_DIR / prev_date / filename
         if prev_summary_path.exists():
@@ -386,26 +386,12 @@ async def _main_async(lookback: int, scan_only: bool, list_mode: str = "tech") -
     market_label = _label_map.get(list_mode, "每日扫描")
     filename     = _file_map.get(list_mode, "summary.json")
 
-    # Step 1-2：扫描 + 画图
-    signals, total_scanned = run_daily_scan(lookback=lookback, list_mode=list_mode)
-
-    # Step 3：Gemini 分析
-    gemini_path: Path | None = None
-    if not scan_only and signals:
-        gemini_path = await run_gemini_analysis(signals)
-
-    # Step 4-5：保存 summary
-    summary_path = save_summary(
-        signals, total_scanned, gemini_path, lookback,
-        market_label=market_label, filename=filename,
-        data_stale=False,
-    )
+    # Step 1-5：统一走 _run_single_market（含陈旧检测 + Gemini + summary）
+    summary_path = await _run_single_market(lookback, scan_only, list_mode, market_label, filename)
 
     elapsed = (datetime.now() - t0).seconds
     logger.info("=" * 60)
     logger.info(f"  流水线完成 — 总耗时 {elapsed}s")
-    logger.info(f"  信号数：{len(signals)}")
-    logger.info(f"  Gemini：{'完成' if gemini_path else '跳过'}")
     logger.info(f"  摘要：{summary_path}")
     logger.info("=" * 60)
 

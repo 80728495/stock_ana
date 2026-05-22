@@ -160,7 +160,7 @@ async def _init_client(model: str = DEFAULT_MODEL):
         except ImportError:
             return False
 
-    for attempt in range(4):  # 最多重试 3 次（等 Chrome flush 3 次机会）
+    for attempt in range(5):  # 最多重试 4 次（给 Chrome flush 和网络恢复更多机会）
         try:
             client = GeminiClient(
                 secure_1psid=psid or None,
@@ -171,7 +171,7 @@ async def _init_client(model: str = DEFAULT_MODEL):
             return client
         except Exception as _exc:
             if _is_network_error(_exc):
-                if attempt >= 2:
+                if attempt >= 3:
                     raise
                 wait = 30 * (attempt + 1)
                 logger.warning(
@@ -183,12 +183,12 @@ async def _init_client(model: str = DEFAULT_MODEL):
             if not _is_cookie_error(_exc):
                 raise
             # Mac 下 Cookie 从不过期（用户持续登录），直接抛出
-            if sys.platform != "win32" or attempt >= 2:
+            if sys.platform != "win32" or attempt >= 3:
                 raise
             # Windows：PSIDTS 已被 Google 服务端轮换 → 打开 Chrome 刷新后重读
             logger.warning(
                 f"Gemini Cookie 已过期（第{attempt+1}次尝试），"
-                "正在自动打开 Chrome 刷新 Gemini 登录态，请稍候 35 秒..."
+                "正在自动打开 Chrome 刷新 Gemini 登录态，请稍候 55 秒..."
             )
             import subprocess
             _chrome_paths = [
@@ -199,7 +199,7 @@ async def _init_client(model: str = DEFAULT_MODEL):
                 if Path(_p).exists():
                     subprocess.Popen([_p, "https://gemini.google.com/app"])
                     break
-            await asyncio.sleep(35)          # 等 Chrome 将新 Cookie 写入 SQLite
+            await asyncio.sleep(55)          # 等 Chrome 将新 Cookie 写入 SQLite（55s 比原 35s 更稳定）
             psid, psidts = await _read_cookies()
             psidts = await _try_rotate(psid, psidts)
             logger.info("已重新读取 Cookie，准备重试初始化...")

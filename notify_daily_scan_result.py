@@ -372,7 +372,52 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="数据未更新场景：只发飞书数据未更新通知，跳过所有扫描通知",
     )
+    parser.add_argument(
+        "--send-combined-email",
+        action="store_true",
+        help="汇总所有市场 PDF 发送一封合并邮件（各市场飞书已单独发送，此步仅做邮件合并）",
+    )
     return parser.parse_args()
+
+
+def _build_pdf_for_summary(summary: dict) -> bytes | None:
+    """为一个市场的 summary 生成 PDF bytes，仅在 has_gemini_analysis=True 时有效。"""
+    market_label = summary.get("market_label") or "每日扫描"
+    scan_date_str = summary.get("scan_date", date.today().isoformat())
+    signals_found = summary.get("signals_found", 0)
+    signals = summary.get("signals", [])
+    report_path_raw = summary.get("gemini_report_path")
+
+    chart_paths: list[Path] = []
+    chart_labels: list[str] = []
+    for s in signals:
+        cp = Path(s.get("chart_path", ""))
+        if cp.exists():
+            chart_paths.append(cp)
+            chart_labels.append(f"{s.get('symbol','')} ({s.get('name','')})")
+
+    title = f"📊 {market_label} {scan_date_str}（{signals_found} 只信号）"
+    md_content = ""
+    if report_path_raw:
+        rp = Path(report_path_raw)
+        if rp.exists():
+            md_content = rp.read_text(encoding="utf-8")
+
+    if not md_content:
+        return None
+
+    try:
+        from stock_ana.utils.pdf_builder import build_scan_pdf
+        return build_scan_pdf(
+            md_content=md_content,
+            chart_paths=chart_paths,
+            signal_labels=chart_labels,
+            title=title,
+            signals=signals,
+        )
+    except Exception as e:
+        print(f"⚠️ PDF 生成失败 ({market_label}): {e}")
+        return None
 
 
 def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: int = 0, no_email: bool = False) -> bool:
@@ -413,20 +458,21 @@ def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: in
     sig_text = _format_signals_text(signals)
     head_text = f"扫描：{total_scanned} 只  |  信号：{signals_found} 只"
 
-    # ── 分支 B：Gemini 失败 → 飞书摘要 + 逐张图片，不发 PDF 不发邮件 ──
+    # ── 分支 B：Gemini 失败 → 飞书一条消息（摘要 + 所有图表），不发 PDF 不发邮件 ──
     if not has_gemini:
         summary_text = head_text + "  |  Gemini：未完成\n\n" + sig_text
-        if not send_post_message(token, title, [[{"tag": "text", "text": summary_text}]]):
-            print(f"❌ 扫描消息发送失败（{title}）")
-            ok = False
-
+        # 先上传所有图表，收集 image_key
+        img_blocks: list[list[dict]] = []
         for cp, label in zip(chart_paths, chart_labels):
             image_key = upload_chart_to_feishu(token, cp)
             if image_key:
-                send_post_message(
-                    token, label,
-                    [[{"tag": "text", "text": label}], [{"tag": "img", "image_key": image_key}]],
-                )
+                img_blocks.append([{"tag": "text", "text": label}])
+                img_blocks.append([{"tag": "img", "image_key": image_key}])
+        # 摘要 + 图表合并为一条消息
+        all_blocks = [[{"tag": "text", "text": summary_text}]] + img_blocks
+        if not send_post_message(token, title, all_blocks):
+            print(f"❌ 扫描消息发送失败（{title}）")
+            ok = False
         return ok
 
     # ── 分支 C：Gemini 成功 → 直接发 PDF（飞书 + 邮件），不发文字卡 ──────
@@ -504,6 +550,39 @@ def main() -> int:
         return 1
 
     ok = True
+
+    # ── --send-combined-email：三市场合并邮件（各市场飞书已单独发完，只发邮件）────
+    if getattr(args, "send_combined_email", False):
+        summary_us_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_us.json")
+        summary_hk_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_hk.json")
+        summary_cn_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_cn.json")
+        pdfs: list[tuple[bytes, str]] = []
+        for mkt, path in [("us", summary_us_path), ("hk", summary_hk_path), ("cn", summary_cn_path)]:
+            summary = _read_json(path) if path else None
+            if not summary or not summary.get("has_gemini_analysis"):
+                print(f"⚠️ {mkt} 无 Gemini 分析，跳过 PDF")
+                continue
+            pdf_bytes = _build_pdf_for_summary(summary)
+            if pdf_bytes:
+                scan_date_str = summary.get("scan_date", date.today().isoformat())
+                pdfs.append((pdf_bytes, f"scan_{mkt}_{scan_date_str}.pdf"))
+        if pdfs:
+            from stock_ana.utils.email_sender import send_pdf_attachments
+            today_str = date.today().isoformat()
+            email_sent = send_pdf_attachments(
+                subject=f"📊 每日扫描综合报告 {today_str}（{len(pdfs)} 份）",
+                pdfs=pdfs,
+                to=["99772120@qq.com", "80728495@qq.com", "185182@qq.com"],
+            )
+            if email_sent:
+                print(f"✅ 合并邮件已发送，共 {len(pdfs)} 份 PDF")
+                return 0
+            else:
+                print("⚠️ 合并邮件发送失败")
+                return 1
+        else:
+            print("⚠️ 无可用 PDF（所有市场 Gemini 均未完成），跳过邮件")
+            return 0
 
     # ── --no-new-data：今日缓存无更新，直接发通知后退出，不发扫描结果 ──
     if getattr(args, "no_new_data", False):

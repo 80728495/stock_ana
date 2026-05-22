@@ -183,6 +183,60 @@ def send_report_with_charts(
         return False
 
 
+def send_pdf_attachments(
+    subject: str,
+    pdfs: list[tuple[bytes, str]],
+    to: list[str] | None = None,
+    sender_name: str = "Stock-Ana",
+) -> bool:
+    """
+    将多个 PDF 作为附件合并到一封邮件发送。
+
+    Args:
+        subject: 邮件主题
+        pdfs:    [(pdf_bytes, filename), ...] 每个市场一份 PDF
+        to:      收件人列表，默认发给 DEFAULT_TO
+    """
+    import smtplib
+    from email.mime.application import MIMEApplication
+
+    recipients = to or [DEFAULT_TO]
+    try:
+        password = _get_password()
+    except RuntimeError as e:
+        logger.error(f"邮件发送失败（密码读取）: {e}")
+        return False
+
+    msg = MIMEMultipart("mixed")
+    msg["Subject"] = subject
+    msg["From"] = f"{sender_name} <{SMTP_USER}>"
+    msg["To"] = ", ".join(recipients)
+
+    alt = MIMEMultipart("alternative")
+    body = f"请查收附件中的每日扫描报告（共 {len(pdfs)} 份）。"
+    alt.attach(MIMEText(body, "plain", "utf-8"))
+    alt.attach(MIMEText(f"<p>{body}</p>", "html", "utf-8"))
+    msg.attach(alt)
+
+    for pdf_bytes, filename in pdfs:
+        attach = MIMEApplication(pdf_bytes, _subtype="pdf")
+        attach.add_header("Content-Disposition", "attachment", filename=filename)
+        msg.attach(attach)
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SMTP_USER, password)
+            server.sendmail(SMTP_USER, recipients, msg.as_bytes())
+        logger.success(f"合并邮件已发送（{len(pdfs)} 份 PDF）：{subject} → {recipients}")
+        return True
+    except Exception as e:
+        logger.error(f"合并邮件发送失败: {e}")
+        return False
+
+
 def send_markdown_email(
     subject: str,
     md_content: str,

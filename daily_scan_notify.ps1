@@ -8,6 +8,7 @@ $PythonBin  = Join-Path $ProjectDir ".venv\Scripts\python.exe"
 $StampFile  = Join-Path $ProjectDir "data\logs\.last_scan_stamp"
 $CacheUs    = Join-Path $ProjectDir "data\cache\us"
 $CacheHk    = Join-Path $ProjectDir "data\cache\hk"
+$CacheCn    = Join-Path $ProjectDir "data\cache\cn"
 
 Set-Location $ProjectDir
 
@@ -15,7 +16,7 @@ Set-Location $ProjectDir
 if (Test-Path $StampFile) {
     $stampTime = (Get-Item $StampFile).LastWriteTime
     $hasNew = $false
-    foreach ($dir in @($CacheUs, $CacheHk)) {
+    foreach ($dir in @($CacheUs, $CacheHk, $CacheCn)) {
         if (Test-Path $dir) {
             $newer = Get-ChildItem -Path $dir -Filter "*.parquet" -Recurse -ErrorAction SilentlyContinue |
                      Where-Object { $_.LastWriteTime -gt $stampTime } |
@@ -57,7 +58,7 @@ $logDir = Join-Path $ProjectDir "data\logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 
 # 1) Watchlist Vegas touch scan (Mid + Long) — 不依赖 Gemini，最先运行，完成即推送飞书
-Write-Host "[daily-scan] Step 1/3: Watchlist Vegas scan..."
+Write-Host "[daily-scan] Step 1/4: Watchlist Vegas scan..."
 try {
     & $PythonBin watchlist_vegas_scan.py
 } catch {
@@ -65,7 +66,7 @@ try {
 }
 
 # 2) 美股 scan + Gemini → 完成后立即发飞书（含每日数据更新状态）
-Write-Host "[daily-scan] Step 2/3: US scan + Gemini..."
+Write-Host "[daily-scan] Step 2/4: US scan + Gemini..."
 $usScanExit = 0
 try {
     & $PythonBin vegas_mid_daily_scan.py --list tech
@@ -74,10 +75,10 @@ try {
     $usScanExit = 1
     Write-Host "[daily-scan] US scan error: $_"
 }
-& $PythonBin notify_daily_scan_result.py --market us --scan-exit-code $usScanExit
+& $PythonBin notify_daily_scan_result.py --market us --scan-exit-code $usScanExit --no-email
 
 # 3) 港股 scan + Gemini → 完成后立即发飞书（跳过重复的数据更新状态）
-Write-Host "[daily-scan] Step 3/3: HK scan + Gemini..."
+Write-Host "[daily-scan] Step 3/4: HK scan + Gemini..."
 $hkScanExit = 0
 try {
     & $PythonBin vegas_mid_daily_scan.py --list hk
@@ -86,12 +87,28 @@ try {
     $hkScanExit = 1
     Write-Host "[daily-scan] HK scan error: $_"
 }
-& $PythonBin notify_daily_scan_result.py --market hk --skip-update
+& $PythonBin notify_daily_scan_result.py --market hk --skip-update --no-email --scan-exit-code $hkScanExit
 
-# 4) Update timestamp
+# 4) A股高新技术 scan + Gemini → 完成后立即发飞书
+Write-Host "[daily-scan] Step 4/4: CN scan + Gemini..."
+$cnScanExit = 0
+try {
+    & $PythonBin vegas_mid_daily_scan.py --list cn_hightech
+    $cnScanExit = $LASTEXITCODE
+} catch {
+    $cnScanExit = 1
+    Write-Host "[daily-scan] CN scan error: $_"
+}
+& $PythonBin notify_daily_scan_result.py --market cn --skip-update --no-email --scan-exit-code $cnScanExit
+
+# 5) 三市场合并邮件（各市场飞书已单独发完，此处只发一封合并 PDF 邮件）
+Write-Host "[daily-scan] Step 5: 发送合并邮件..."
+& $PythonBin notify_daily_scan_result.py --send-combined-email
+
+# 6) Update timestamp
 Set-Content -Path $StampFile -Value (Get-Date -Format "o") -Encoding ASCII
 
 # 整体退出码：任一非零则返回非零
-$scanExit = if ($usScanExit -ne 0) { $usScanExit } elseif ($hkScanExit -ne 0) { $hkScanExit } else { 0 }
+$scanExit = if ($usScanExit -ne 0) { $usScanExit } elseif ($hkScanExit -ne 0) { $hkScanExit } elseif ($cnScanExit -ne 0) { $cnScanExit } else { 0 }
 exit $scanExit
 
