@@ -178,13 +178,15 @@ def _plot_smc_ob(
         is_broken = (
             pd.notna(row.get("MitigatedIndex")) and row["MitigatedIndex"] != 0
         )
-        # 颜色：未消除=不透明, 已消除=半透明
+        # 已消除的 OB 不画（避免干扰视线）
+        if is_broken:
+            continue
         if is_bull:
-            fc = "#00880020" if is_broken else "#00880050"
+            fc = "#00880050"
             ec = "#006600"
             bull_count += 1
         else:
-            fc = "#CC000020" if is_broken else "#CC000050"
+            fc = "#CC000050"
             ec = "#880000"
             bear_count += 1
 
@@ -199,15 +201,14 @@ def _plot_smc_ob(
         )
         ax.add_patch(rect)
 
-        # 价格标注（只标未消除的）
-        if not is_broken:
-            label = f"{'↑OB' if is_bull else '↓OB'} {top:.2f}/{bot:.2f}"
-            ax.text(
-                n + 0.5, (top + bot) / 2,
-                label,
-                fontsize=6.5, va="center", ha="left",
-                color=ec, clip_on=False,
-            )
+        # 价格标注
+        label = f"{'↑OB' if is_bull else '↓OB'} {top:.2f}/{bot:.2f}"
+        ax.text(
+            n + 0.5, (top + bot) / 2,
+            label,
+            fontsize=6.5, va="center", ha="left",
+            color=ec, clip_on=False,
+        )
 
     # ── 当前价水平线 ─────────────────────────────────────────────────────────
     ax.axhline(close_last, color="#888888", linewidth=0.8,
@@ -267,7 +268,29 @@ def main() -> None:
     targets = HOLDINGS
     if args.symbols:
         sym_set = {s.upper() for s in args.symbols}
-        targets = [h for h in HOLDINGS if h[0].upper() in sym_set or h[0] in sym_set]
+        targets = [h for h in HOLDINGS if h[0].upper() in sym_set]
+        # 未在 HOLDINGS 中的符号 → 自动从 cache 目录探测市场
+        found_syms = {t[0].upper() for t in targets}
+        for raw_sym in args.symbols:
+            sym = raw_sym.upper()
+            if sym in found_syms:
+                continue
+            detected: tuple[str, str, str] | None = None
+            for mkt in ("us", "hk", "cn"):
+                p = CACHE_DIR / mkt / f"{raw_sym}.parquet"
+                if not p.exists() and mkt == "hk":
+                    # HK 代码可能需要补零
+                    p = CACHE_DIR / mkt / f"{raw_sym.zfill(5)}.parquet"
+                    if p.exists():
+                        detected = (raw_sym.zfill(5), mkt, raw_sym.zfill(5))
+                        break
+                if p.exists():
+                    detected = (raw_sym, mkt, raw_sym)
+                    break
+            if detected:
+                targets.append(detected)
+            else:
+                logger.warning(f"找不到缓存，跳过: {raw_sym}")
         if not targets:
             logger.error(f"未找到指定股票: {args.symbols}")
             sys.exit(1)

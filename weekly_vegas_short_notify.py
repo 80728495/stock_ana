@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import subprocess
 import sys
@@ -56,6 +57,41 @@ BATCH_DELAY = 180  # 批次间等待秒数
 
 W_SCAN_OUT_DIR     = PROJECT_ROOT / "data" / "output" / "w_vegas_scan"
 ANALYSIS_OUT_DIR   = PROJECT_ROOT / "data" / "output" / "scan_analysis"
+SEND_GUARD_PATH    = LOG_DIR / ".w_vegas_last_sent.json"
+
+
+def _build_send_fingerprint(signals: list[dict], list_mode: str, lookback: int) -> str:
+    """Build a stable fingerprint to avoid duplicate sends in the same day."""
+    key_parts = [f"list={list_mode}", f"lookback={lookback}"]
+    for s in sorted(signals, key=lambda x: (x.get("symbol", ""), x.get("entry_date", ""), x.get("signal", ""))):
+        key_parts.append(
+            "|".join(
+                [
+                    str(s.get("symbol", "")),
+                    str(s.get("entry_date", "")).split("(")[0],
+                    str(s.get("signal", "")),
+                    str(s.get("score", "")),
+                    str(s.get("support_band", "")),
+                ]
+            )
+        )
+    return hashlib.sha256("\n".join(key_parts).encode("utf-8")).hexdigest()
+
+
+def _load_send_guard() -> dict:
+    if not SEND_GUARD_PATH.exists():
+        return {}
+    try:
+        return json.loads(SEND_GUARD_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_send_guard(payload: dict) -> None:
+    SEND_GUARD_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -266,6 +302,7 @@ async def main_async(
     scan_only: bool = False,
     list_mode: str = "combined",
     skip_indicators: bool = False,
+    force_send: bool = False,
 ) -> None:
     t0    = datetime.now()
     today = date.today().isoformat()
@@ -376,8 +413,27 @@ async def main_async(
         except Exception as e:
             logger.error(f"Gemini 分析整体失败: {e}")
 
+    # 统一产出可用于 PDF 的 markdown 报告（即使 Gemini 未执行/失败）
+    if report_path is None:
+        out_dir = ANALYSIS_OUT_DIR / today
+        if scan_only:
+            gemini_text = "## 说明\n\n本次以 --scan-only 模式运行，未执行 Gemini 解读。"
+        elif not new_signals:
+            gemini_text = "## 说明\n\n本次信号均已在关注列表中，按规则跳过 Gemini 解读。"
+        elif not gemini_text.strip():
+            gemini_text = "## 说明\n\nGemini 解读执行失败，请查看日志获取错误详情。"
+        report_path = save_weekly_report(signals, gemini_text, out_dir)
+
     # ── Step 3: 生成 PDF + 发飞书 ────────────────────────────────────────────
     logger.info("【3/3】生成 PDF + 发送飞书")
+
+    fingerprint = _build_send_fingerprint(signals, list_mode, lookback)
+    guard = _load_send_guard()
+    last_date = str(guard.get("date", ""))
+    last_fp = str(guard.get("fingerprint", ""))
+    if (not force_send) and last_date == today and last_fp == fingerprint:
+        logger.warning("检测到当日同一批信号已发送，跳过重复发送（可用 --force-send 强制重发）")
+        return
 
     token = get_tenant_token()
     if not token:
@@ -388,15 +444,9 @@ async def main_async(
     md_content = ""
     if report_path and report_path.exists():
         md_content = report_path.read_text(encoding="utf-8")
-
-    # 如果没有 Gemini 文本（scan_only 或全部失败），发文字卡 + 图表列表
     if not md_content.strip():
-        sig_lines = [f"• {s.get('signal')} {s.get('symbol')} {s.get('name','')} "
-                     f"@ {s.get('entry_date','').split('(')[0]} [{s.get('support_band','')}]"
-                     for s in signals]
-        body = "\n".join(sig_lines)
-        send_post_message(token, title, [[{"tag": "text", "text": body}]])
-        logger.info("已发飞书文字卡（无 Gemini 分析）")
+        logger.error("未生成有效周线报告，回退发送文字错误通知")
+        send_post_message(token, title, [[{"tag": "text", "text": "周线报告为空，未能生成 PDF，请检查日志。"}]])
         return
 
     # 生成 PDF
@@ -423,6 +473,16 @@ async def main_async(
         file_key = upload_report_file(token, tmp_path)
         if file_key and send_file_message(token, file_key):
             logger.success(f"✅ 飞书 PDF 已发送：{title}")
+            _save_send_guard(
+                {
+                    "date": today,
+                    "fingerprint": fingerprint,
+                    "list_mode": list_mode,
+                    "lookback": lookback,
+                    "signals_count": len(signals),
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            )
         else:
             logger.error("飞书 PDF 上传或发送失败")
             # fallback：发文字通知
@@ -446,12 +506,15 @@ def main() -> None:
                         help="扫描标的列表（默认 combined = US tech + HK techman）")
     parser.add_argument("--skip-indicators", action="store_true",
                         help="跳过周线指标刷新（当日已刷新过时使用）")
+    parser.add_argument("--force-send", action="store_true",
+                        help="忽略去重保护，强制再次发送飞书 PDF")
     args = parser.parse_args()
     asyncio.run(main_async(
         lookback=args.lookback,
         scan_only=args.scan_only,
         list_mode=args.list_mode,
         skip_indicators=args.skip_indicators,
+        force_send=args.force_send,
     ))
 
 

@@ -200,6 +200,102 @@ def update_indicators() -> dict:
         return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e)}
 
 
+def update_smc_ob() -> dict:
+    """Step 5b：更新富途自选股的 SMC Order Block 增量状态，事件落盘供通知读取。
+
+    每次运行后将结果写入:
+        data/output/smc_ob_scan/{date}_futu_events.json
+    """
+    logger.info("=" * 60)
+    logger.info("【5b】SMC OB 富途自选股增量更新 ...")
+    logger.info("=" * 60)
+    t0 = time.time()
+    try:
+        from stock_ana.config import CACHE_DIR, DATA_DIR
+        from stock_ana.scan.smc_ob_tracker import run_daily
+
+        # ── 解析 futu_watchlist.md（同 scripts/daily_smc_scan.py 逻辑）──────
+        futu_path = DATA_DIR / "lists" / "futu_watchlist.md"
+        watchlist: dict = {}
+        if not futu_path.exists():
+            logger.warning("futu_watchlist.md 不存在，跳过 SMC OB 更新")
+            return {"ok": False, "error": "futu_watchlist.md not found"}
+
+        cur_market: str | None = None
+        with open(futu_path, encoding="utf-8") as f:
+            for line in f:
+                l = line.strip()
+                if "## 港股" in l:
+                    cur_market = "HK"
+                elif "## 美股" in l:
+                    cur_market = "US"
+                elif "## 大A" in l:
+                    cur_market = "CN"
+                elif l.startswith("|") and cur_market:
+                    parts = [p.strip() for p in l.strip("|").split("|")]
+                    if len(parts) < 2 or parts[0] in ("代码", "---", ""):
+                        continue
+                    sym = parts[0].strip()
+                    name = parts[1].strip() if len(parts) > 1 else sym
+                    if not sym or sym.startswith("-"):
+                        continue
+                    p = CACHE_DIR / cur_market.lower() / f"{sym}.parquet"
+                    if not p.exists():
+                        if cur_market == "US":
+                            p2 = CACHE_DIR / "ndx100" / f"{sym}.parquet"
+                            if p2.exists():
+                                watchlist[sym] = (cur_market, name, None, "")
+                                continue
+                        continue
+                    watchlist[sym] = (cur_market, name, None, "")
+
+        if not watchlist:
+            logger.warning("futu_watchlist 解析后为空，跳过 SMC OB 更新")
+            return {"ok": False, "error": "watchlist empty"}
+
+        logger.info(f"  SMC OB 扫描: {len(watchlist)} 只股票")
+
+        # ── 增量扫描 ───────────────────────────────────────────────────────
+        results = run_daily(watchlist=watchlist, swing_length=5, close_mitigation=False)
+        all_events = [e for evts in results.values() for e in evts]
+        new_ob    = [e for e in all_events if e["event"] == "new_ob"]
+        mitigated = [e for e in all_events if e["event"] == "mitigated"]
+        touched   = [e for e in all_events if e["event"] == "touched"]
+
+        # ── 落盘 JSON ──────────────────────────────────────────────────────
+        today_str = date.today().isoformat()
+        out_dir = PROJECT_ROOT / "data" / "output" / "smc_ob_scan"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{today_str}_futu_events.json"
+        payload = {
+            "date":      today_str,
+            "list_mode": "futu",
+            "total":     len(all_events),
+            "new_ob":    new_ob,
+            "mitigated": mitigated,
+            "touched":   touched,
+        }
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+
+        elapsed = time.time() - t0
+        logger.success(
+            f"✅ SMC OB 更新完成 ({elapsed:.0f}s): "
+            f"新OB={len(new_ob)}  消除={len(mitigated)}  触碰={len(touched)}"
+        )
+        return {
+            "ok":         True,
+            "elapsed":    round(elapsed),
+            "new_ob":     len(new_ob),
+            "mitigated":  len(mitigated),
+            "touched":    len(touched),
+            "total":      len(all_events),
+        }
+    except Exception as e:
+        logger.error(f"❌ SMC OB 更新失败: {e}")
+        return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e)}
+
+
 def update_waves() -> dict:
     """
     更新全量 US + HK 股票的 Wave 结构（大浪/子浪）。
@@ -351,13 +447,14 @@ def main():
     parser.add_argument("--cn-hightech", action="store_true", help="仅更新A股高新技术列表 OHLCV")
     parser.add_argument("--indicators", action="store_true", help="仅更新技术指标")
     parser.add_argument("--waves",      action="store_true", help="仅更新 Wave 结构（全量 US+HK）")
+    parser.add_argument("--smc",        action="store_true", help="仅更新 SMC OB 增量状态（富途自选股）")
     parser.add_argument("--lists",      action="store_true", help="仅同步 MD 列表文件")
     args = parser.parse_args()
 
     # 若无任何参数，执行全流程（含 Futu 同步）
     run_all = not any([args.futu, args.us, args.ndx, args.hk, args.cn,
                        getattr(args, "cn_hightech", False),
-                       args.indicators, args.waves, args.lists])
+                       args.indicators, args.waves, args.smc, args.lists])
 
     logger.info(f"{'=' * 60}")
     logger.info(f"  每日数据更新 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -388,7 +485,9 @@ def main():
     if run_all or args.cn:
         results["A股OHLCV"] = update_cn()
 
-    if run_all or getattr(args, "cn_hightech", False):
+    # 兜底：A股扫描使用 cn_hightech_list.md，若只传 --cn 也应刷新该列表缓存
+    # 以避免任务计划参数漏配导致扫描池长期不更新。
+    if run_all or args.cn or getattr(args, "cn_hightech", False):
         results["A股高新技术OHLCV"] = update_cn_hightech()
 
     # ── Step 4：技术指标 ──
@@ -398,6 +497,10 @@ def main():
     # ── Step 5：Wave 结构 ──
     if run_all or args.waves:
         results["Wave结构"] = update_waves()
+
+    # ── Step 5b：SMC OB 增量更新 ──
+    if run_all or args.smc:
+        results["SMC OB"] = update_smc_ob()
 
     # ── 列表同步（需显式指定 --lists）──
     if args.lists:

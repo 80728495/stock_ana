@@ -101,8 +101,16 @@ try {
 }
 & $PythonBin notify_daily_scan_result.py --market cn --skip-update --no-email --scan-exit-code $cnScanExit
 
-# 5) 三市场合并邮件（各市场飞书已单独发完，此处只发一封合并 PDF 邮件）
-Write-Host "[daily-scan] Step 5: 发送合并邮件..."
+# 5) SMC OB 飞书通知（有事件才发）
+Write-Host "[daily-scan] Step 5/6: SMC OB 飞书通知..."
+try {
+    & $PythonBin notify_smc_ob.py
+} catch {
+    Write-Host "[daily-scan] notify_smc_ob error: $_"
+}
+
+# 6) 三市场合并邮件（各市场飞书已单独发完，此处只发一封合并 PDF 邮件）
+Write-Host "[daily-scan] Step 6/6: 发送合并邮件..."
 & $PythonBin notify_daily_scan_result.py --send-combined-email
 
 # 6) Update timestamp

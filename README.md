@@ -166,6 +166,7 @@ python3 notify_daily_scan_result.py --scan-exit-code "$SCAN_EXIT"
 
 ```bash
 bash cron_weekly_sector_notify.sh
+bash cron_weekly_vegas_short_notify.sh
 ```
 
 cron 实际执行顺序：
@@ -173,6 +174,12 @@ cron 实际执行顺序：
 1. `cron_weekly_sector_notify.sh`
 2. `python3 -m stock_ana.workflows.weekly_sector_report`
 3. `python3 notify_weekly_sector_report.py --workflow-exit-code <WORKFLOW_EXIT>`
+
+周线 Short Vegas（含 Gemini + PDF + 飞书）执行顺序：
+
+1. `cron_weekly_vegas_short_notify.sh`
+2. `python3 weekly_vegas_short_notify.py --list combined --lookback 1`
+3. `weekly_vegas_short_notify.py` 内部完成：周线指标刷新 → 周线 short vegas 扫描 → Gemini 批量分析 → PDF 生成 → 飞书发送
 
 手工复现命令：
 
@@ -183,6 +190,16 @@ python3 -m stock_ana.workflows.weekly_sector_report
 # Step B: 推送周报结果（透传 workflow 退出码）
 WORKFLOW_EXIT=$?
 python3 notify_weekly_sector_report.py --workflow-exit-code "$WORKFLOW_EXIT"
+
+# Step C: 周线 Short Vegas 全流程（周线数据刷新 + 扫描 + Gemini + PDF + 飞书）
+python3 weekly_vegas_short_notify.py --list combined --lookback 1
+```
+
+Windows 任务计划（每周六）示例：
+
+```powershell
+# 每周六 10:00 运行周线 short vegas 全流程（与 09:30 的 WeeklySector 错开半小时）
+schtasks /create /tn "StockAna_WeeklyVegasShort" /tr "powershell -ExecutionPolicy Bypass -File C:\path\to\stock_ana\weekly_vegas_short_notify.ps1" /sc weekly /d SAT /st 10:00 /f
 ```
 
 ## 2) 策略说明（不含流程）
@@ -332,8 +349,10 @@ stock_ana/
 ├── cron_daily_update.sh
 ├── cron_daily_scan_notify.sh
 ├── cron_weekly_sector_notify.sh
+├── cron_weekly_vegas_short_notify.sh
 ├── notify_daily_scan_result.py
 ├── notify_weekly_sector_report.py
+├── weekly_vegas_short_notify.py
 ├── scripts/
 │   ├── check_legacy_wrapper_imports.py
 │   └── check_strategy_layer_boundaries.py
