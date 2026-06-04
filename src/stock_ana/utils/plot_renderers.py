@@ -8,6 +8,7 @@ project uses a consistent CJK-capable font stack without per-call repetition.
 
 from __future__ import annotations
 
+import os
 import sys
 import warnings
 from functools import lru_cache
@@ -15,8 +16,8 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.colors as mcolors
 import matplotlib.dates as mdates
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 import mplfinance as mpf
@@ -65,6 +66,21 @@ _EMA_COLORS = {
     "EMA200": "#E64A19",
 }
 
+_SMC_BULL_TIERS = [
+    (70, "#00640066", "#004400"),
+    (50, "#0099005C", "#006600"),
+    (30, "#66BB6A52", "#338833"),
+    (0, "#A5D6A74A", "#558855"),
+]
+_SMC_BEAR_TIERS = [
+    (70, "#B71C1C66", "#880000"),
+    (50, "#E539355C", "#AA0000"),
+    (30, "#EF9A9A52", "#883333"),
+    (0, "#FFCDD24A", "#885555"),
+]
+_SMC_MITIGATED_FC = "#CCCCCC2A"
+_SMC_MITIGATED_EC = "#999999"
+
 # CJK font probe (runtime, cached) — mirrors the platform priority above
 if sys.platform == "win32":
     _CJK_FONTS = ["Microsoft YaHei", "SimHei", "Arial Unicode MS"]
@@ -83,6 +99,178 @@ def _find_cjk_font() -> str | None:
         if f in available:
             return f
     return None
+
+
+def _smc_tier_colors(score: float, is_bull: bool) -> tuple[str, str]:
+    tiers = _SMC_BULL_TIERS if is_bull else _SMC_BEAR_TIERS
+    for min_score, facecolor, edgecolor in tiers:
+        if score >= min_score:
+            return facecolor, edgecolor
+    return tiers[-1][1], tiers[-1][2]
+
+
+def _apply_smc_zone_scores(obs: list[dict]) -> None:
+    """Add zone_score to active, same-direction overlapping SMC OBs."""
+    for direction in (1, -1):
+        active = [
+            o for o in obs
+            if o["direction"] == direction and not o["is_mitigated"]
+        ]
+        if not active:
+            continue
+        active.sort(key=lambda o: o["bottom"])
+
+        zones: list[list[dict]] = []
+        cur_zone = [active[0]]
+        cur_top = active[0]["top"]
+        for ob in active[1:]:
+            if ob["bottom"] <= cur_top:
+                cur_zone.append(ob)
+                cur_top = max(cur_top, ob["top"])
+            else:
+                zones.append(cur_zone)
+                cur_zone = [ob]
+                cur_top = ob["top"]
+        zones.append(cur_zone)
+
+        for zone in zones:
+            total = round(sum(float(o.get("score", 0)) for o in zone), 1)
+            for ob in zone:
+                ob["zone_score"] = total
+
+    for ob in obs:
+        ob.setdefault("zone_score", ob.get("score", 0))
+
+
+def _compute_smc_scored_obs(df: pd.DataFrame, swing_length: int = 5) -> list[dict]:
+    """Compute causal SMC OBs for chart overlays.
+
+    The overlay is intentionally computed from the same price frame being
+    plotted, so Vegas scan charts can show the latest SMC context without
+    depending on separately pre-rendered images.
+    """
+    os.environ.setdefault("SMC_CREDIT", "0")
+    from smartmoneyconcepts import smc as upstream_smc  # noqa: PLC0415
+
+    from stock_ana.strategies.impl.smc import _ob_causal, ob_quality_rating  # noqa: PLC0415
+
+    swing_hl = upstream_smc.swing_highs_lows(df, swing_length=swing_length)
+    ob_df = _ob_causal(df, swing_hl, swing_length=swing_length)
+
+    obs: list[dict] = []
+    for bar_idx in range(len(ob_df)):
+        row = ob_df.iloc[bar_idx]
+        if pd.isna(row.get("OB")) or row["OB"] == 0:
+            continue
+
+        mit_idx = row["MitigatedIndex"]
+        is_mitigated = pd.notna(mit_idx) and int(mit_idx) != 0
+        mitigated_bar = int(mit_idx) if is_mitigated else None
+        score, _detail = ob_quality_rating(df, ob_df, bar_idx)
+
+        ts = df.index[bar_idx]
+        obs.append({
+            "bar_idx": bar_idx,
+            "direction": int(row["OB"]),
+            "top": float(row["Top"]),
+            "bottom": float(row["Bottom"]),
+            "formed_date": str(ts.date()) if hasattr(ts, "date") else str(ts),
+            "score": float(score),
+            "is_mitigated": is_mitigated,
+            "mitigated_bar": mitigated_bar,
+        })
+
+    _apply_smc_zone_scores(obs)
+    return obs
+
+
+def _add_smc_ob_overlays(
+    ax: plt.Axes,
+    df_full: pd.DataFrame,
+    df_view: pd.DataFrame,
+    view_start: int,
+    *,
+    swing_length: int = 5,
+) -> tuple[int, int]:
+    """Overlay SMC OB score zones on a mplfinance price axis.
+
+    Returns:
+        (active_count, mitigated_count) visible inside the current chart window.
+    """
+    try:
+        all_obs = _compute_smc_scored_obs(df_full, swing_length=swing_length)
+    except Exception as exc:
+        logger.debug(f"SMC OB overlay skipped: {exc}")
+        return 0, 0
+
+    n_total = len(df_full)
+    n_view = len(df_view)
+    active_count = 0
+    mitigated_count = 0
+
+    for ob in all_obs:
+        ob_start = int(ob["bar_idx"])
+        if ob["is_mitigated"] and ob["mitigated_bar"] is not None:
+            ob_end = int(ob["mitigated_bar"])
+        else:
+            ob_end = n_total - 1
+        if ob_end < view_start or ob_start >= view_start + n_view:
+            continue
+
+        is_bull = ob["direction"] == 1
+        score = float(ob.get("score", 0))
+        zone_score = float(ob.get("zone_score", score))
+        top = float(ob["top"])
+        bottom = float(ob["bottom"])
+
+        rect_start = max(ob_start - view_start, 0)
+        rect_end = min(ob_end - view_start, n_view)
+        rect_width = max(rect_end - rect_start, 1)
+
+        if ob["is_mitigated"]:
+            facecolor, edgecolor = _SMC_MITIGATED_FC, _SMC_MITIGATED_EC
+            linestyle = ":"
+            linewidth = 0.6
+            mitigated_count += 1
+        else:
+            facecolor, edgecolor = _smc_tier_colors(score, is_bull)
+            linestyle = "-"
+            linewidth = 1.0
+            active_count += 1
+
+        rect = mpatches.FancyBboxPatch(
+            (rect_start - 0.35, bottom),
+            rect_width + 0.7,
+            top - bottom,
+            boxstyle="round,pad=0",
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            zorder=0.5,
+        )
+        ax.add_patch(rect)
+
+        label_x = min(rect_start + rect_width + 0.2, n_view + 0.2)
+        label_y = (top + bottom) / 2
+        tag = "SMC↑" if is_bull else "SMC↓"
+        label = f"{tag}{score:.0f}"
+        if not ob["is_mitigated"] and zone_score > score + 0.5:
+            label += f" z={zone_score:.0f}"
+        ax.text(
+            label_x,
+            label_y,
+            label,
+            fontsize=6.2 if ob["is_mitigated"] else 7,
+            color=edgecolor,
+            fontweight="bold" if not ob["is_mitigated"] else "normal",
+            va="center",
+            ha="left",
+            clip_on=True,
+            zorder=1,
+        )
+
+    return active_count, mitigated_count
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -190,6 +378,13 @@ def plot_vegas_mid_scan_chart(
         scale_padding={"left": 0.05, "right": 0.38, "top": 0.6, "bottom": 0.5},
     )
     ax = axes[0]
+    smc_active_count, smc_mitigated_count = _add_smc_ob_overlays(
+        ax,
+        df_full=df,
+        df_view=df_view,
+        view_start=view_start,
+        swing_length=5,
+    )
 
     # ── Warmup boundary: gray line where detection becomes active ──────────
     # The detector skips the first 200 bars (EMA warm-up). Any signal whose
@@ -222,7 +417,8 @@ def plot_vegas_mid_scan_chart(
         fontsize=17, fontweight="bold", y=0.98, color=sig_color,
     )
     ax.set_title(
-        f"{signal_info['support_band']}  @ {signal_info['entry_date']}",
+        f"{signal_info['support_band']}  @ {signal_info['entry_date']}  |  "
+        f"SMC OB: {smc_active_count} active + {smc_mitigated_count} broken",
         fontsize=11, color="#555555", pad=4,
     )
 
@@ -320,6 +516,12 @@ def plot_vegas_mid_scan_chart(
         Line2D([0], [0], marker=style["marker"], color="w",
                markerfacecolor=style["color"], markeredgecolor=style["edge"],
                markersize=10, label=sig_type)
+    )
+    legend_elements.append(
+        mpatches.Patch(facecolor="#E539355C", edgecolor="#AA0000", label="SMC Bear OB")
+    )
+    legend_elements.append(
+        mpatches.Patch(facecolor="#0099005C", edgecolor="#006600", label="SMC Bull OB")
     )
     ax.legend(handles=legend_elements, loc="upper left", fontsize=8, framealpha=0.8)
 

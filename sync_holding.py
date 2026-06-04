@@ -2,7 +2,7 @@
 """sync_holding.py — 从 Futu OpenD 同步持仓、关注、观察到 holding.md
 
 生成 data/lists/holding.md，包含三个区段：
-  ## 持仓 (Holdings)  — 真实账户当前持仓（HK + US）
+  ## 持仓 (Holdings)  — 真实账户当前持仓（HK + US + CN）
   ## 关注 (Focus)     — Futu 自选股分组「关注」
   ## 观察 (Watch)     — Futu 自选股分组「观察」
 
@@ -18,6 +18,11 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 HOLDING_PATH = PROJECT_ROOT / "data" / "lists" / "holding.md"
@@ -73,7 +78,7 @@ def _fetch_market_positions(market, trd_env, security_firm) -> list[dict]:
 
 
 def fetch_holdings(use_sim: bool = False) -> list[dict]:
-    """获取 HK + US 市场所有持仓。"""
+    """获取 HK + US + CN 市场所有持仓。"""
     try:
         from futu import TrdMarket, TrdEnv, SecurityFirm  # type: ignore[import]
     except ImportError:
@@ -85,7 +90,7 @@ def fetch_holdings(use_sim: bool = False) -> list[dict]:
 
     seen: set[str] = set()
     holdings: list[dict] = []
-    for mkt in (TrdMarket.HK, TrdMarket.US):
+    for mkt in (TrdMarket.HK, TrdMarket.US, TrdMarket.CN):
         for r in _fetch_market_positions(mkt, trd_env, firm):
             key = f"{r['market']}:{r['symbol']}"
             if key not in seen:
@@ -179,8 +184,9 @@ def _build_watchgroup_section(title: str, subtitle: str, stocks: list[dict]) -> 
 def build_holding_md(
     holdings: list[dict],
     focus_stocks: list[dict],
-    watch_stocks: list[dict],
+    watch_stocks: list[dict] | None = None,
     use_sim: bool = False,
+    include_watch: bool = True,
 ) -> str:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     env_tag = "模拟账户" if use_sim else "真实账户"
@@ -192,10 +198,13 @@ def build_holding_md(
         _build_holdings_section(holdings),
         "",
         _build_watchgroup_section("关注 (Focus)", FOCUS_GROUP, focus_stocks),
-        "",
-        _build_watchgroup_section("观察 (Watch)", WATCH_GROUP, watch_stocks),
-        "",
     ]
+    if include_watch:
+        parts += [
+            "",
+            _build_watchgroup_section("观察 (Watch)", WATCH_GROUP, watch_stocks or []),
+        ]
+    parts.append("")
     return "\n".join(parts)
 
 
@@ -207,6 +216,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="同步 Futu OpenD 持仓/关注/观察到 holding.md")
     parser.add_argument("--sim",     action="store_true", help="持仓使用模拟账户")
     parser.add_argument("--dry-run", action="store_true", help="只打印预览，不写文件")
+    parser.add_argument("--include-watch", action="store_true",
+                        help="兼容旧参数：holding.md 现在默认包含「观察」")
     args = parser.parse_args()
 
     print("📥 获取持仓 ...")
@@ -221,7 +232,13 @@ def main() -> None:
     watch_stocks = fetch_group_stocks(WATCH_GROUP)
     print(f"   观察 {len(watch_stocks)} 只")
 
-    content = build_holding_md(holdings, focus_stocks, watch_stocks, use_sim=args.sim)
+    content = build_holding_md(
+        holdings,
+        focus_stocks,
+        watch_stocks,
+        use_sim=args.sim,
+        include_watch=True,
+    )
 
     if args.dry_run:
         print("\n[dry-run] 预览内容：")

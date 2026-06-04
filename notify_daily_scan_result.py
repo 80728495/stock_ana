@@ -7,9 +7,15 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import urllib.request
 from datetime import date
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
@@ -21,6 +27,12 @@ FEISHU_APP_ID = "cli_a924285ae7f85cc7"
 FEISHU_APP_SECRET = "53hrIbxJYHGGAI8qbndwofOzltJAkah0"
 FEISHU_USER_OPEN_ID = "ou_5489407346c5c13bc4687a83859d619b"
 FEISHU_API = "https://open.feishu.cn/open-apis"
+DAILY_VEGUS_EMAIL_RECIPIENTS = [
+    "99772120@qq.com",
+    "80728495@qq.com",
+    "185182@qq.com",
+    "tsy_fever@163.COM",
+]
 
 _feishu_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -48,6 +60,11 @@ def _find_today_or_latest(root: Path, filename: str) -> Path | None:
     if today_file.exists():
         return today_file
     return _find_latest_file(root, filename)
+
+
+def _find_today_file(root: Path, filename: str) -> Path | None:
+    today_file = root / date.today().isoformat() / filename
+    return today_file if today_file.exists() else None
 
 
 def get_tenant_token() -> str | None:
@@ -420,7 +437,40 @@ def _build_pdf_for_summary(summary: dict) -> bytes | None:
         return None
 
 
-def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: int = 0, no_email: bool = False) -> bool:
+def _scan_pdf_name(market_slug: str, scan_date_str: str) -> str:
+    slug = (market_slug or "unknown").strip().lower()
+    return f"vegus_{slug}_{scan_date_str}.pdf"
+
+
+def _write_scan_pdf(pdf_bytes: bytes, market_slug: str, scan_date_str: str) -> Path:
+    out_dir = DAILY_SCAN_DIR / scan_date_str
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = out_dir / _scan_pdf_name(market_slug, scan_date_str)
+    pdf_path.write_bytes(pdf_bytes)
+    return pdf_path
+
+
+def _infer_market_slug(summary: dict | None, fallback: str = "unknown") -> str:
+    if not summary:
+        return fallback
+    label = str(summary.get("market_label") or "").lower()
+    report_path = str(summary.get("gemini_report_path") or "").lower()
+    if "cn" in report_path or "a股" in label or "高新" in label:
+        return "cn"
+    if "hk" in report_path or "港股" in label:
+        return "hk"
+    if "us" in report_path or "美股" in label:
+        return "us"
+    return fallback
+
+
+def _send_scan_notification(
+    token: str,
+    summary: dict | None,
+    scan_exit_code: int = 0,
+    no_email: bool = False,
+    market_slug: str = "unknown",
+) -> bool:
     """
     扫描通知三分支：
       A. scan 退出码非0：只发错误卡片
@@ -430,10 +480,11 @@ def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: in
     ok = True
     market_label = (summary or {}).get("market_label") or "每日扫描"
     scan_date_str = (summary or {}).get("scan_date", date.today().isoformat())
-    signals_found = (summary or {}).get("signals_found", 0)
     total_scanned = (summary or {}).get("total_scanned", 0)
+    signals_found = (summary or {}).get("signals_found", 0)
     signals       = (summary or {}).get("signals", [])
     has_gemini    = bool((summary or {}).get("has_gemini_analysis", False))
+    gemini_status = str((summary or {}).get("gemini_status") or "").lower()
     report_path_raw = (summary or {}).get("gemini_report_path")
 
     # 收集有效图表路径
@@ -458,20 +509,26 @@ def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: in
     sig_text = _format_signals_text(signals)
     head_text = f"扫描：{total_scanned} 只  |  信号：{signals_found} 只"
 
-    # ── 分支 B：Gemini 失败 → 飞书一条消息（摘要 + 所有图表），不发 PDF 不发邮件 ──
+    # ── 分支 B：只有 Gemini 最终失败才发半成品图文消息 ──
     if not has_gemini:
-        summary_text = head_text + "  |  Gemini：未完成\n\n" + sig_text
-        # 先上传所有图表，收集 image_key
+        if gemini_status != "failed":
+            status_text = gemini_status or "unknown"
+            print(
+                f"⚠️ {market_label} {scan_date_str} Gemini 未完成但非最终失败 "
+                f"(status={status_text})，跳过飞书半成品消息"
+            )
+            return ok
+
+        summary_text = head_text + "  |  Gemini：最终失败\n\n" + sig_text
         img_blocks: list[list[dict]] = []
         for cp, label in zip(chart_paths, chart_labels):
             image_key = upload_chart_to_feishu(token, cp)
             if image_key:
                 img_blocks.append([{"tag": "text", "text": label}])
                 img_blocks.append([{"tag": "img", "image_key": image_key}])
-        # 摘要 + 图表合并为一条消息
         all_blocks = [[{"tag": "text", "text": summary_text}]] + img_blocks
         if not send_post_message(token, title, all_blocks):
-            print(f"❌ 扫描消息发送失败（{title}）")
+            print(f"❌ 扫描半成品消息发送失败（{title}）")
             ok = False
         return ok
 
@@ -499,24 +556,18 @@ def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: in
 
     # 飞书：发送 PDF 文件
     if pdf_bytes:
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False,
-                                         prefix=f"scan_{scan_date_str}_") as tmp:
-            tmp.write(pdf_bytes)
-            tmp_path = Path(tmp.name)
-        try:
-            file_key = upload_report_file(token, tmp_path)
-            if file_key:
-                if send_file_message(token, file_key):
-                    print(f"✅ 飞书 PDF 已发送：{market_label} {scan_date_str}")
-                else:
-                    print("⚠️ 飞书 PDF 文件消息发送失败")
-                    ok = False
+        pdf_slug = _infer_market_slug(summary, market_slug)
+        pdf_path = _write_scan_pdf(pdf_bytes, pdf_slug, scan_date_str)
+        file_key = upload_report_file(token, pdf_path)
+        if file_key:
+            if send_file_message(token, file_key):
+                print(f"✅ 飞书 PDF 已发送：{pdf_path.name}")
             else:
-                print("⚠️ 飞书 PDF 上传失败")
+                print("⚠️ 飞书 PDF 文件消息发送失败")
                 ok = False
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        else:
+            print("⚠️ 飞书 PDF 上传失败")
+            ok = False
 
     # 邮件：发送 PDF 附件
     if not no_email and md_content and pdf_bytes:
@@ -527,7 +578,7 @@ def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: in
                 md_content=md_content,
                 chart_paths=chart_paths,
                 signal_labels=chart_labels,
-                to=["99772120@qq.com", "80728495@qq.com", "185182@qq.com"],
+                to=DAILY_VEGUS_EMAIL_RECIPIENTS,
                 signals=signals,
             )
             if not email_sent:
@@ -541,7 +592,7 @@ def _send_scan_notification(token: str, summary: dict | None, scan_exit_code: in
 def main() -> int:
     args = parse_args()
 
-    status_path = _find_today_or_latest(DAILY_UPDATE_DIR, "status.json")
+    status_path = _find_today_file(DAILY_UPDATE_DIR, "status.json")
     status = _read_json(status_path) if status_path else None
 
     token = get_tenant_token()
@@ -553,9 +604,9 @@ def main() -> int:
 
     # ── --send-combined-email：三市场合并邮件（各市场飞书已单独发完，只发邮件）────
     if getattr(args, "send_combined_email", False):
-        summary_us_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_us.json")
-        summary_hk_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_hk.json")
-        summary_cn_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_cn.json")
+        summary_us_path = _find_today_file(DAILY_SCAN_DIR, "summary_us.json")
+        summary_hk_path = _find_today_file(DAILY_SCAN_DIR, "summary_hk.json")
+        summary_cn_path = _find_today_file(DAILY_SCAN_DIR, "summary_cn.json")
         pdfs: list[tuple[bytes, str]] = []
         for mkt, path in [("us", summary_us_path), ("hk", summary_hk_path), ("cn", summary_cn_path)]:
             summary = _read_json(path) if path else None
@@ -565,14 +616,14 @@ def main() -> int:
             pdf_bytes = _build_pdf_for_summary(summary)
             if pdf_bytes:
                 scan_date_str = summary.get("scan_date", date.today().isoformat())
-                pdfs.append((pdf_bytes, f"scan_{mkt}_{scan_date_str}.pdf"))
+                pdfs.append((pdf_bytes, _scan_pdf_name(mkt, scan_date_str)))
         if pdfs:
             from stock_ana.utils.email_sender import send_pdf_attachments
             today_str = date.today().isoformat()
             email_sent = send_pdf_attachments(
                 subject=f"📊 每日扫描综合报告 {today_str}（{len(pdfs)} 份）",
                 pdfs=pdfs,
-                to=["99772120@qq.com", "80728495@qq.com", "185182@qq.com"],
+                to=DAILY_VEGUS_EMAIL_RECIPIENTS,
             )
             if email_sent:
                 print(f"✅ 合并邮件已发送，共 {len(pdfs)} 份 PDF")
@@ -603,10 +654,10 @@ def main() -> int:
             ok = False
 
     # Notification 2 & 3: 美股 + 港股扫描（combined 模式）；如仅有一个则单独发
-    summary_us_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_us.json")
-    summary_hk_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_hk.json")
-    summary_cn_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary_cn.json")
-    summary_legacy_path = _find_today_or_latest(DAILY_SCAN_DIR, "summary.json")
+    summary_us_path = _find_today_file(DAILY_SCAN_DIR, "summary_us.json")
+    summary_hk_path = _find_today_file(DAILY_SCAN_DIR, "summary_hk.json")
+    summary_cn_path = _find_today_file(DAILY_SCAN_DIR, "summary_cn.json")
+    summary_legacy_path = _find_today_file(DAILY_SCAN_DIR, "summary.json")
 
     summary_us = _read_json(summary_us_path) if summary_us_path else None
     summary_hk = _read_json(summary_hk_path) if summary_hk_path else None
@@ -620,21 +671,21 @@ def main() -> int:
     if summary_us or summary_hk or summary_cn:
         # 按 --market 参数决定发哪个市场
         if send_us and summary_us:
-            if not _send_scan_notification(token, summary_us, args.scan_exit_code, args.no_email):
+            if not _send_scan_notification(token, summary_us, args.scan_exit_code, args.no_email, market_slug="us"):
                 ok = False
         elif send_us and not summary_us:
             print("⚠️ 未找到 summary_us.json，跳过美股通知")
         if send_hk and summary_hk:
             if summary_hk.get("data_stale"):
                 print("[daily-scan] 港股数据未更新（data_stale=True），跳过港股通知")
-            elif not _send_scan_notification(token, summary_hk, 0, args.no_email):
+            elif not _send_scan_notification(token, summary_hk, 0, args.no_email, market_slug="hk"):
                 ok = False
         elif send_hk and not summary_hk:
             print("⚠️ 未找到 summary_hk.json，跳过港股通知")
         if send_cn and summary_cn:
             if summary_cn.get("data_stale"):
                 print("[daily-scan] A股数据未更新（data_stale=True），跳过A股通知")
-            elif not _send_scan_notification(token, summary_cn, 0, args.no_email):
+            elif not _send_scan_notification(token, summary_cn, 0, args.no_email, market_slug="cn"):
                 ok = False
         elif send_cn and not summary_cn:
             print("⚠️ 未找到 summary_cn.json，跳过A股高新技术通知")

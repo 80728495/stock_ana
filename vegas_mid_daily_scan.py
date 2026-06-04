@@ -234,6 +234,7 @@ def save_summary(
     market_label: str = "",
     filename: str = "summary.json",
     data_stale: bool = False,
+    gemini_status: str = "",
 ) -> Path:
     """生成 summary JSON，为 clawbot 提供消费入口。"""
     today = date.today().isoformat()
@@ -275,6 +276,7 @@ def save_summary(
         "total_scanned":        total_scanned,
         "signals_found":        len(signals),
         "data_stale":           data_stale,
+        "gemini_status":        gemini_status,
         "has_gemini_analysis":  gemini_path is not None and gemini_path.exists(),
         "gemini_report_path":   str(gemini_path) if gemini_path else None,
         "gemini_summary_table": gemini_summary_table,
@@ -331,13 +333,25 @@ async def _run_single_market(
                 logger.debug(f"陈旧检测读取失败，跳过检测: {e}")
 
     gemini_path: Path | None = None
+    if data_stale:
+        gemini_status = "data_stale"
+    elif not signals:
+        gemini_status = "no_signals"
+    elif scan_only:
+        gemini_status = "scan_only"
+    else:
+        gemini_status = "failed"
+
     if not scan_only and signals:
         gemini_path = await run_gemini_analysis(signals)
+        if gemini_path is not None and gemini_path.exists():
+            gemini_status = "success"
 
     return save_summary(
         signals, total_scanned, gemini_path, lookback,
         market_label=market_label, filename=filename,
         data_stale=data_stale,
+        gemini_status=gemini_status,
     )
 
 

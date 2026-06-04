@@ -39,7 +39,7 @@ stock_ana/
     │   ├── list_manager.py         # 股票列表文件（.md）的读写同步
     │   ├── wave_store.py           # Wave 波段结构批量持久化
     │   ├── peak_store.py           # 宏观峰值缓存与持久化
-    │   ├── labeler.py              # LLM 行业子标签分配（Volcengine ARK）
+    │   ├── labeler.py              # LLM 行业子标签分配（DeepSeek v4 pro）
     │   ├── sec_fetcher.py          # SEC EDGAR 公司业务描述抓取
     │   ├── us_universe_builder.py  # 通过 Finviz 构建美股投资标的池
     │   └── hk_universe_builder.py  # 构建港股主板大市值列表
@@ -141,9 +141,10 @@ cron 实际执行顺序：
 1. `cron_daily_update.sh`
 2. `python3 daily_update.py --lists`
 3. `python3 daily_update.py`
-4. `cron_daily_scan_notify.sh`
-5. `python3 vegas_mid_daily_scan.py`
-6. `python3 notify_daily_scan_result.py --scan-exit-code <SCAN_EXIT>`
+4. `python3 daily_update.py --smc`
+5. `cron_daily_scan_notify.sh`
+6. `python3 vegas_mid_daily_scan.py`
+7. `python3 notify_daily_scan_result.py --scan-exit-code <SCAN_EXIT>`
 
 手工复现命令：
 
@@ -151,6 +152,9 @@ cron 实际执行顺序：
 # Step A: 列表同步 + 全量日更
 python3 daily_update.py --lists
 python3 daily_update.py
+
+# Step A-1: SMC OB 增量扫描（Futu 自选股）
+python3 daily_update.py --smc
 
 # Step B: 每日扫描 + Gemini
 python3 vegas_mid_daily_scan.py
@@ -221,6 +225,78 @@ schtasks /create /tn "StockAna_WeeklyVegasShort" /tr "powershell -ExecutionPolic
 | `rs_trap` | `api.scan_rs_trap_alert` | `impl.rs` | 虚假强势陷阱预警 |
 | `momentum` | `api.scan_momentum` | `impl.momentum_detector` | 6 维量价异动评分 |
 | `main_rally_pullback` | `api.scan_main_rally_pullback_setups` | `impl.main_rally_pullback` | 主升段中轨回踩 |
+| `smc_ob` | `scan/smc_ob_tracker.py` | `impl.smc` | SMC 订单块识别 + 0-100 评分 + zone 叠加 |
+
+### SMC Order Block 扫描系统
+
+基于 **Smart Money Concepts (ICT)** 理论，识别机构订单块（Order Block），并对每个 OB 进行连续质量评分（0-100 分）。
+
+#### 核心概念
+
+| 概念 | 说明 |
+|------|------|
+| Order Block (OB) | 机构大量建仓/出货前的最后一根反向 K 线，形成支撑/阻力区间 |
+| 看涨 OB (Bull OB) | 下跌段最低处附近的看涨 K 线，后续价格上涨突破，形成潜在支撑 |
+| 看跌 OB (Bear OB) | 上涨段最高处附近的看跌 K 线，后续价格下跌突破，形成潜在阻力 |
+| 消除 (Mitigated) | 价格回到 OB 区间并穿越，OB 失效 |
+| Zone Score | 同方向重叠 OB 的分数叠加，表示该价位的支撑/阻力强度 |
+
+#### 因果修正（无未来信息）
+
+上游 `smartmoneyconcepts` 库存在 look-ahead bias：`swing_highs_lows()` 用前后各 `swing_length` 根 K 线确认摆动点，导致回测时引用了「未来 K 线」。
+
+本系统通过 `_ob_causal()` 修复此问题：处理 bar `i` 时，只有满足 `k + swing_length ≤ i` 的摆动点才可见，完全模拟实时运行环境。
+
+#### OB 质量评分规则
+
+**看涨 OB**（权重合计 100）：
+
+| 特征 | 含义 | 权重 |
+|------|------|------|
+| `ob_width_pct` | OB 区间宽度（%）| 30 |
+| `trend_before_5d` | OB 前 5 日跌幅（负值越大越好）| 25 |
+| `vol_ratio` | OB bar 相对 20 日均量 | 15 |
+| `ob_atr_ratio` | OB 宽度 / ATR14 | 15 |
+| `body_ratio` | K 线实体比 | 10 |
+| `percentage` | 成交量不对称度 | 5 |
+
+**看跌 OB**（权重合计 100）：`ob_atr_ratio`(25) + `vol_ratio`(20) + `percentage`(20) + `ob_width_pct`(15) + `trend_before_5d`(10) + `body_ratio`(10)
+
+评分分档：**≥70 极强 / ≥50 强 / ≥30 中 / <30 弱**
+
+#### Zone Score 叠加
+
+同方向活跃 OB 若价格区间重叠，视为同一 zone，`zone_score = 各 OB score 之和`。
+图表中标注：`▲60`（个体分）+ `z=115`（zone 叠加分）。
+
+#### 文件说明
+
+| 文件 | 说明 |
+|------|------|
+| `src/stock_ana/strategies/impl/smc.py` | 因果 OB 检测、特征提取、评分规则（`OB_SCORE_RULES`） |
+| `src/stock_ana/scan/smc_ob_tracker.py` | 每日增量状态追踪，输出 `new_ob` / `touched` / `mitigated` 事件 |
+| `scripts/gen_ob_score_charts.py` | 历史 OB 评分图表生成（含已突破 OB） |
+| `data/cache/smc_ob_state/{market}/{symbol}.json` | 每只股票的 OB 状态持久化 |
+| `data/output/ob_score_charts/` | 图表输出（`HK_{sym}_ob_score.png` / `CN_{sym}_ob_score.png` / `{sym}_ob_score.png`） |
+| `docs/smc_ob_scoring_design.md` | 完整设计文档（供 AI 接手用） |
+
+#### 常用命令
+
+```bash
+# 每日增量 OB 扫描（读 futu_watchlist.md）
+python daily_update.py --smc
+
+# 生成历史 OB 评分图表
+python scripts/gen_ob_score_charts.py              # 全部自选股
+python scripts/gen_ob_score_charts.py --market hk  # 仅港股
+python scripts/gen_ob_score_charts.py --market cn  # 仅 A 股
+python scripts/gen_ob_score_charts.py --market us  # 仅美股
+python scripts/gen_ob_score_charts.py NVDA 00700   # 指定个股
+
+# 重建所有 OB 状态（全量覆盖）
+Remove-Item -Recurse data/cache/smc_ob_state
+python daily_update.py --smc
+```
 
 ### 统一调用方式
 
@@ -402,6 +478,34 @@ data/
 6. 新策略接入路径：`primitives (可选) -> impl -> api -> registry (可选) -> scan/backtest/workflows`。
 7. 用 guard 兜底：新增/重构后运行边界检查脚本与测试，防止架构回退。
 
+## Futu 自选股同步
+
+`sync_futu_watchlist.py` 从 Futu OpenD 读取自选股并同步到本地 Markdown 列表。
+
+**数据来源（两路合并）：**
+1. **所有自选分组**（`UserSecurityGroupType.ALL`，含 CUSTOM 及系统分组，共 27+ 组）
+2. **当前持仓**（`OpenSecTradeContext.position_list_query`，HK / US / CN 三市场）
+
+```bash
+# 同步（约 1-2 分钟，含 Futu 限频等待）
+python sync_futu_watchlist.py
+
+# 预览变更，不写入文件
+python sync_futu_watchlist.py --dry-run
+```
+
+**输出文件：**
+
+| 文件 | 说明 |
+|------|------|
+| `data/lists/futu_watchlist.md` | 全量自选 + 持仓个股（全量覆盖写）|
+| `data/lists/futu_watched_symbols.json` | 扁平代码列表（供其他脚本过滤用）|
+| `data/lists/watchlist.md` | 关注列表（仅追加新增，保留人工编辑）|
+| `data/lists/big_a.md` | A 股自选（全量覆盖写）|
+| `data/lists/cn_hightech_list.md` | 沪深高新技术关注列表（追加 60/00 开头个股）|
+| `data/lists/hk_universe_list.md` | 港股个股池（追加新个股，过滤 ETF/指数）|
+| `data/lists/us_universe_list.md` | 美股个股池（追加新个股，过滤 ETF/指数）|
+
 ## 数据源
 
 | 市场 | 数据源 | 说明 |
@@ -411,13 +515,17 @@ data/
 | 港股 | akshare（东财 / 新浪） | 恒指 + 恒科成分股 |
 | 美股档案 | SEC EDGAR | SIC 行业码、10-K Item 1 业务描述 |
 | 美股筛选 | Finviz | 市值 >= $2B，均量 >= 50 万，价格 >= $5 |
-| 行业分类 | Volcengine ARK | LLM 分配 77 个子标签 |
+| 行业分类 | DeepSeek v4 pro | LLM 分配 77 个子标签 |
 
 ## 环境变量
 
 ```ini
-# Volcengine ARK API（行业标签分类）
-ARK_API_KEY=your_key_here
+# DeepSeek API（行业标签分类）
+DEEPSEEK_API_KEY=your_key_here
+STOCK_ANA_LLM_MODEL=deepseek-v4-pro
+STOCK_ANA_LLM_BASE_URL=https://api.deepseek.com
+STOCK_ANA_LLM_THINKING=enabled
+STOCK_ANA_LLM_REASONING_EFFORT=high
 
 # Gemini API（如使用直连模式）
 GEMINI_API_KEY=your_key_here
@@ -429,7 +537,9 @@ Gemini Web 模式需在 Chrome 中登录 [gemini.google.com](https://gemini.goog
 
 ## 5) YouTube 每日摘要推送（youtube_trans/）
 
-自动下载指定 YouTube 频道最新视频，转写音频，用大模型生成摘要，推送到飞书。
+自动下载指定 YouTube 频道当天上传的新视频，转写音频，用大模型生成摘要，推送到飞书；历史未处理视频不会在每日任务中补跑。
+
+日期口径：Windows 定时任务运行在中国时间，但 Rhino/NaNa 视频对应北美市场日期。默认用 `RHINO_TARGET_DATE_OFFSET_DAYS=1`，即中国系统日期减一天作为目标视频日期。
 
 ### 目录结构
 
@@ -459,11 +569,13 @@ brew install ffmpeg           # macOS
 ```bash
 cp youtube_trans/.env.example youtube_trans/.env
 # 编辑 youtube_trans/.env，填写：
-# ARK_API_KEY            - Volcengine ARK 大模型 API Key
+# DEEPSEEK_API_KEY       - DeepSeek 官方 API Key
+# RHINO_LLM_MODEL        - 默认 deepseek-v4-pro
 # RHINO_FEISHU_APP_ID    - 飞书应用 App ID
 # RHINO_FEISHU_APP_SECRET
 # RHINO_FEISHU_USER_OPEN_ID - 推送目标用户 Open ID
 # HTTPS_PROXY / HTTP_PROXY  - YouTube 需要代理
+# RHINO_TARGET_DATE_OFFSET_DAYS - 默认 1，中国时间任务对应前一日北美视频日期
 ```
 
 ### 手动运行

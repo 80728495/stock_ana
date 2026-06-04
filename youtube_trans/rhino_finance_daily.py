@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import os
 import re
 from pathlib import Path
@@ -68,17 +69,19 @@ YT_SCRIPT = Path(os.environ.get("RHINO_YT_SCRIPT") or str(BASE_DIR / "yt_audio.p
 YT_PYTHON = os.environ.get("RHINO_PYTHON") or sys.executable
 YT_DLP = os.environ.get("RHINO_YT_DLP") or "yt-dlp"
 MAX_VIDEOS_PER_RUN = int(os.environ.get("RHINO_MAX_VIDEOS_PER_RUN") or "5")
-MAX_VIDEO_AGE_DAYS = int(os.environ.get("RHINO_MAX_VIDEO_AGE_DAYS") or "5")
+TARGET_DATE_OFFSET_DAYS = int(os.environ.get("RHINO_TARGET_DATE_OFFSET_DAYS") or "1")
 FETCH_RETRIES = int(os.environ.get("RHINO_FETCH_RETRIES") or "3")
 RETRY_DELAY = int(os.environ.get("RHINO_RETRY_DELAY") or "10")
 # Slow-retry: after all fast retries fail, wait longer and try the whole run again
 SLOW_RETRIES = int(os.environ.get("RHINO_SLOW_RETRIES") or "3")
 SLOW_RETRY_DELAY = int(os.environ.get("RHINO_SLOW_RETRY_DELAY") or "1800")  # seconds, default 30 min
 
-# Volcano Engine (Ark) LLM config
-LLM_BASE_URL = os.environ.get("RHINO_LLM_BASE_URL") or "https://ark.cn-beijing.volces.com/api/coding/v3"
-LLM_API_KEY = os.environ.get("ARK_API_KEY") or os.environ.get("RHINO_LLM_API_KEY") or ""
-LLM_MODEL = os.environ.get("RHINO_LLM_MODEL") or "minimax-m2.7"
+# DeepSeek official OpenAI-compatible LLM config
+LLM_BASE_URL = os.environ.get("RHINO_LLM_BASE_URL") or "https://api.deepseek.com"
+LLM_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("RHINO_LLM_API_KEY") or ""
+LLM_MODEL = os.environ.get("RHINO_LLM_MODEL") or "deepseek-v4-pro"
+LLM_THINKING = os.environ.get("RHINO_LLM_THINKING") or "enabled"
+LLM_REASONING_EFFORT = os.environ.get("RHINO_LLM_REASONING_EFFORT") or "high"
 
 # Feishu push config
 FEISHU_APP_ID = os.environ.get("RHINO_FEISHU_APP_ID") or ""
@@ -230,13 +233,23 @@ def _save_processed_id(video_id):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def _parse_upload_date(upload_date: str | None):
-    if not upload_date or upload_date == "NA":
-        return None
-    try:
-        return datetime.strptime(upload_date, "%Y%m%d")
-    except ValueError:
-        return None
+def _target_upload_date() -> str:
+    """Return the North America video date in YouTube upload_date format.
+
+    The scheduled job runs on China time. For the morning run, the relevant
+    North America market/video date is normally the previous local date.
+    """
+    return (datetime.now() - timedelta(days=TARGET_DATE_OFFSET_DAYS)).strftime("%Y%m%d")
+
+
+def _target_date_note() -> str:
+    local_date = datetime.now().strftime("%Y%m%d")
+    target_date = _target_upload_date()
+    return (
+        f"Target video date: {target_date} "
+        f"(system date {local_date}, China-time job uses North America date, "
+        f"offset={TARGET_DATE_OFFSET_DAYS}d)"
+    )
 
 
 def _parse_title_date(title: str | None) -> str:
@@ -247,6 +260,66 @@ def _parse_title_date(title: str | None) -> str:
         return ""
     return f"{match.group(1)}{match.group(2)}{match.group(3)}"
 
+
+def _relative_age_to_upload_date(text: str | None) -> str:
+    """Map YouTube relative age text to the target North America date."""
+    if not text:
+        return ""
+    value = text.strip().lower()
+    match = re.search(r"(\d+)\s+(minute|minutes|hour|hours|day|days|week|weeks)\s+ago", value)
+    if not match:
+        return ""
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if unit.startswith("minute"):
+        local_time = datetime.now() - timedelta(minutes=amount)
+    elif unit.startswith("hour"):
+        local_time = datetime.now() - timedelta(hours=amount)
+    elif unit.startswith("day"):
+        local_time = datetime.now() - timedelta(days=amount)
+    elif unit.startswith("week"):
+        local_time = datetime.now() - timedelta(days=amount * 7)
+    else:
+        return ""
+    north_america_date = local_time - timedelta(days=TARGET_DATE_OFFSET_DAYS)
+    return north_america_date.strftime("%Y%m%d")
+
+
+def _fetch_channel_relative_times(channel_url: str, video_ids: list[str]) -> dict[str, str]:
+    """Read channel HTML and extract relative publish times like '2 hours ago'."""
+    if not video_ids:
+        return {}
+
+    handlers = []
+    if PROXY:
+        handlers.append(urllib.request.ProxyHandler({"http": PROXY, "https": PROXY}))
+    opener = urllib.request.build_opener(*handlers)
+    request = urllib.request.Request(channel_url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with opener.open(request, timeout=45) as response:
+            html = response.read().decode("utf-8", errors="replace")
+    except http.client.IncompleteRead as exc:
+        html = exc.partial.decode("utf-8", errors="replace")
+    except Exception as exc:
+        print(f"[WARN] Relative publish time fetch failed: {type(exc).__name__}: {exc}")
+        return {}
+
+    result: dict[str, str] = {}
+    relative_pat = re.compile(
+        r'"content":"([^"]*(?:minute|minutes|hour|hours|day|days|week|weeks) ago)"'
+    )
+    for video_id in video_ids:
+        marker = f'"contentId":"{video_id}"'
+        idx = html.find(marker)
+        if idx < 0:
+            idx = html.find(video_id)
+        if idx < 0:
+            continue
+        window = html[max(0, idx - 5000):idx + 500]
+        matches = list(relative_pat.finditer(window))
+        if matches:
+            result[video_id] = matches[-1].group(1)
+    return result
 
 def _get_video_upload_date(video_url: str) -> str:
     yt_dlp_cmd = _resolve_yt_dlp()
@@ -289,7 +362,7 @@ def _get_video_upload_date(video_url: str) -> str:
 # ========== Step 1: Get latest video ==========
 
 def _fetch_new_videos(channel_url: str, channel_name: str):
-    """Fetch unprocessed public videos from a single channel."""
+    """Fetch unprocessed public videos uploaded today from a single channel."""
     yt_dlp_cmd = _resolve_yt_dlp()
     if yt_dlp_cmd is None:
         set_last_error("Get video list failed", "yt-dlp not found")
@@ -356,6 +429,8 @@ def _fetch_new_videos(channel_url: str, channel_name: str):
     _MEMBERS_KEYWORDS = ("会员", "members only", "member only", "members-only")
 
     processed = _load_processed_ids()
+    target_date = _target_upload_date()
+    relative_times = _fetch_channel_relative_times(channel_url, list(videos.keys()))
     found = []
     for v in videos.values():
         title = v.get("title", "")
@@ -367,11 +442,18 @@ def _fetch_new_videos(channel_url: str, channel_name: str):
             upload_date = ""
         video_url = f"https://www.youtube.com/watch?v={v['id']}"
         if not upload_date:
-            upload_date = _get_video_upload_date(video_url)
-        if not upload_date:
             upload_date = _parse_title_date(title)
-        uploaded_at = _parse_upload_date(upload_date)
-        if uploaded_at and uploaded_at < datetime.now() - timedelta(days=MAX_VIDEO_AGE_DAYS):
+        if not upload_date:
+            relative_age = relative_times.get(v["id"], "")
+            upload_date = _relative_age_to_upload_date(relative_age)
+            if upload_date:
+                print(f"[INFO] [{channel_name}] Relative publish time {relative_age!r} -> target date {upload_date}: {title}")
+        if not upload_date:
+            upload_date = _get_video_upload_date(video_url)
+
+        if upload_date != target_date:
+            shown_date = upload_date or "unknown"
+            print(f"[SKIP] [{channel_name}] Not target upload date ({shown_date} != {target_date}): {title}")
             continue
         if v["id"] not in processed:
             found.append(
@@ -385,9 +467,9 @@ def _fetch_new_videos(channel_url: str, channel_name: str):
             )
 
     if not found:
-        print(f"[INFO] [{channel_name}] All recent videos already processed")
+        print(f"[INFO] [{channel_name}] No unprocessed videos for target date {target_date}")
     else:
-        print(f"[OK] [{channel_name}] Found {len(found)} unprocessed public videos")
+        print(f"[OK] [{channel_name}] Found {len(found)} unprocessed public videos for target date {target_date}")
         for item in found:
             print(f"     - {item['video_title']}")
 
@@ -576,8 +658,8 @@ def transcribe_audio(audio_file, video_id):
 def summarize_transcript(transcript, video_title):
     print("[INFO] Calling LLM for summary...")
 
-    if not _require_env("ARK_API_KEY or RHINO_LLM_API_KEY", LLM_API_KEY):
-        set_last_error("Summary failed", "Ark API Key not configured")
+    if not _require_env("DEEPSEEK_API_KEY or RHINO_LLM_API_KEY", LLM_API_KEY):
+        set_last_error("Summary failed", "DeepSeek API key not configured")
         return None
 
     summary_prompt = f"""You are a professional financial content analyst. Analyze the following YouTube video transcript and extract key points.
@@ -605,13 +687,18 @@ Please respond in Chinese following this exact format:
 
 Be concise and impactful."""
 
-    body = json.dumps({
+    payload = {
         "model": LLM_MODEL,
         "messages": [{"role": "user", "content": summary_prompt}],
         "temperature": 0.7,
         "max_tokens": 2000,
         "stream": False,
-    }).encode("utf-8")
+    }
+    if LLM_THINKING:
+        payload["thinking"] = {"type": LLM_THINKING}
+    if LLM_REASONING_EFFORT:
+        payload["reasoning_effort"] = LLM_REASONING_EFFORT
+    body = json.dumps(payload).encode("utf-8")
 
     req = urllib.request.Request(
         f"{LLM_BASE_URL}/chat/completions",
@@ -751,6 +838,7 @@ def main():
     print(f"\n{'='*50}")
     print(f"Rhino Finance Daily - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Channels: {', '.join(ch['name'] for ch in CHANNELS)}")
+    print(_target_date_note())
     print(f"{'='*50}\n")
     clear_last_error()
 

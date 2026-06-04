@@ -10,6 +10,7 @@ LLM 行业分类标注模块
 """
 
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -23,9 +24,11 @@ from stock_ana.config import DATA_DIR
 
 # ═══════════════════ 配置 ═══════════════════
 
-_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3"
-_API_KEY = "34081167-83fa-43c5-9c30-632e640fba9c"
-_MODEL = "kimi-k2.5"
+_BASE_URL = os.environ.get("STOCK_ANA_LLM_BASE_URL") or "https://api.deepseek.com"
+_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("STOCK_ANA_LLM_API_KEY") or ""
+_MODEL = os.environ.get("STOCK_ANA_LLM_MODEL") or "deepseek-v4-pro"
+_THINKING = os.environ.get("STOCK_ANA_LLM_THINKING") or "enabled"
+_REASONING_EFFORT = os.environ.get("STOCK_ANA_LLM_REASONING_EFFORT") or "high"
 _BATCH_SIZE = 10          # 每次 API 调用处理的股票数
 _REQUEST_INTERVAL = 1.0   # API 调用间隔（秒）
 _MAX_RETRIES = 2          # 单批次最大重试次数
@@ -105,20 +108,32 @@ def _build_batch_prompt(
 
 def _create_client() -> OpenAI:
     """Create the OpenAI-compatible client used for sector sub-label assignment."""
+    if not _API_KEY:
+        raise ValueError("DeepSeek API key not configured: set DEEPSEEK_API_KEY or STOCK_ANA_LLM_API_KEY")
     return OpenAI(base_url=_BASE_URL, api_key=_API_KEY)
 
 
 def _call_llm(client: OpenAI, system: str, user: str) -> str:
     """调用 LLM，返回 content 文本"""
-    resp = client.chat.completions.create(
-        model=_MODEL,
-        messages=[
+    extra_body = {}
+    if _THINKING:
+        extra_body["thinking"] = {"type": _THINKING}
+
+    kwargs = {
+        "model": _MODEL,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        max_tokens=1024,
-        temperature=0.1,
-    )
+        "max_tokens": 1024,
+        "temperature": 0.1,
+    }
+    if _REASONING_EFFORT:
+        kwargs["reasoning_effort"] = _REASONING_EFFORT
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+
+    resp = client.chat.completions.create(**kwargs)
     return resp.choices[0].message.content.strip()
 
 

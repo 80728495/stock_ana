@@ -28,6 +28,7 @@
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import date, datetime
@@ -50,9 +51,65 @@ logger.add(
     encoding="utf-8",
     enqueue=True,   # 异步写入，防止多进程/多 sink 写入竞争
 )
+LOCK_PATH = LOG_DIR / "daily_update.lock"
+
+
+def _acquire_run_lock(max_age_hours: int = 8) -> int | None:
+    """Create an exclusive lock file so overlapping scheduled runs do not collide."""
+    if LOCK_PATH.exists():
+        age_hours = (time.time() - LOCK_PATH.stat().st_mtime) / 3600
+        if age_hours < max_age_hours:
+            try:
+                detail = LOCK_PATH.read_text(encoding="utf-8").strip()
+            except Exception:
+                detail = ""
+            logger.error(f"daily_update 已在运行，跳过本次启动。lock={LOCK_PATH} {detail}")
+            return None
+        logger.warning(f"发现过期 daily_update lock（{age_hours:.1f}h），自动清理: {LOCK_PATH}")
+        try:
+            LOCK_PATH.unlink()
+        except FileNotFoundError:
+            pass
+
+    try:
+        fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        logger.error(f"daily_update 已在运行，跳过本次启动。lock={LOCK_PATH}")
+        return None
+    payload = f"pid={os.getpid()} started_at={datetime.now().isoformat(timespec='seconds')}\n"
+    os.write(fd, payload.encode("utf-8"))
+    return fd
+
+
+def _release_run_lock(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        LOCK_PATH.unlink()
+    except FileNotFoundError:
+        pass
 
 
 # ─────────────────────── 各步更新函数 ───────────────────────
+
+def _launch_context() -> str:
+    """Return process context to identify unexpected scheduled launchers."""
+    pid = os.getpid()
+    ppid = os.getppid()
+    argv = " ".join(sys.argv)
+    try:
+        import psutil  # type: ignore
+
+        proc = psutil.Process(ppid)
+        parent_cmd = " ".join(proc.cmdline())
+        parent = f"parent={proc.name()} pid={ppid} cmd={parent_cmd}"
+    except Exception as exc:
+        parent = f"parent_pid={ppid} ({type(exc).__name__})"
+    return f"pid={pid}, argv={argv}, {parent}"
 
 
 def sync_futu() -> dict:
@@ -68,10 +125,11 @@ def sync_futu() -> dict:
         us_stocks = [s for s in stocks if s["market"] == "US"]
         cn_stocks = [s for s in stocks if s["market"] == "CN"]
         logger.info(f"  HK: {len(hk_stocks)} 只，US: {len(us_stocks)} 只，CN: {len(cn_stocks)} 只")
+        sfw.write_holding_subset_md()
         sfw.update_watchlist(hk_stocks, us_stocks, cn_stocks)
         sfw.write_big_a(cn_stocks)
         sfw.update_universes(hk_stocks, us_stocks)
-        sfw.merge_cn_to_hightech_watchlist(cn_stocks)
+        sfw.merge_cn_to_hightech_list(cn_stocks)
         elapsed = time.time() - t0
         logger.success(f"✅ Futu 同步完成 ({elapsed:.0f}s)")
         return {"ok": True, "elapsed": round(elapsed),
@@ -329,21 +387,23 @@ def validate_data() -> dict:
     校验各市场缓存数据是否已更新到近期。
 
     规则：
-    - 扫描 cache/us/ 和 cache/hk/ 所有 parquet
-    - 若某只股票最新日期距今超过 5 个自然日，视为"落后"
+    - 扫描 cache/us/、cache/hk/、cache/cn/ 所有 parquet
+    - 若某只股票最新日期早于上一个工作日，视为"落后"
     - 落后股票占比超过 5% → 整体标记 stale=True，并输出警告列表
     - 结果写入 status.json（validate 字段）
     """
     import pandas as pd
+    from pandas.tseries.offsets import BDay
     from stock_ana.config import CACHE_DIR
 
     today = pd.Timestamp.now().normalize()
-    threshold_days = 5   # 宽限5个自然日（含周末+节假日）
+    expected_last_date = (today - BDay(1)).normalize()
     stale_ratio_warn = 0.05  # 超过5%才报警
 
     markets = {
         "us": CACHE_DIR / "us",
         "hk": CACHE_DIR / "hk",
+        "cn": CACHE_DIR / "cn",
     }
 
     all_ok = True
@@ -360,9 +420,9 @@ def validate_data() -> dict:
             try:
                 df = pd.read_parquet(p, columns=[])
                 last = pd.Timestamp(df.index.max()).normalize()
-                if (today - last).days > threshold_days:
+                if last < expected_last_date:
                     stale.append({"ticker": p.stem, "last_date": last.date().isoformat(),
-                                  "days_behind": int((today - last).days)})
+                                  "days_behind": int((expected_last_date - last).days)})
             except Exception:
                 pass
         ratio = len(stale) / len(files) if files else 0
@@ -371,7 +431,7 @@ def validate_data() -> dict:
             all_ok = False
             logger.warning(
                 f"[校验] {market.upper()} 数据落后：{len(stale)}/{len(files)} 只 "
-                f"({ratio*100:.1f}%) 超过 {threshold_days} 日未更新"
+                f"({ratio*100:.1f}%) 最新日期早于 {expected_last_date.date()}"
             )
             for s in stale[:10]:
                 logger.warning(f"  {s['ticker']}: 最新 {s['last_date']} (落后 {s['days_behind']} 天)")
@@ -461,6 +521,7 @@ def main():
     logger.info(f"{'=' * 60}")
 
     # ── Cookie 刷新（Chrome 未开时自动更新 .env）──
+    logger.info(f"启动来源: {_launch_context()}")
     _refresh_gemini_cookies()
 
     t_total = time.time()
@@ -556,4 +617,10 @@ def _save_status(results: dict, total_elapsed: int) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    lock_fd = _acquire_run_lock()
+    if lock_fd is None:
+        raise SystemExit(2)
+    try:
+        main()
+    finally:
+        _release_run_lock(lock_fd)

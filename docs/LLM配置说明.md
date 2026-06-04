@@ -1,145 +1,90 @@
 # 大语言模型接入配置说明
 
-本文档记录当前已验证可用的大语言模型接入方式，供其他项目直接参考配置。
+本文档记录本项目当前使用的大语言模型接入方式。项目内原先通过旧 Coding Plan 调用的大模型，统一迁移到 DeepSeek 官方 OpenAI-compatible API。
 
----
+## 当前标准配置
 
-## 一、当前使用的接入方案
+| 项目 | 值 |
+|------|----|
+| 服务商 | DeepSeek 官方 API |
+| Base URL | `https://api.deepseek.com` |
+| Chat Completions | `https://api.deepseek.com/chat/completions` |
+| 默认模型 | `deepseek-v4-pro` |
+| API Key 环境变量 | `DEEPSEEK_API_KEY` |
+| 兼容协议 | OpenAI-compatible Chat Completions |
 
-### 火山引擎 Ark · Coding Plan
+## 项目环境变量
 
-- **服务商**：字节跳动火山引擎
-- **计费方式**：Coding Plan（包月订阅，按订阅额度使用，非按 token 计费）
-- **控制台**：https://console.volcengine.com/ark
-- **API Endpoint**：`https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions`
-- **API Key**：`34081167-83fa-43c5-9c30-632e640fba9c`
-- **协议**：OpenAI 兼容（`/chat/completions`），可直接使用 OpenAI SDK 或 httpx 调用
+根目录 `.env` / `.env.example` 使用：
 
-> ⚠️ 注意：普通按量付费接口的路径是 `/api/v3/`，Coding Plan 的路径是 `/api/coding/v3/`，两者不同，不能混用。
+```ini
+DEEPSEEK_API_KEY=your_key_here
+STOCK_ANA_LLM_MODEL=deepseek-v4-pro
+STOCK_ANA_LLM_BASE_URL=https://api.deepseek.com
+STOCK_ANA_LLM_THINKING=enabled
+STOCK_ANA_LLM_REASONING_EFFORT=high
+```
 
----
+`youtube_trans/.env` / `youtube_trans/.env.example` 使用：
 
-## 二、已验证可用的模型
+```ini
+DEEPSEEK_API_KEY=your_key_here
+RHINO_LLM_MODEL=deepseek-v4-pro
+RHINO_LLM_BASE_URL=https://api.deepseek.com
+RHINO_LLM_THINKING=enabled
+RHINO_LLM_REASONING_EFFORT=high
+```
 
-### 2.1 MiniMax M2.5（主力模型，推荐）
+不要把真实 API key 写入代码或文档；只写入本机 `.env`，并确认 `.env` 被 Git 忽略。
 
-| 参数 | 值 |
-|------|-----|
-| 模型名称（`model` 字段） | `minimax-m2.5` |
-| Context 窗口 | 200K tokens |
-| 最大输出 | 128K tokens |
-| 工具调用（Function Calling） | 支持 |
-| 流式输出 | 支持（不返回 stream usage） |
+## 已迁移模块
 
-**curl 示例：**
+| 模块 | 用途 | 配置前缀 |
+|------|------|----------|
+| `src/stock_ana/data/labeler.py` | 美股 SEC 行业子标签分类 | `STOCK_ANA_LLM_*` |
+| `youtube_trans/rhino_finance_daily.py` | RhinoFinance 视频转写后的结构化摘要 | `RHINO_LLM_*` |
+| `youtube_trans/rhino_finance_test.py` | RhinoFinance 测试脚本 | `RHINO_LLM_*` |
+
+Vegas 扫描、周报等现有 Gemini 分析流程仍使用 Gemini，不属于本次 LLM 供应商迁移范围。
+
+## Python SDK 示例
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["DEEPSEEK_API_KEY"],
+    base_url=os.environ.get("STOCK_ANA_LLM_BASE_URL", "https://api.deepseek.com"),
+)
+
+response = client.chat.completions.create(
+    model=os.environ.get("STOCK_ANA_LLM_MODEL", "deepseek-v4-pro"),
+    messages=[{"role": "user", "content": "你好"}],
+    reasoning_effort=os.environ.get("STOCK_ANA_LLM_REASONING_EFFORT", "high"),
+    extra_body={
+        "thinking": {"type": os.environ.get("STOCK_ANA_LLM_THINKING", "enabled")},
+    },
+)
+
+print(response.choices[0].message.content)
+```
+
+## HTTP 示例
 
 ```bash
-curl https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions \
+curl https://api.deepseek.com/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer 34081167-83fa-43c5-9c30-632e640fba9c" \
+  -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
   -d '{
-    "model": "minimax-m2.5",
+    "model": "deepseek-v4-pro",
     "messages": [{"role": "user", "content": "你好"}],
+    "thinking": {"type": "enabled"},
+    "reasoning_effort": "high",
     "stream": false
   }'
 ```
 
-**Python 示例（openai SDK）：**
+## 旧配置清理
 
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    api_key="34081167-83fa-43c5-9c30-632e640fba9c",
-    base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
-)
-
-response = client.chat.completions.create(
-    model="minimax-m2.5",
-    messages=[{"role": "user", "content": "你好"}],
-)
-print(response.choices[0].message.content)
-```
-
----
-
-### 2.2 豆包系列（备用）
-
-通过同一个 Coding Plan endpoint 可以访问豆包系列模型，`model` 字段填写对应的接入点 ID 或模型名称。
-
-| 模型 | `model` 字段 | Context |
-|------|-------------|---------|
-| 豆包标准版 | `doubao-1-5-pro-32k` 或方舟接入点 ID | 32K |
-| 豆包长文本版 | `doubao-1-5-pro-256k` 或方舟接入点 ID | 256K |
-
----
-
-## 三、与 dayu-agent 项目集成
-
-dayu-agent 项目位于 `/Users/wl/fa_gpt`，通过 `llm_models.json` 管理模型配置。
-
-### 配置文件位置
-
-```
-workspace/config/llm_models.json   ← 运行时实际读取
-dayu/config/llm_models.json        ← 源文件
-```
-
-修改源文件后必须同步：
-
-```bash
-cp /Users/wl/fa_gpt/dayu/config/llm_models.json \
-   /Users/wl/fa_gpt/workspace/config/llm_models.json
-```
-
-### minimax-m2.5 在 llm_models.json 中的完整配置块
-
-```json
-"minimax-m2.5": {
-  "runner_type": "openai_compatible",
-  "name": "minimax-m2.5",
-  "endpoint_url": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
-  "model": "minimax-m2.5",
-  "headers": {
-    "Authorization": "Bearer {{ARK_API_KEY}}",
-    "Content-Type": "application/json"
-  },
-  "timeout": 3600,
-  "stream_idle_timeout": 120.0,
-  "stream_idle_heartbeat_sec": 10.0,
-  "supports_stream": true,
-  "supports_tool_calling": true,
-  "supports_usage": true,
-  "supports_stream_usage": false,
-  "max_context_tokens": 200000,
-  "max_output_tokens": 128000
-}
-```
-
-`{{ARK_API_KEY}}` 在运行时自动替换为同名环境变量，需在 `~/.zshrc` 中设置：
-
-```bash
-export ARK_API_KEY="34081167-83fa-43c5-9c30-632e640fba9c"
-```
-
-### 指定模型运行
-
-```bash
-dayu-cli prompt "你的问题" --ticker AAOI --model-name minimax-m2.5
-dayu-cli write --ticker AAOI --model-name minimax-m2.5
-dayu-wechat run --base ./workspace --model-name minimax-m2.5
-```
-
----
-
-## 四、其他可接入的服务商（备查）
-
-以下服务商均已内置在 `llm_models.json` 中，只需设置对应环境变量即可使用：
-
-| 服务商 | 环境变量 | 推荐模型名 |
-|--------|----------|-----------|
-| DeepSeek | `DEEPSEEK_API_KEY` | `deepseek-chat` / `deepseek-thinking` |
-| OpenAI | `OPENAI_API_KEY` | `gpt-4o` / `gpt-4o-mini` |
-| Anthropic | `ANTHROPIC_API_KEY` | `claude-opus` / `claude-sonnet` |
-| Google | `GOOGLE_API_KEY` | `gemini-2.5-pro` |
-| 阿里云百炼 | `DASHSCOPE_API_KEY` | `qwen-plus` / `qwen-max` |
+旧供应商的 endpoint、模型名和 API key 环境变量不再使用；新增或修改脚本时，只使用本文档上方的 DeepSeek 配置。

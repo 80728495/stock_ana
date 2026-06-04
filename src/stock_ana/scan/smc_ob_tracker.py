@@ -35,7 +35,13 @@ import pandas as pd
 from loguru import logger
 
 from stock_ana.config import CACHE_DIR
-from stock_ana.strategies.impl.smc import _ob_causal
+from stock_ana.strategies.impl.smc import (
+    _ob_causal,
+    ob_passes_quality,
+    ob_quality_rating,
+    ob_quality_score,
+    OB_QUALITY_DEFAULTS,
+)
 
 # ── 状态存储根目录 ────────────────────────────────────────────────────────────
 OB_STATE_DIR = CACHE_DIR / "smc_ob_state"
@@ -156,6 +162,48 @@ def _touches(cur_low: float, cur_high: float, top: float, bot: float) -> bool:
     return cur_low <= top and cur_high >= bot
 
 
+def _compute_zone_scores(ob_map: dict[str, dict]) -> None:
+    """对同方向、价格区间重叠的活跃 OB 叠加分数 → zone_score。
+
+    同一价格区间出现多个不同时间的 OB → 叠加代表该支撑/阻力位强度高。
+    修改 ob_map 中每个 OB 的 "zone_score" 字段（in-place）。
+    """
+    for direction in (1, -1):
+        obs = [
+            (k, v) for k, v in ob_map.items()
+            if v["direction"] == direction and not v.get("is_mitigated", False)
+            and v.get("score", 0) > 0
+        ]
+        if not obs:
+            continue
+
+        # 按底部价格排序
+        obs.sort(key=lambda x: x[1]["bottom"])
+
+        # 合并重叠区间 → 同一 zone 内的 OB 共享叠加分
+        zones: list[list[str]] = []
+        cur_zone = [obs[0][0]]
+        cur_top = obs[0][1]["top"]
+
+        for k, v in obs[1:]:
+            if v["bottom"] <= cur_top:  # 与当前 zone 重叠
+                cur_zone.append(k)
+                cur_top = max(cur_top, v["top"])
+            else:
+                zones.append(cur_zone)
+                cur_zone = [k]
+                cur_top = v["top"]
+        zones.append(cur_zone)
+
+        # 赋值 zone_score = 该 zone 内所有 OB 的 score 之和
+        for zone_keys in zones:
+            zone_total = round(
+                sum(ob_map[k].get("score", 0) for k in zone_keys), 1
+            )
+            for k in zone_keys:
+                ob_map[k]["zone_score"] = zone_total
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 核心：单只股票每日更新
 # ═════════════════════════════════════════════════════════════════════════════
@@ -166,18 +214,18 @@ def process_symbol(
     df: pd.DataFrame,
     swing_length: int = 5,
     close_mitigation: bool = False,
+    quality_filter: bool = True,       # 保留参数（向后兼容），评分始终启用
+    quality_thresholds: dict | None = None,  # 保留参数（向后兼容）
 ) -> list[dict]:
     """对单只股票执行每日 OB 状态更新，返回当日事件列表。
 
     算法流程:
         1. 用因果 OB 检测算法重新计算全量 OB（每次都从全历史运行，保证一致性）
-        2. 加载上次保存的 OB 状态文件（存储前一天的 OB 集合）
-        3. 差分：
-           - new_ob    = 今日结果中有但上次状态中没有的未消除 OB
-           - mitigated = 上次为 active/touched，今日已被消除 (MitigatedIndex != 0)
-           - touched   = 今日 [low, high] 刺入仍活跃的 OB 区块，
-                         且上次状态不是 "touched"（避免持续在区块内重复报告）
-        4. 更新状态文件并返回事件列表
+        2. 为每个 OB 计算 0~100 质量评分 (score)
+        3. 对同方向重叠 OB 叠加分数 → zone_score（多层叠加 = 强支撑/阻力）
+        4. 加载上次保存的 OB 状态文件
+        5. 差分生成事件（new_ob / mitigated / touched），事件携带 score 和 zone_score
+        6. 更新状态文件
 
     参数:
         symbol:           股票代码
@@ -193,15 +241,11 @@ def process_symbol(
           market       : 市场（大写）
           ob_id        : OB 唯一标识 "<formed_date>_<bull|bear>"
           direction    : 1=看涨  -1=看跌
-          top          : OB 顶部价格
-          bottom       : OB 底部价格
-          formed_date  : OB 所在 K 线日期（历史 bar，不是触发日）
-          as_of        : 本次检测日期（今日最新 bar 日期）
-          percentage   : OB 强度 0~100（仅 new_ob）
-          mitigated_date: 消除日期（仅 mitigated）
-          current_close : 今日收盘（仅 touched）
-          current_high  : 今日最高（仅 touched）
-          current_low   : 今日最低（仅 touched）
+          top / bottom : OB 价格区间
+          formed_date  : OB 所在 K 线日期
+          score        : 0~100 质量评分
+          zone_score   : 同方向重叠 OB 的叠加分（≥ score）
+          as_of        : 本次检测日期
     """
     if df is None or len(df) < swing_length * 2 + 10:
         return []
@@ -227,6 +271,30 @@ def process_symbol(
         return []
 
     current_ob_map = _extract_ob_map(df, ob_df)
+
+    # ── 质量评分 ─────────────────────────────────────────────────────────────
+    # 每个 OB 计算 0~100 分（取代二元通过/不通过），分数越高代表越"强"
+    for key, ob_info in current_ob_map.items():
+        formed_date_str = ob_info["formed_date"]
+        bar_idx = None
+        for idx in range(len(df)):
+            ts = df.index[idx]
+            d = str(ts.date()) if hasattr(ts, "date") else str(ts)
+            if d == formed_date_str:
+                ob_val = ob_df.iloc[idx]
+                if pd.notna(ob_val.get("OB")) and int(ob_val["OB"]) == ob_info["direction"]:
+                    bar_idx = idx
+                    break
+        if bar_idx is not None:
+            score, detail = ob_quality_rating(df, ob_df, bar_idx)
+            ob_info["score"] = score
+            ob_info["score_detail"] = detail
+        else:
+            ob_info["score"] = 0.0
+            ob_info["score_detail"] = {}
+
+    # ── 同方向重叠 OB 分数叠加 → zone_score ──────────────────────────────────
+    _compute_zone_scores(current_ob_map)
 
     # ── 步骤 2：加载历史状态 ─────────────────────────────────────────────────
     state = load_ob_state(symbol, market)
@@ -266,6 +334,8 @@ def process_symbol(
                     "bottom":      ob["bottom"],
                     "formed_date": ob["formed_date"],
                     "percentage":  ob["percentage"],
+                    "score":       ob.get("score", 0),
+                    "zone_score":  ob.get("zone_score", ob.get("score", 0)),
                     "as_of":       as_of,
                 })
 
@@ -285,6 +355,7 @@ def process_symbol(
                 "top":            cur["top"],
                 "bottom":         cur["bottom"],
                 "formed_date":    cur["formed_date"],
+                "score":          cur.get("score", 0),
                 "mitigated_date": cur["mitigated_date"] or as_of,
                 "as_of":          as_of,
             })
@@ -309,6 +380,8 @@ def process_symbol(
                 "top":           ob["top"],
                 "bottom":        ob["bottom"],
                 "formed_date":   ob["formed_date"],
+                "score":         ob.get("score", 0),
+                "zone_score":    ob.get("zone_score", ob.get("score", 0)),
                 "current_close": cur_close,
                 "current_high":  cur_high,
                 "current_low":   cur_low,
@@ -333,6 +406,8 @@ def process_symbol(
             "formed_date":    ob["formed_date"],
             "ob_volume":      ob["ob_volume"],
             "percentage":     ob["percentage"],
+            "score":          ob.get("score", 0),
+            "zone_score":     ob.get("zone_score", ob.get("score", 0)),
             "status":         status,
             "mitigated_date": ob["mitigated_date"],
         }
@@ -364,13 +439,20 @@ def run_daily(
     watchlist: dict | None = None,
     swing_length: int = 5,
     close_mitigation: bool = False,
+    quality_filter: bool = True,
+    quality_thresholds: dict | None = None,
 ) -> dict[str, list[dict]]:
     """批量对 watchlist 执行每日 OB 状态更新。
 
+    每个 OB 自动计算 0~100 质量评分（score）；
+    同方向重叠 OB 的分数会叠加为 zone_score，代表支撑/阻力强度。
+
     参数:
-        watchlist:        {symbol: (market, name, ...)} 格式，None 则使用默认自选
-        swing_length:     摆动点确认窗口
-        close_mitigation: 是否以收盘价判断 OB 消除
+        watchlist:          {symbol: (market, name, ...)} 格式，None 则使用默认自选
+        swing_length:       摆动点确认窗口
+        close_mitigation:   是否以收盘价判断 OB 消除
+        quality_filter:     保留参数（向后兼容），评分始终启用
+        quality_thresholds: 保留参数（向后兼容）
 
     返回:
         {symbol: [events]} — 只包含有事件的股票，方便调用方过滤

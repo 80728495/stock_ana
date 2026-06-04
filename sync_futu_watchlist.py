@@ -2,12 +2,13 @@
 """sync_futu_watchlist.py — 每日从 Futu OpenD 同步自选股到 watchlist.md、big_a.md 及 universe 列表
 
 功能：
-  1. 读取 OpenD 所有 CUSTOM 分组标的
-  2. 按市场分类（US / HK / CN(SH+SZ)）
-  3. 更新 data/lists/watchlist.md 的三个区段（港股/美股/大A），保留现有条目
-  4. 将 A 股标的写入 data/lists/big_a.md
-  5. 港股个股（非 ETF/指数）不在 hk_universe_list.md 中的，追加进去
-  6. 美股个股（非 ETF/指数）不在 us_universe_list.md 中的，追加进去
+  1. 读取 OpenD **所有自选分组**（不限分组类型）的标的
+  2. 读取 **持仓** 标的（HK / US / CN 三个市场），与自选合并
+  3. 按市场分类（US / HK / CN(SH+SZ)）
+  4. 更新 data/lists/watchlist.md 的三个区段（港股/美股/大A），保留现有条目
+  5. 将 A 股标的写入 data/lists/big_a.md
+  6. 港股个股（非 ETF/指数）不在 hk_universe_list.md 中的，追加进去
+  7. 美股个股（非 ETF/指数）不在 us_universe_list.md 中的，追加进去
 
 运行方式：
     python sync_futu_watchlist.py
@@ -22,10 +23,16 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 LISTS_DIR = PROJECT_ROOT / "data" / "lists"
 WATCHLIST_PATH = LISTS_DIR / "watchlist.md"
 FUTU_WATCHLIST_PATH = LISTS_DIR / "futu_watchlist.md"
+HOLDING_PATH = LISTS_DIR / "holding.md"
 BIG_A_PATH = LISTS_DIR / "big_a.md"
 HK_UNIVERSE_PATH = LISTS_DIR / "hk_universe_list.md"
 US_UNIVERSE_PATH = LISTS_DIR / "us_universe_list.md"
@@ -38,73 +45,108 @@ OPEND_PORT = 11111
 
 
 def _fetch_all_watchlist_stocks() -> list[dict]:
-    """从 OpenD 读取所有 CUSTOM 分组的标的，返回去重后的列表。
+    """从 OpenD 读取所有自选分组（不限类型）及持仓标的，返回去重后的列表。
 
     每条记录: {"code": "US.NVDA", "name": "英伟达", "market": "US", "symbol": "NVDA"}
+
+    数据来源（两路合并）：
+      1. 所有自选分组（UserSecurityGroupType.ALL，含 CUSTOM 及其他类型）
+      2. 当前持仓（OpenTradeContext.position_list_query，HK / US / CN 三市场）
     """
     try:
-        from futu import OpenQuoteContext, RET_OK, UserSecurityGroupType  # type: ignore[import]
+        from futu import (  # type: ignore[import]
+            OpenQuoteContext, OpenSecTradeContext,
+            RET_OK, UserSecurityGroupType, TrdMarket, TrdEnv,
+        )
     except ImportError:
         print("❌ futu-api 未安装，请运行：pip install futu-api")
         sys.exit(1)
 
+    all_stocks: dict[str, dict] = {}  # code → record，自动去重
+
+    def _register(code_raw: str, name: str, source: str) -> None:
+        """解析富途格式代码并注册到 all_stocks（已存在则保留原条目）。"""
+        parts = code_raw.split(".", 1)
+        if len(parts) != 2:
+            return
+        mkt_prefix, symbol = parts[0].upper(), parts[1]
+        if mkt_prefix in ("SH", "SZ"):
+            market, symbol = "CN", symbol.zfill(6)
+        elif mkt_prefix == "HK":
+            market, symbol = "HK", symbol.zfill(5)
+        elif mkt_prefix == "US":
+            market, symbol = "US", symbol.upper()
+        else:
+            return
+        if code_raw not in all_stocks:
+            all_stocks[code_raw] = {
+                "code":       code_raw,
+                "mkt_prefix": mkt_prefix,
+                "market":     market,
+                "symbol":     symbol,
+                "name":       name,
+                "group":      source,
+            }
+
+    # ── 来源 1：所有自选分组（不限 CUSTOM，含系统分组）─────────────────────
     ctx = OpenQuoteContext(host=OPEND_HOST, port=OPEND_PORT)
     try:
-        # 获取所有自选股分组
-        ret, group_data = ctx.get_user_security_group(UserSecurityGroupType.CUSTOM)
+        ret, group_data = ctx.get_user_security_group(UserSecurityGroupType.ALL)
         if ret != RET_OK:
             print(f"❌ 获取自选股分组失败：{group_data}")
             sys.exit(1)
 
         groups = group_data["group_name"].tolist()
-        print(f"  找到 {len(groups)} 个自选股分组：{groups}")
+        print(f"  找到 {len(groups)} 个自选分组：{groups}")
 
-        all_stocks: dict[str, dict] = {}  # code → record，自动去重
-
-        for group_name in groups:
-            ret, sec_data = ctx.get_user_security(group_name)
-            if ret != RET_OK:
+        for i, group_name in enumerate(groups):
+            if i > 0 and i % 9 == 0:
+                # Futu 限频：每 30 秒最多 10 次，每 9 次请求后等 31 秒
+                print(f"  ⏳ 达到频率上限，等待 31 秒后继续...")
+                import time as _time
+                _time.sleep(31)
+            ret2, sec_data = ctx.get_user_security(group_name)
+            if ret2 != RET_OK:
                 print(f"  ⚠️  读取分组 [{group_name}] 失败：{sec_data}")
                 continue
-
             for _, row in sec_data.iterrows():
-                code_raw = str(row.get("code", "")).strip()  # e.g. "US.NVDA" / "HK.00700"
-                name = str(row.get("name", "")).strip()
-
-                parts = code_raw.split(".", 1)
-                if len(parts) != 2:
-                    continue
-                mkt_prefix, symbol = parts[0].upper(), parts[1]
-
-                # 统一市场标识
-                if mkt_prefix in ("SH", "SZ"):
-                    market = "CN"
-                    symbol = symbol.zfill(6)
-                elif mkt_prefix == "HK":
-                    market = "HK"
-                    symbol = symbol.zfill(5)
-                elif mkt_prefix == "US":
-                    market = "US"
-                    symbol = symbol.upper()
-                else:
-                    continue  # 忽略未知市场
-
-                if code_raw not in all_stocks:
-                    all_stocks[code_raw] = {
-                        "code": code_raw,      # 原始富途格式 "US.NVDA"
-                        "mkt_prefix": mkt_prefix,   # SH/SZ/HK/US
-                        "market": market,      # CN/HK/US
-                        "symbol": symbol,      # 纯代码（不含市场前缀）
-                        "name": name,
-                        "group": group_name,
-                    }
-
-        stocks = list(all_stocks.values())
-        print(f"  共读取 {len(stocks)} 只标的（去重后）")
-        return stocks
-
+                _register(
+                    str(row.get("code", "")).strip(),
+                    str(row.get("name", "")).strip(),
+                    source=group_name,
+                )
     finally:
         ctx.close()
+
+    wl_count = len(all_stocks)
+    print(f"  自选分组共 {wl_count} 只标的")
+
+    # ── 来源 2：持仓（三个市场，失败则静默跳过）──────────────────────────────
+    try:
+        trade_ctx = OpenSecTradeContext(host=OPEND_HOST, port=OPEND_PORT)
+        try:
+            for trd_mkt in (TrdMarket.HK, TrdMarket.US, TrdMarket.CN):
+                ret3, pos_data = trade_ctx.position_list_query(position_market=trd_mkt)
+                if ret3 == RET_OK and pos_data is not None and not pos_data.empty:
+                    for _, row in pos_data.iterrows():
+                        _register(
+                            str(row.get("code", "")).strip(),
+                            str(row.get("stock_name", "")).strip(),
+                            source="持仓",
+                        )
+        finally:
+            trade_ctx.close()
+        pos_added = len(all_stocks) - wl_count
+        if pos_added:
+            print(f"  持仓补充 {pos_added} 只新标的")
+        else:
+            print("  持仓：无新增（均已在自选分组中）")
+    except Exception as exc:
+        print(f"  ⚠️  读取持仓失败（可选步骤，已跳过）：{exc}")
+
+    stocks = list(all_stocks.values())
+    print(f"  合计 {len(stocks)} 只标的（去重后）")
+    return stocks
 
 
 def _get_stock_types(codes: list[str]) -> set[str]:
@@ -350,7 +392,7 @@ def write_big_a(cn_stocks: list[dict], dry_run: bool = False) -> None:
         "# 大A 关注列表",
         "",
         f"> 自动生成，最后更新：{now_str}",
-        f"> 来源：Futu OpenD 自选股（所有 CUSTOM 分组中的 A 股标的）",
+        f"> 来源：Futu OpenD 所有自选分组 + 持仓（A 股标的）",
         f"> 共 {len(cn_stocks)} 只",
         "",
         "| 代码 | 中文名 | 市场 |",
@@ -620,7 +662,7 @@ def write_futu_watchlist_md(
         "# Futu 自选股完整列表",
         "",
         f"> 自动生成，最后更新：{today_str}",
-        f"> 来源：Futu OpenD 所有 CUSTOM 分组（个股，已过滤指数/期货）",
+        f"> 来源：Futu OpenD 所有自选分组 + 持仓（个股，已过滤指数/期货）",
         f"> HK {len(hk_f)} 只 / US {len(us_f)} 只 / CN {len(cn_stocks)} 只",
         "",
         "## 港股 (HK)",
@@ -666,6 +708,40 @@ def write_futu_watchlist_md(
     print(f"  ✅ futu_watchlist.md 已写入 {total} 只（HK {len(hk_f)} / US {len(us_f)} / CN {len(cn_stocks)}）")
 
 
+def write_holding_subset_md(dry_run: bool = False) -> dict:
+    """写入 holding.md 子集：Futu 当前持仓 + 自选股分组「关注」/「观察」。
+
+    这是完整 futu_watchlist.md 的窄列表，供持仓/重点关注策略回测与扫描使用。
+    完整全量同步逻辑保持不变：所有自选分组 + 持仓仍写入 futu_watchlist/watchlist/universe。
+    """
+    try:
+        import sync_holding as sh
+        holdings = sh.fetch_holdings(use_sim=False)
+        focus_stocks = sh.fetch_group_stocks(sh.FOCUS_GROUP)
+        watch_stocks = sh.fetch_group_stocks(sh.WATCH_GROUP)
+        content = sh.build_holding_md(
+            holdings=holdings,
+            focus_stocks=focus_stocks,
+            watch_stocks=watch_stocks,
+            use_sim=False,
+            include_watch=True,
+        )
+    except (Exception, SystemExit) as exc:
+        print(f"  ⚠️  holding.md 同步失败（可选步骤，已跳过）：{exc}")
+        return {"ok": False, "error": str(exc)}
+
+    if dry_run:
+        print(
+            f"  [dry-run] holding.md 将写入 持仓 {len(holdings)} 只 / "
+            f"关注 {len(focus_stocks)} 只 / 观察 {len(watch_stocks)} 只"
+        )
+        return {"ok": True, "holdings": len(holdings), "focus": len(focus_stocks), "watch": len(watch_stocks)}
+
+    HOLDING_PATH.write_text(content, encoding="utf-8")
+    print(f"  ✅ holding.md 已写入（持仓 {len(holdings)} / 关注 {len(focus_stocks)} / 观察 {len(watch_stocks)}）")
+    return {"ok": True, "holdings": len(holdings), "focus": len(focus_stocks), "watch": len(watch_stocks)}
+
+
 # ─── 主流程 ───────────────────────────────────────────────────────────────────
 
 
@@ -704,15 +780,19 @@ def main() -> None:
     print("📝 写入 futu_watchlist.md...")
     write_futu_watchlist_md(hk_stocks, us_stocks, cn_stocks, dry_run=dry_run)
 
-    # 2. 写入 big_a.md
+    # 2. 写入 holding.md 子集（持仓 + 关注 + 观察）
+    print("\n📝 写入 holding.md（持仓 + 关注 + 观察）...")
+    write_holding_subset_md(dry_run=dry_run)
+
+    # 3. 写入 big_a.md
     print("\n📝 写入 big_a.md...")
     write_big_a(cn_stocks, dry_run=dry_run)
 
-    # 3. 更新 cn_hightech_list.md（追加 60/00 开头的个股）
+    # 4. 更新 cn_hightech_list.md（追加 60/00 开头的个股）
     print("\n📝 更新 cn_hightech_list.md...")
     merge_cn_to_hightech_list(cn_stocks, dry_run=dry_run)
 
-    # 4. 更新 universe 列表
+    # 5. 更新 universe 列表
     print("\n📝 更新 universe 列表...")
     update_universes(hk_stocks, us_stocks, dry_run=dry_run)
 

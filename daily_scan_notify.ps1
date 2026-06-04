@@ -12,6 +12,31 @@ $CacheCn    = Join-Path $ProjectDir "data\cache\cn"
 
 Set-Location $ProjectDir
 
+# Require today's daily_update status to be present and successful.
+# A partial OHLCV write (for example, US updated while HK/CN are stale) must not
+# trigger the Vegas scan.
+$Today = Get-Date -Format "yyyy-MM-dd"
+$UpdateStatusFile = Join-Path $ProjectDir "data\output\daily_update\$Today\status.json"
+if (-not (Test-Path $UpdateStatusFile)) {
+    Write-Host "[daily-scan] Today's daily_update status is missing, sending Feishu notification and skipping scan..."
+    & $PythonBin notify_daily_scan_result.py --no-new-data
+    exit 0
+}
+
+try {
+    $UpdateStatus = Get-Content -Path $UpdateStatusFile -Raw -Encoding UTF8 | ConvertFrom-Json
+} catch {
+    Write-Host "[daily-scan] Today's daily_update status is unreadable, sending Feishu notification and skipping scan: $_"
+    & $PythonBin notify_daily_scan_result.py --no-new-data
+    exit 0
+}
+
+if (-not $UpdateStatus.all_ok) {
+    Write-Host "[daily-scan] Today's daily_update status is not OK, sending Feishu notification and skipping scan..."
+    & $PythonBin notify_daily_scan_result.py --no-new-data
+    exit 0
+}
+
 # Check data freshness
 if (Test-Path $StampFile) {
     $stampTime = (Get-Item $StampFile).LastWriteTime

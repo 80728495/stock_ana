@@ -224,6 +224,213 @@ def _ob_causal(
     ], axis=1)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# OB 质量筛选器 — 基于回测特征分析得出的阈值
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# 回测结论（461 只美股科技股，2023-04 ~ 2026-05）：
+#
+# 看涨 OB 关键特征:
+#   - ob_width_pct ≥ 7.5%  → 97.1% 胜率（基线 92.1%）
+#   - trend_before_5d ≤ -7.8% → 96.9%（OB 前有显著下跌）
+#   - 两者组合 → 99.0%，保留 15%
+#
+# 看跌 OB 关键特征:
+#   - vol_ratio ≥ 1.15 + percentage ≤ 24.5 → 89.2%（基线 78.0%）
+#   - ob_atr_ratio ≥ 1.63 + percentage ≤ 42 → 87.5%
+#
+# Touch 关键特征:
+#   - 看涨: days_to_touch ≤ 9 + trend_before_5d ≤ -7.4 → 96.8%
+#   - 看跌: percentage ≤ 25 + days_to_touch ≤ 8 → 75.9%
+# ═════════════════════════════════════════════════════════════════════════════
+
+# 默认阈值（可在调用时覆盖）
+OB_QUALITY_DEFAULTS = {
+    "bull": {
+        "ob_width_pct_min": 4.0,      # OB 区间宽度 ≥ 4%
+        "trend_before_5d_max": -3.0,   # OB 前5日跌幅 ≤ -3%（有像样的回调）
+    },
+    "bear": {
+        "vol_ratio_min": 1.0,          # OB bar 成交量 ≥ 20日均量
+        "ob_atr_ratio_min": 1.0,       # OB 宽度 ≥ 1x ATR
+        "percentage_max": 45.0,        # volume split 不能太对称
+    },
+}
+
+# ── OB 质量评分规则 ─────────────────────────────────────────────────────────
+# 将筛选特征转化为连续打分，类似 Vegas 的强弱信号打分。
+# 每条规则: (特征名, zero_val, full_val, weight)
+#   zero_val → 0 分, full_val → weight 满分, 线性插值, 截断到 [0, weight]
+#   权重总和 = 100, 所以评分范围 0~100
+# 权重分配依据: 回测中各特征与胜率的相关性强弱
+OB_SCORE_RULES: dict[str, list[tuple[str, float, float, int]]] = {
+    "bull": [
+        # 特征名            0分值    满分值    权重
+        ("ob_width_pct",     1.0,     10.0,   30),  # 区间宽 → 需求区厚实
+        ("trend_before_5d",  0.0,    -10.0,   25),  # 前5日跌得深 → 买盘介入有意义
+        ("vol_ratio",        0.5,      2.5,   15),  # 放量 → 机构参与
+        ("ob_atr_ratio",     0.3,      2.0,   15),  # 宽度相对ATR大 → 信号明显
+        ("body_ratio",       0.2,      0.8,   10),  # 实体大 → 方向明确
+        ("percentage",      50.0,     10.0,    5),  # 成交量不对称 → 单边力量
+    ],
+    "bear": [
+        ("ob_atr_ratio",     0.3,      2.5,   25),  # 宽度相对ATR大 → 供应区显著
+        ("vol_ratio",        0.5,      2.5,   20),  # 放量 → 机构参与
+        ("percentage",      50.0,     15.0,   20),  # 成交量不对称 → 卖压集中
+        ("ob_width_pct",     1.0,      8.0,   15),  # 区间宽 → 供应区厚实
+        ("trend_before_5d",  0.0,      8.0,   10),  # 前5日涨得多 → 获利盘堆积
+        ("body_ratio",       0.2,      0.8,   10),  # 实体大 → 方向明确
+    ],
+}
+
+
+def _linear_score(value: float, zero_val: float, full_val: float) -> float:
+    """线性插值: zero_val → 0, full_val → 1, 截断到 [0, 1]。"""
+    if full_val == zero_val:
+        return 0.5
+    return max(0.0, min(1.0, (value - zero_val) / (full_val - zero_val)))
+
+
+def ob_quality_rating(
+    ohlcv: DataFrame,
+    ob_df: DataFrame,
+    bar_idx: int,
+    features: dict | None = None,
+) -> tuple[float, dict[str, float]]:
+    """计算 OB 质量评分 (0~100) 及各分项得分。
+
+    基于 ob_quality_score 返回的特征，按方向分别加权打分。
+    类似 Vegas 的连续打分机制——分数越高代表 OB 越"强"，
+    而非二元的"通过/不通过"。
+
+    Returns:
+        (total_score, breakdown)
+        - total_score: 0~100 综合分
+        - breakdown:   {特征名: 该特征得分} — 便于调试和展示
+    """
+    if features is None:
+        features = ob_quality_score(ohlcv, ob_df, bar_idx)
+
+    direction = features["direction"]
+    rules = OB_SCORE_RULES.get("bull" if direction == 1 else "bear", [])
+
+    breakdown: dict[str, float] = {}
+    total = 0.0
+    for feat_name, zero_val, full_val, weight in rules:
+        val = features.get(feat_name, 0.0)
+        s = _linear_score(val, zero_val, full_val) * weight
+        breakdown[feat_name] = round(s, 1)
+        total += s
+
+    return round(total, 1), breakdown
+
+
+def ob_quality_score(
+    ohlcv: DataFrame,
+    ob_df: DataFrame,
+    bar_idx: int,
+) -> dict:
+    """计算单个 OB 的质量特征。
+
+    返回字典包含:
+        direction, ob_width_pct, body_ratio, vol_ratio,
+        trend_before_5d, ob_atr_ratio, percentage
+    """
+    row = ob_df.iloc[bar_idx]
+    direction = int(row["OB"])
+    top = float(row["Top"])
+    bottom = float(row["Bottom"])
+    percentage_val = float(row["Percentage"]) if pd.notna(row.get("Percentage")) else 50.0
+
+    mid = (top + bottom) / 2
+    ob_width_pct = (top - bottom) / mid * 100 if mid > 0 else 0
+
+    o = ohlcv["open"].iloc[bar_idx]
+    h = ohlcv["high"].iloc[bar_idx]
+    low = ohlcv["low"].iloc[bar_idx]
+    c = ohlcv["close"].iloc[bar_idx]
+    body = abs(c - o)
+    rng = h - low
+    body_ratio = body / rng if rng > 0 else 0
+
+    vol = ohlcv["volume"].iloc[bar_idx]
+    start = max(0, bar_idx - 20)
+    avg_vol = ohlcv["volume"].iloc[start:bar_idx].mean() if bar_idx > 0 else vol
+    vol_ratio = vol / avg_vol if avg_vol > 0 else 1.0
+
+    lb = 5
+    if bar_idx >= lb:
+        trend_before_5d = (c - ohlcv["close"].iloc[bar_idx - lb]) / ohlcv["close"].iloc[bar_idx - lb] * 100
+    else:
+        trend_before_5d = 0.0
+
+    if bar_idx >= 15:
+        hi = ohlcv["high"].values[bar_idx-14:bar_idx]
+        lo = ohlcv["low"].values[bar_idx-14:bar_idx]
+        prev_c = ohlcv["close"].values[bar_idx-15:bar_idx-1]
+        tr = np.maximum(hi - lo, np.maximum(np.abs(hi - prev_c), np.abs(lo - prev_c)))
+        atr14 = float(tr.mean())
+    else:
+        atr14 = rng if rng > 0 else 1.0
+
+    ob_atr_ratio = (top - bottom) / atr14 if atr14 > 0 else 0
+
+    return {
+        "direction": direction,
+        "ob_width_pct": ob_width_pct,
+        "body_ratio": body_ratio,
+        "vol_ratio": vol_ratio,
+        "trend_before_5d": trend_before_5d,
+        "ob_atr_ratio": ob_atr_ratio,
+        "percentage": percentage_val,
+    }
+
+
+def ob_passes_quality(
+    ohlcv: DataFrame,
+    ob_df: DataFrame,
+    bar_idx: int,
+    thresholds: dict | None = None,
+) -> bool:
+    """判断 bar_idx 处的 OB 是否通过质量筛选。
+
+    thresholds 格式同 OB_QUALITY_DEFAULTS，为 None 时使用默认值。
+    """
+    row = ob_df.iloc[bar_idx]
+    if pd.isna(row.get("OB")):
+        return False
+
+    feat = ob_quality_score(ohlcv, ob_df, bar_idx)
+    direction = feat["direction"]
+    cfg = (thresholds or OB_QUALITY_DEFAULTS).get(
+        "bull" if direction == 1 else "bear", {}
+    )
+
+    # 逐条检查
+    if "ob_width_pct_min" in cfg and feat["ob_width_pct"] < cfg["ob_width_pct_min"]:
+        return False
+    if "ob_width_pct_max" in cfg and feat["ob_width_pct"] > cfg["ob_width_pct_max"]:
+        return False
+    if "trend_before_5d_max" in cfg and feat["trend_before_5d"] > cfg["trend_before_5d_max"]:
+        return False
+    if "trend_before_5d_min" in cfg and feat["trend_before_5d"] < cfg["trend_before_5d_min"]:
+        return False
+    if "vol_ratio_min" in cfg and feat["vol_ratio"] < cfg["vol_ratio_min"]:
+        return False
+    if "ob_atr_ratio_min" in cfg and feat["ob_atr_ratio"] < cfg["ob_atr_ratio_min"]:
+        return False
+    if "ob_atr_ratio_max" in cfg and feat["ob_atr_ratio"] > cfg["ob_atr_ratio_max"]:
+        return False
+    if "percentage_max" in cfg and feat["percentage"] > cfg["percentage_max"]:
+        return False
+    if "percentage_min" in cfg and feat["percentage"] < cfg["percentage_min"]:
+        return False
+    if "body_ratio_min" in cfg and feat["body_ratio"] < cfg["body_ratio_min"]:
+        return False
+
+    return True
+
+
 # ─────────────────────── 公共入口 ───────────────────────
 
 

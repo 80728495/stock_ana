@@ -7,6 +7,7 @@ __pycache__/
 dist/
 build/
 *.egg
+node_modules/
 
 # 虚拟环境
 .venv/

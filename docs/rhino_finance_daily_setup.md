@@ -3,10 +3,10 @@
 ## 概述
 
 本流程每天自动执行以下任务：
-1. **获取最新视频** — 从 YouTube `@RhinoFinance` 频道获取最近 5 个视频，找到第一个未处理的
+1. **获取当天新视频** — 从 YouTube 频道获取候选视频，只处理上传日期等于当天且尚未处理的视频
 2. **下载音频** — 使用 `yt-dlp` + cookie 登录态下载 m4a 音频
 3. **语音转写** — 使用 `faster-whisper`（Whisper small 模型）将音频转为文字（txt + srt）
-4. **AI 总结** — 调用火山引擎大模型 API 对转写内容生成结构化摘要
+4. **AI 总结** — 调用 DeepSeek 官方 API 对转写内容生成结构化摘要
 5. **飞书推送** — 将总结结果以富文本消息推送到飞书
 6. **失败告警** — 任何阶段失败都会通过飞书发送告警消息
 
@@ -22,8 +22,8 @@ rhino_finance_daily.sh  ← 入口 shell 脚本，设置环境变量和代理
 rhino_finance_daily.py  ← 主控 Python 脚本
       │
       ├─ 1. get_today_video()
-      │     └─ yt-dlp --flat-playlist 获取频道最新 5 个视频
-      │     └─ 和 status.json 比对，找出未处理的视频
+      │     └─ yt-dlp --flat-playlist 获取频道候选视频
+      │     └─ 用 upload_date / 标题日期过滤，只保留当天且未处理的视频
       │
       ├─ 2. download_audio()
       │     └─ 调用 yt_audio.py 下载音频 → ~/Music/yt_audio/
@@ -33,7 +33,7 @@ rhino_finance_daily.py  ← 主控 Python 脚本
       │     └─ 底层: faster-whisper (small 模型, 中文)
       │
       ├─ 4. summarize_transcript()
-      │     └─ 调用火山引擎 LLM API 生成结构化总结
+      │     └─ 调用 DeepSeek LLM API 生成结构化总结
       │
       └─ 5. send_feishu_message()
             └─ 飞书机器人推送总结结果
@@ -230,7 +230,7 @@ schtasks /create /tn "RhinoFinance Daily" /tr "C:\Users\<你的用户名>\rhino_
 
 | 用途 | 变量名（脚本中） | 说明 |
 |------|-------------------|------|
-| 火山引擎 LLM | `LLM_API_KEY` | 用于 AI 总结 |
+| DeepSeek LLM | `DEEPSEEK_API_KEY` / `RHINO_LLM_API_KEY` | 用于 AI 总结 |
 | 飞书 App | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 用于推送消息 |
 | 飞书收信人 | `FEISHU_USER_OPEN_ID` | 消息接收者 |
 
@@ -238,7 +238,9 @@ schtasks /create /tn "RhinoFinance Daily" /tr "C:\Users\<你的用户名>\rhino_
 
 ```python
 # 修改脚本中的配置为：
-LLM_API_KEY = os.environ.get("RHINO_LLM_API_KEY", "你的默认值")
+LLM_API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("RHINO_LLM_API_KEY", "")
+LLM_MODEL = os.environ.get("RHINO_LLM_MODEL", "deepseek-v4-pro")
+LLM_BASE_URL = os.environ.get("RHINO_LLM_BASE_URL", "https://api.deepseek.com")
 FEISHU_APP_ID = os.environ.get("RHINO_FEISHU_APP_ID", "你的默认值")
 FEISHU_APP_SECRET = os.environ.get("RHINO_FEISHU_APP_SECRET", "你的默认值")
 ```
