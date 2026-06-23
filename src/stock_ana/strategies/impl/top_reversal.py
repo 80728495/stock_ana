@@ -15,6 +15,7 @@
       a. 收盘 < Day-1 开盘（空方彻底吃掉 Day-1 实体）
       b. 收盘 < Day-1 实体中点 (open+close)/2
       c. 阴线 + 收盘 < Day-1 收盘
+    加强项：Day-2 收盘跌破 Day-1 最低价，视为强确认
 
 Public API
 ----------
@@ -31,14 +32,13 @@ detect_high_shadow_reversal(df) -> dict
       day1_vol_spike    bool   是否放量
       day1_high         float
       day1_close        float
-      score             int    0~4 综合评分
+      score             int    0~6 综合评分
       reason            str    简要说明
 """
 
 from __future__ import annotations
 
 import pandas as pd
-import numpy as np
 
 # ── 参数常量 ──────────────────────────────────────────────────────────────────
 NEW_HIGH_WINDOW: int = 20          # 阶段新高回望窗口（交易日）
@@ -57,6 +57,11 @@ BIG_VOL_RATIO: float = 1.5             # 条件B 中的「显著放量」阈值�
 # 门槛宜宽松以确保召回，靠 score 分层过滤信号质量
 
 CONFIRM_BODY_RATIO_MIN: float = 0.8    # 加分项：Day-2 实体 / Day-1 上影线 ≥ 0.8，说明确认日卖压真实充分
+ATR_WINDOW: int = 14                   # ATR 计算窗口，用于校验上影线是否超过常规波动
+MIN_SHADOW_ATR: float = 0.5            # 上影线至少达到 ATR 的 0.5 倍，过滤低波动小噪音
+PRIOR_RISE_LOOKBACK: int = 60          # 顶部背景回望窗口
+MIN_PRIOR_RISE_PCT: float = 10.0       # 60 日涨幅至少 10%，才更像高位派发/逃顶信号
+COOLDOWN_DAYS: int = 10                # 历史扫描中，同一标的 10 个交易日内只保留一个代表信号
 
 
 # ── 内部工具 ──────────────────────────────────────────────────────────────────
@@ -76,6 +81,78 @@ def _body_ratio(row: pd.Series) -> float:
     return _body(row) / rng
 
 
+def _ensure_atr(df: pd.DataFrame, window: int = ATR_WINDOW) -> pd.DataFrame:
+    """Ensure an ATR column exists using a simple true-range rolling average."""
+    atr_col = f"atr_{window}"
+    if atr_col in df.columns:
+        return df
+
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
+    prev_close = close.shift(1)
+    true_range = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    df[atr_col] = true_range.rolling(window, min_periods=1).mean()
+    return df
+
+
+def _reset_index_with_date(df: pd.DataFrame) -> pd.DataFrame:
+    """Reset any date-like index into a stable ``date`` column."""
+    out = df.sort_index().reset_index()
+    first_col = out.columns[0]
+    if first_col != "date":
+        if "date" in out.columns:
+            out = out.drop(columns=[first_col])
+        else:
+            out = out.rename(columns={first_col: "date"})
+    return out
+
+
+def _apply_cooldown(rows: list[dict], cooldown_days: int) -> list[dict]:
+    """Deduplicate nearby historical signals, keeping the strongest row in each cluster."""
+    if cooldown_days <= 0 or len(rows) <= 1:
+        return rows
+
+    deduped: list[dict] = []
+    cluster: list[dict] = []
+    cluster_end = -1
+
+    def flush() -> None:
+        if not cluster:
+            return
+        best = max(
+            cluster,
+            key=lambda r: (
+                int(r.get("score", 0)),
+                float(r.get("confirm_body_ratio", 0.0)),
+                float(r.get("shadow_atr", 0.0)),
+                -int(r.get("_signal_pos", 0)),
+            ),
+        )
+        deduped.append(best)
+
+    for row in sorted(rows, key=lambda r: int(r.get("_signal_pos", 0))):
+        pos = int(row.get("_signal_pos", 0))
+        if not cluster:
+            cluster = [row]
+            cluster_end = pos + cooldown_days
+            continue
+        if pos <= cluster_end:
+            cluster.append(row)
+            cluster_end = max(cluster_end, pos + cooldown_days)
+            continue
+        flush()
+        cluster = [row]
+        cluster_end = pos + cooldown_days
+
+    flush()
+    return sorted(deduped, key=lambda r: int(r.get("_signal_pos", 0)))
+
+
 # ── 核心检测函数 ──────────────────────────────────────────────────────────────
 
 def detect_high_shadow_reversal(
@@ -88,20 +165,25 @@ def detect_high_shadow_reversal(
     min_shadow_pct_strong: float = MIN_SHADOW_PCT_STRONG,
     min_shadow_pct_with_vol: float = MIN_SHADOW_PCT_WITH_VOL,
     big_vol_ratio: float = BIG_VOL_RATIO,
+    atr_window: int = ATR_WINDOW,
+    min_shadow_atr: float = MIN_SHADOW_ATR,
+    prior_rise_lookback: int = PRIOR_RISE_LOOKBACK,
+    min_prior_rise_pct: float = MIN_PRIOR_RISE_PCT,
 ) -> dict:
     """
     检测最新两根 K 线是否触发顶部反转（近期新高 + 长上影 + 次日确认）。
 
     上影线长度采用 OR 逻辑：
-      条件A：上影线 >= 收盘价 x min_shadow_pct_strong（4%）——单独足够强
+      条件A：上影线 >= 收盘价 x min_shadow_pct_strong（默认3%）——单独足够强
       条件B：上影线 >= 收盘价 x min_shadow_pct_with_vol（2%）
-              且 当日成交量 >= vol_ma_50 x big_vol_ratio（2.0x）
+              且 当日成交量 >= vol_ma_50 x big_vol_ratio（默认1.5x）
 
     Returns:
         dict，triggered=False 时表示未触发，其余字段填充检测中间结果。
     """
     _empty = dict(triggered=False, score=0, reason="数据不足")
-    if len(df) < new_high_window + 2:
+    required_len = max(new_high_window + 2, prior_rise_lookback + 2 if min_prior_rise_pct > 0 else 0)
+    if len(df) < required_len:
         return _empty
 
     df = df.copy()
@@ -110,6 +192,7 @@ def detect_high_shadow_reversal(
     # 确保 vol_ma_50 存在
     if "vol_ma_50" not in df.columns:
         df["vol_ma_50"] = df["volume"].astype(float).rolling(50, min_periods=1).mean()
+    df = _ensure_atr(df, atr_window)
 
     # Day-1 = iloc[-2]，Day-2 = iloc[-1]
     d1 = df.iloc[-2]
@@ -150,6 +233,23 @@ def detect_high_shadow_reversal(
             ),
         )
 
+    prior_rise_pct = 0.0
+    if min_prior_rise_pct > 0:
+        base_idx = len(df) - 2 - prior_rise_lookback
+        prior_base = float(df["close"].iloc[base_idx])
+        if prior_base > 0:
+            prior_rise_pct = (float(d1["close"]) / prior_base - 1) * 100
+        if prior_rise_pct < min_prior_rise_pct:
+            return dict(
+                triggered=False, score=0,
+                signal_date=signal_date, confirm_date=confirm_date,
+                prior_rise_pct=round(prior_rise_pct, 2),
+                reason=(
+                    f"前{prior_rise_lookback}日涨幅 {prior_rise_pct:.1f}% "
+                    f"< 顶部背景阈值 {min_prior_rise_pct:.1f}%"
+                ),
+            )
+
     # 条件2：长上影线（相对比例 + 绝对幅度 OR 逻辑）
     body_d1  = _body(d1)
     upper_d1 = _upper_shadow(d1)
@@ -173,6 +273,9 @@ def detect_high_shadow_reversal(
     cond_a = abs_shadow_pct >= min_shadow_pct_strong
     cond_b = (abs_shadow_pct >= min_shadow_pct_with_vol) and (d1_vol_ratio >= big_vol_ratio)
     shadow_ok = cond_a or cond_b
+    atr_col = f"atr_{atr_window}"
+    atr_val = float(d1[atr_col]) if float(d1[atr_col]) > 0 else 1e-9
+    shadow_atr = upper_d1 / atr_val
 
     if not shadow_ok:
         return dict(
@@ -184,6 +287,15 @@ def detect_high_shadow_reversal(
                 f"Day-1 上影线 {abs_shadow_pct*100:.2f}% < 强阈值 {min_shadow_pct_strong*100:.0f}%且"
                 f"量比{d1_vol_ratio:.1f}x < 大放量阈值 {big_vol_ratio}x"
             ),
+        )
+    if shadow_atr < min_shadow_atr:
+        return dict(
+            triggered=False, score=0,
+            signal_date=signal_date, confirm_date=confirm_date,
+            day1_upper_shadow_ratio=round(shadow_ratio, 2),
+            day1_shadow_pct=round(abs_shadow_pct * 100, 2),
+            shadow_atr=round(shadow_atr, 2),
+            reason=f"Day-1 上影线仅 {shadow_atr:.2f} ATR < {min_shadow_atr:.2f} ATR",
         )
 
     # 判断是否为射击之星（更严格的形态）
@@ -203,6 +315,7 @@ def detect_high_shadow_reversal(
     d2_close = float(d2["close"])
     d2_open  = float(d2["open"])
     d2_is_bearish = d2_close < d2_open
+    d2_break_d1_low = d2_close < float(d1["low"])
 
     confirm_mode: str | None = None
     if d2_close < d1_open:
@@ -222,7 +335,7 @@ def detect_high_shadow_reversal(
             reason="Day-2 未确认（仍维持看涨）",
         )
 
-    # ── 综合评分（0~5 分）───────────────────────────────────────────────────
+    # ── 综合评分（0~6 分）───────────────────────────────────────────────────
     # 基础：触发即 1 分
     score = 1
     # 射击之星形态
@@ -239,6 +352,9 @@ def detect_high_shadow_reversal(
     confirm_body_ratio = d2_body / upper_d1 if upper_d1 > 0 else 0.0
     if confirm_body_ratio >= CONFIRM_BODY_RATIO_MIN:
         score += 1
+    # 确认日收盘跌破 Day-1 最低价，说明卖压不只是吃掉实体，而是破坏了整根信号 K 线
+    if d2_break_d1_low:
+        score += 1
 
     # ── 文字描述 ─────────────────────────────────────────────────────────────
     mode_label = {
@@ -250,7 +366,7 @@ def detect_high_shadow_reversal(
     vol_label = "放量" if day1_vol_spike else "未放量"
 
     reason = (
-        f"{signal_date} {pattern_label}（上影/实体={shadow_ratio:.1f}x）{vol_label}，"
+        f"{signal_date} {pattern_label}（上影/实体={shadow_ratio:.1f}x，{shadow_atr:.1f}ATR）{vol_label}，"
         f"{confirm_date} {mode_label}"
     )
 
@@ -263,6 +379,10 @@ def detect_high_shadow_reversal(
         day1_new_high_n=new_high_window,
         day1_upper_shadow_ratio=round(shadow_ratio, 2),
         day1_vol_spike=day1_vol_spike,
+        prior_rise_pct=round(prior_rise_pct, 2),
+        shadow_pct=round(abs_shadow_pct * 100, 2),
+        shadow_atr=round(shadow_atr, 2),
+        d2_break_d1_low=d2_break_d1_low,
         day1_high=round(float(d1["high"]), 4),
         day1_close=round(d1_close, 4),
         score=score,
@@ -282,6 +402,11 @@ def scan_history(
     min_shadow_pct_strong: float = MIN_SHADOW_PCT_STRONG,
     min_shadow_pct_with_vol: float = MIN_SHADOW_PCT_WITH_VOL,
     big_vol_ratio: float = BIG_VOL_RATIO,
+    atr_window: int = ATR_WINDOW,
+    min_shadow_atr: float = MIN_SHADOW_ATR,
+    prior_rise_lookback: int = PRIOR_RISE_LOOKBACK,
+    min_prior_rise_pct: float = MIN_PRIOR_RISE_PCT,
+    cooldown_days: int = COOLDOWN_DAYS,
     forward_days: tuple[int, ...] = (5, 10, 20),
 ) -> pd.DataFrame:
     """
@@ -296,7 +421,7 @@ def scan_history(
 
     Returns:
         DataFrame，每行一个触发点，含信号特征与后续收益列：
-          signal_date, confirm_date, is_shooting_star, shadow_ratio,
+          signal_date, confirm_date, is_shooting_star, shadow_ratio, shadow_atr,
           vol_spike, confirm_mode, score,
           fwd_ret_5d, fwd_ret_10d, fwd_ret_20d（收盘价相对 Day-1 收盘的涨跌幅）
           fwd_min_5d, fwd_min_10d, fwd_min_20d（窗口内最低价跌幅）
@@ -304,22 +429,24 @@ def scan_history(
     df = df.copy()
     df.columns = [c.lower() for c in df.columns]
     df.index = pd.to_datetime(df.index)
-    df = df.sort_index().reset_index()  # 让 iloc 与 position 一一对应
+    df = _reset_index_with_date(df)  # 让 iloc 与 position 一一对应
 
     if "vol_ma_50" not in df.columns:
         df["vol_ma_50"] = df["volume"].astype(float).rolling(50, min_periods=1).mean()
+    df = _ensure_atr(df, atr_window)
 
     o = df["open"].astype(float)
     h = df["high"].astype(float)
-    l = df["low"].astype(float)
+    low_s = df["low"].astype(float)
     c = df["close"].astype(float)
     v = df["volume"].astype(float)
     vm20 = df["vol_ma_50"].astype(float)
+    atr = df[f"atr_{atr_window}"].astype(float)
 
     # — Day-1 候选条件（向量化）—
     body      = (c - o).abs().replace(0, 1e-9)
     upper_shd = h - pd.concat([o, c], axis=1).max(axis=1)
-    rng       = (h - l).replace(0, 1e-9)
+    rng       = (h - low_s).replace(0, 1e-9)
     body_ratio = body / rng
     shadow_ratio = upper_shd / body
 
@@ -343,7 +470,20 @@ def scan_history(
     vol_ratio_series = v / vm20.replace(0, 1e-9)      # 成交量比例
     cond_shadow_a = abs_shadow_pct >= min_shadow_pct_strong                          # 条件A
     cond_shadow_b = (abs_shadow_pct >= min_shadow_pct_with_vol) & (vol_ratio_series >= big_vol_ratio)  # 条件B
-    is_long_shadow = (shadow_ratio >= upper_shadow_ratio_min) & (cond_shadow_a | cond_shadow_b)
+    shadow_atr_series = upper_shd / atr.replace(0, 1e-9)
+    is_long_shadow = (
+        (shadow_ratio >= upper_shadow_ratio_min)
+        & (cond_shadow_a | cond_shadow_b)
+        & (shadow_atr_series >= min_shadow_atr)
+    )
+
+    if min_prior_rise_pct > 0:
+        prior_base = c.shift(prior_rise_lookback)
+        prior_rise_pct = (c / prior_base.replace(0, 1e-9) - 1) * 100
+        has_prior_rise = prior_rise_pct >= min_prior_rise_pct
+    else:
+        prior_rise_pct = pd.Series(0.0, index=df.index)
+        has_prior_rise = pd.Series(True, index=df.index)
 
     # 射击之星（更严格）
     is_star = (shadow_ratio >= SHOOTING_STAR_RATIO) & (body_ratio < SHOOTING_STAR_BODY_MAX)
@@ -352,7 +492,7 @@ def scan_history(
     vol_spike = v > vm20 * vol_spike_ratio
 
     # Day-1 候选
-    day1_mask = is_new_high & is_long_shadow
+    day1_mask = is_new_high & is_long_shadow & has_prior_rise
 
     # — Day-2 确认（向量化）—
     d1_open  = o.shift(1)
@@ -360,12 +500,14 @@ def scan_history(
     d1_mid   = (d1_open + d1_close) / 2
     d2_close = c
     d2_open  = o
+    d1_low   = low_s.shift(1)
 
     cond_engulf   = d2_close < d1_open
     cond_midpoint = (~cond_engulf) & (d2_close < d1_mid)
     cond_bearish  = (~cond_engulf) & (~cond_midpoint) & (d2_close < d2_open) & (d2_close < d1_close)
 
     confirmed = cond_engulf | cond_midpoint | cond_bearish
+    cond_break_low = d2_close < d1_low
 
     # 触发 = Day-1 候选（前一根）+ Day-2 确认（当根）
     # 在位置 i，Day-1 = i-1，Day-2 = i
@@ -393,6 +535,8 @@ def scan_history(
         cbr = d2_body_val / d1_upper_val if d1_upper_val > 0 else 0.0
         if cbr >= CONFIRM_BODY_RATIO_MIN:
             score += 1
+        if bool(cond_break_low.iloc[pos]):
+            score += 1
 
         confirm_mode = (
             "engulf_open"    if bool(cond_engulf.iloc[pos]) else
@@ -406,13 +550,17 @@ def scan_history(
             "is_shooting_star": bool(is_star.iloc[pos_d1]),
             "shadow_ratio":  round(float(shadow_ratio.iloc[pos_d1]), 2),
             "shadow_pct":    round(float(abs_shadow_pct.iloc[pos_d1]) * 100, 2),  # 上影线/收盘价 %
+            "shadow_atr":    round(float(shadow_atr_series.iloc[pos_d1]), 2),
+            "prior_rise_pct": round(float(prior_rise_pct.iloc[pos_d1]), 2),
             "vol_spike":     bool(vol_spike.iloc[pos_d1]),
             "vol_ratio":     round(float(vol_ratio_series.iloc[pos_d1]), 2),
             "confirm_body_ratio": round(cbr, 2),
+            "d2_break_d1_low": bool(cond_break_low.iloc[pos]),
             "confirm_mode":  confirm_mode,
             "score":         score,
             "day1_high":     round(float(h.iloc[pos_d1]), 4),
             "day1_close":    round(float(c.iloc[pos_d1]), 4),
+            "_signal_pos":   pos_d1,
         }
 
         # 后续收益（以 Day-1 收盘为基准）
@@ -420,11 +568,15 @@ def scan_history(
         for fd in forward_days:
             end_pos = min(pos + fd, n - 1)
             fwd_c   = float(c.iloc[end_pos])
-            fwd_min = float(l.iloc[pos + 1: end_pos + 1].min()) if pos + 1 <= end_pos else base
+            fwd_min = float(low_s.iloc[pos + 1: end_pos + 1].min()) if pos + 1 <= end_pos else base
             row[f"fwd_ret_{fd}d"]  = round((fwd_c - base) / base * 100, 2)
             row[f"fwd_min_{fd}d"]  = round((fwd_min - base) / base * 100, 2)
 
         rows.append(row)
+
+    rows = _apply_cooldown(rows, cooldown_days)
+    for row in rows:
+        row.pop("_signal_pos", None)
 
     if not rows:
         return pd.DataFrame()

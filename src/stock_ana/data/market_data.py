@@ -252,3 +252,75 @@ def load_watchlist_data(
                 pass
 
     return result
+
+
+def _tech_pool_symbols(include_holding: bool = True) -> list[tuple[str, str, str]]:
+    """收集三个每日 Mid Vegas 科技池（+持仓）的 (market, symbol, name)。"""
+    import re
+
+    from stock_ana.config import DATA_DIR
+    from stock_ana.data.list_manager import (
+        _read_md_table,
+        load_cn_hightech_list,
+        load_us_tech_list,
+    )
+
+    out: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(market: str, sym: str, name: str) -> None:
+        key = (market, sym)
+        if sym and key not in seen:
+            seen.add(key)
+            out.append((market, sym, name or sym))
+
+    for e in load_us_tech_list():
+        _add("US", str(e.get("ticker", "")).strip().upper(), str(e.get("company", "")).strip())
+    for code in load_cn_hightech_list():
+        _add("CN", str(code).strip().zfill(6), str(code).strip())
+    hk_path = DATA_DIR / "lists" / "hk_techman.md"
+    if hk_path.exists():
+        for row in _read_md_table(hk_path):
+            if len(row) >= 3 and row[1].strip().isdigit():
+                _add("HK", row[1].strip().zfill(5), row[2].strip())
+    if include_holding:
+        hold_path = DATA_DIR / "lists" / "holding.md"
+        if hold_path.exists():
+            for ln in hold_path.read_text(encoding="utf-8").splitlines():
+                m = re.match(r"\|\s*([0-9A-Za-z\.]{1,7})\s*\|\s*(HK|US|CN|SH|SZ)\s*\|\s*([^|]*)", ln)
+                if m:
+                    mk = {"SH": "CN", "SZ": "CN"}.get(m.group(2), m.group(2))
+                    sym = m.group(1).strip()
+                    sym = sym.zfill(5) if mk == "HK" else (sym.zfill(6) if mk == "CN" else sym.upper())
+                    _add(mk, sym, m.group(3).strip())
+    return out
+
+
+def load_tech_pools_data(min_history: int = 0, include_holding: bool = True) -> dict[str, dict]:
+    """Load OHLCV for the three daily Mid-Vegas tech pools (US/HK/CN) + holdings.
+
+    Training universe for market-separated models: each market uses its own
+    tech-centric pool (us_tech_list / hk_techman / cn_hightech_list), which keeps
+    股性 homogeneous within market and gives enough samples per market to train
+    separate models.  Holdings are folded in so they get candidates + scores.
+    """
+    from stock_ana.config import CACHE_DIR
+
+    cache_dirs = {
+        "US": [CACHE_DIR / "us", CACHE_DIR / "ndx100"],
+        "HK": [CACHE_DIR / "hk"],
+        "CN": [CACHE_DIR / "cn"],
+    }
+    result: dict[str, dict] = {}
+    for market, sym, name in _tech_pool_symbols(include_holding=include_holding):
+        for cdir in cache_dirs.get(market, []):
+            p = cdir / f"{sym}.parquet"
+            if p.exists():
+                try:
+                    df = _normalize_df(pd.read_parquet(p))
+                    if len(df) >= min_history:
+                        result[f"{market}:{sym}"] = {"market": market, "symbol": sym, "name": name, "df": df}
+                except Exception:
+                    pass
+                break
+    return result

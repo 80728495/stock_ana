@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -103,24 +104,40 @@ def fetch_holdings(use_sim: bool = False) -> list[dict]:
 #  自选股分组获取（Quote Context）
 # ═══════════════════════════════════════════════════════
 
-def fetch_group_stocks(group_name: str) -> list[dict]:
-    """获取指定 Futu 自选股分组的所有标的。
-
-    Returns:
-        [{"symbol": "NVDA", "market": "US", "name": "英伟达"}, ...]
-    """
+def open_quote_ctx():
+    """打开一个 OpenQuoteContext（供所有分组复用，避免反复建连触发限流）。"""
     try:
-        from futu import OpenQuoteContext, RET_OK  # type: ignore[import]
+        from futu import OpenQuoteContext  # type: ignore[import]
     except ImportError:
         print("❌ futu-api 未安装：pip install futu-api")
         sys.exit(1)
+    return OpenQuoteContext(host=OPEND_HOST, port=OPEND_PORT)
 
-    ctx = OpenQuoteContext(host=OPEND_HOST, port=OPEND_PORT)
-    try:
-        ret, data = ctx.get_user_security(group_name)
-        if ret != RET_OK or data is None or (hasattr(data, "empty") and data.empty):
-            print(f"  ⚠️  读取分组 [{group_name}] 失败或为空")
-            return []
+
+def fetch_group_stocks(ctx, group_name: str, retries: int = 3) -> tuple[bool, list[dict]]:
+    """获取指定 Futu 自选股分组的所有标的（复用传入的 ctx，失败重试）。
+
+    Returns:
+        (ok, stocks)
+        ok=False  → 读取失败（RET 错误/异常），调用方应保留旧数据，切勿用空覆盖。
+        ok=True   → 读取成功；stocks 为空表示该分组「确实为空」。
+    """
+    from futu import RET_OK  # type: ignore[import]
+
+    last_err: object = None
+    for attempt in range(1, retries + 1):
+        try:
+            ret, data = ctx.get_user_security(group_name)
+        except Exception as exc:  # noqa: BLE001 — 连接/超时等
+            last_err = exc
+            time.sleep(1.0)
+            continue
+        if ret != RET_OK:
+            last_err = data
+            time.sleep(1.0)
+            continue
+        if data is None or (hasattr(data, "empty") and data.empty):
+            return True, []  # RET_OK 但空 = 分组确实为空
         stocks = []
         for _, row in data.iterrows():
             code_raw = str(row.get("code", "")).strip()
@@ -138,9 +155,32 @@ def fetch_group_stocks(group_name: str) -> list[dict]:
             else:
                 continue
             stocks.append({"symbol": symbol, "market": market, "name": name})
-        return stocks
-    finally:
-        ctx.close()
+        return True, stocks
+    print(f"  ⚠️  读取分组 [{group_name}] 失败（重试 {retries} 次）：{last_err}")
+    return False, []
+
+
+def parse_existing_group_section(title_key: str) -> list[dict]:
+    """从现有 holding.md 解析某分组区段已有标的（用于拉取失败时保留，防数据丢失）。"""
+    if not HOLDING_PATH.exists():
+        return []
+    stocks: list[dict] = []
+    in_section = False
+    for line in HOLDING_PATH.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            in_section = title_key in line
+            continue
+        if in_section and line.strip().startswith("|"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) < 3 or cells[0] in ("代码", "") or set(cells[0]) <= {"-"}:
+                continue
+            stocks.append({"symbol": cells[0], "market": cells[1], "name": cells[2]})
+    return stocks
+
+
+def parse_existing_holdings_count() -> int:
+    """现有 holding.md 持仓区段的标的数（用于持仓拉空时的防呆校验）。"""
+    return len(parse_existing_group_section("持仓"))
 
 
 # ═══════════════════════════════════════════════════════
@@ -218,19 +258,44 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="只打印预览，不写文件")
     parser.add_argument("--include-watch", action="store_true",
                         help="兼容旧参数：holding.md 现在默认包含「观察」")
+    parser.add_argument("--force-empty", action="store_true",
+                        help="即使持仓拉取为空也强制写入（默认会中止以防数据丢失）")
     args = parser.parse_args()
 
     print("📥 获取持仓 ...")
     holdings = fetch_holdings(use_sim=args.sim)
     print(f"   持仓 {len(holdings)} 只")
 
-    print(f"📥 获取自选股分组「{FOCUS_GROUP}」...")
-    focus_stocks = fetch_group_stocks(FOCUS_GROUP)
-    print(f"   关注 {len(focus_stocks)} 只")
+    # 单个 quote ctx 复用拉两个分组，避免反复建连触发限流
+    ctx = open_quote_ctx()
+    try:
+        print(f"📥 获取自选股分组「{FOCUS_GROUP}」...")
+        ok_focus, focus_stocks = fetch_group_stocks(ctx, FOCUS_GROUP)
+        print(f"📥 获取自选股分组「{WATCH_GROUP}」...")
+        ok_watch, watch_stocks = fetch_group_stocks(ctx, WATCH_GROUP)
+    finally:
+        ctx.close()
 
-    print(f"📥 获取自选股分组「{WATCH_GROUP}」...")
-    watch_stocks = fetch_group_stocks(WATCH_GROUP)
-    print(f"   观察 {len(watch_stocks)} 只")
+    # 拉取失败 → 保留旧数据，绝不用空段覆盖（防数据丢失）
+    if not ok_focus:
+        focus_stocks = parse_existing_group_section("关注")
+        print(f"   ⚠️ 关注拉取失败，保留 holding.md 旧数据 {len(focus_stocks)} 只")
+    else:
+        print(f"   关注 {len(focus_stocks)} 只")
+    if not ok_watch:
+        watch_stocks = parse_existing_group_section("观察")
+        print(f"   ⚠️ 观察拉取失败，保留 holding.md 旧数据 {len(watch_stocks)} 只")
+    else:
+        print(f"   观察 {len(watch_stocks)} 只")
+
+    # 防呆：持仓拉空但旧文件本有持仓 → 多半是 OpenD/账户/连接问题，中止写入以防整段丢失
+    if not holdings:
+        old_n = parse_existing_holdings_count()
+        if old_n > 0 and not args.dry_run:
+            print(f"\n❌ 持仓拉取为空，但旧 holding.md 有 {old_n} 只持仓——疑似 OpenD 未连/账户异常。")
+            print("   已中止写入以防数据丢失。请检查 OpenD 后重试（或加 --force-empty 强制覆盖）。")
+            if not args.force_empty:
+                sys.exit(2)
 
     content = build_holding_md(
         holdings,
