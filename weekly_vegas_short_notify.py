@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-周线 Vegas Short 扫描 + Gemini 批量分析 + 飞书 PDF 推送
+周线 Vegas Short 扫描 + Codex 批量分析 + 飞书 PDF 推送
 
 流程：
   1. 运行周线 Vegas Short 扫描，找出近期 touch 信号（scan 内置图表渲染）
-  2. 每最多 3 只一组发送 Gemini；每批结果返回后等 180s 再发下一批
-  3. 合并所有批次 Gemini 文本，生成统一 PDF（封面汇总表 + 逐只图表 + 分析）
+  2. 每最多 3 只一组发送 LLM；每批结果返回后等 180s 再发下一批
+  3. 合并所有批次 LLM 文本，生成统一 PDF（封面汇总表 + 逐只图表 + 分析）
   4. 上传 PDF 到飞书并发送消息
 
 用法：
@@ -13,7 +13,7 @@
     python weekly_vegas_short_notify.py --list us         # 美股科技列表
     python weekly_vegas_short_notify.py --list hk         # 港股宇宙池
     python weekly_vegas_short_notify.py --lookback 2      # 最近 2 周
-    python weekly_vegas_short_notify.py --scan-only       # 仅扫描，不调 Gemini，不发通知
+    python weekly_vegas_short_notify.py --scan-only       # 仅扫描，不调 LLM，不发通知
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -214,24 +215,29 @@ def upload_report_file(token: str, report_path: Path) -> str | None:
 
 
 # ════════════════════════════════════════════════════════════════════
-#  Gemini 批量分析（每批 ≤ BATCH_SIZE 只，批间等 BATCH_DELAY 秒）
+#  LLM 批量分析（每批 ≤ BATCH_SIZE 只，批间等 BATCH_DELAY 秒）
 # ════════════════════════════════════════════════════════════════════
 
-async def run_batched_gemini(signals: list[dict]) -> str:
+async def run_batched_gemini(signals: list[dict], llm_backend: str = "codex") -> str:
     """
-    将信号分成每批 ≤ BATCH_SIZE 只，依次发给 Gemini。
+    将信号分成每批 ≤ BATCH_SIZE 只，依次发给 LLM。
     每批结果返回后等待 BATCH_DELAY 秒再发下一批。
     返回所有批次合并的完整 Markdown 文本。
     """
-    from stock_ana.utils.scan_analyst import build_prompt, _init_client, _call_gemini, DEFAULT_MODEL
+    from stock_ana.utils.scan_analyst import DEFAULT_MODEL, _call_codex, _call_gemini, _init_client, build_prompt
 
     batches = [signals[i : i + BATCH_SIZE] for i in range(0, len(signals), BATCH_SIZE)]
     logger.info(
-        f"Gemini 批量分析：{len(signals)} 只，分 {len(batches)} 批"
+        f"{llm_backend} 批量分析：{len(signals)} 只，分 {len(batches)} 批"
         f"（每批 ≤{BATCH_SIZE} 只，批间等待 {BATCH_DELAY}s）"
     )
 
-    client = await _init_client(DEFAULT_MODEL)
+    client = None
+    if llm_backend == "gemini":
+        client = await _init_client(DEFAULT_MODEL)
+    elif llm_backend != "codex":
+        raise ValueError(f"不支持的 LLM backend: {llm_backend}，可选 gemini/codex")
+
     all_texts: list[str] = []
 
     try:
@@ -240,21 +246,25 @@ async def run_batched_gemini(signals: list[dict]) -> str:
             logger.info(f"  第 {idx}/{len(batches)} 批：{syms}")
             try:
                 prompt = build_prompt(batch)
-                text   = await _call_gemini(prompt, client, model=DEFAULT_MODEL, max_retries=1)
+                if llm_backend == "codex":
+                    text = await _call_codex(prompt)
+                else:
+                    text = await _call_gemini(prompt, client, model=DEFAULT_MODEL, max_retries=1)
                 all_texts.append(text.strip())
                 logger.success(f"  第 {idx} 批完成，{len(text)} 字符")
             except Exception as e:
-                logger.error(f"  第 {idx} 批 Gemini 调用失败 [{type(e).__name__}]: {e}")
+                logger.error(f"  第 {idx} 批 {llm_backend} 调用失败 [{type(e).__name__}]: {e}")
                 # 继续尝试下一批，而不是中断整个流程
                 all_texts.append(
-                    f"<!-- 第 {idx} 批（{', '.join(syms)}）Gemini 分析失败: {e} -->"
+                    f"<!-- 第 {idx} 批（{', '.join(syms)}）{llm_backend} 分析失败: {e} -->"
                 )
 
             if idx < len(batches):
                 logger.info(f"  等待 {BATCH_DELAY}s 再发下一批...")
                 await asyncio.sleep(BATCH_DELAY)
     finally:
-        await client.close()
+        if client is not None:
+            await client.close()
 
     return "\n\n---\n\n".join(all_texts)
 
@@ -264,7 +274,7 @@ async def run_batched_gemini(signals: list[dict]) -> str:
 # ════════════════════════════════════════════════════════════════════
 
 def save_weekly_report(signals: list[dict], gemini_text: str, out_dir: Path) -> Path:
-    """将汇总表 + Gemini 合并文本保存为单一 .md 文件。"""
+    """将汇总表 + LLM 合并文本保存为单一 .md 文件。"""
     today  = date.today().isoformat()
     syms   = "_".join(s.get("symbol", "") for s in signals[:5])
     suffix = f"_plus{len(signals) - 5}more" if len(signals) > 5 else ""
@@ -303,6 +313,7 @@ async def main_async(
     list_mode: str = "combined",
     skip_indicators: bool = False,
     force_send: bool = False,
+    llm_backend: str = "codex",
 ) -> None:
     t0    = datetime.now()
     today = date.today().isoformat()
@@ -356,7 +367,7 @@ async def main_async(
     signals = sorted(seen.values(), key=lambda s: s["score"], reverse=True)
     logger.info(f"去重后：{len(signals)} 只")
 
-    # ── 排除已在富途自选股中的 symbol（不需要 Gemini）────────────────────────
+    # ── 排除已在富途自选股中的 symbol（不需要 LLM）────────────────────────
     # 优先读 futu_watched_symbols.json（sync_futu_watchlist.py 每日保存）
     # 若不存在则 fallback 到 watchlist.md
     _futu_cache = PROJECT_ROOT / "data" / "lists" / "futu_watched_symbols.json"
@@ -371,10 +382,10 @@ async def main_async(
     new_signals       = [s for s in signals if s.get("symbol", "") not in personal_syms]
     if watchlist_signals:
         logger.info(
-            f"已在关注列表，跳过Gemini（{len(watchlist_signals)} 只）: "
+            f"已在关注列表，跳过LLM（{len(watchlist_signals)} 只）: "
             + ", ".join(s.get("symbol","") for s in watchlist_signals)
         )
-    logger.info(f"需要Gemini分析：{len(new_signals)} 只")
+    logger.info(f"需要LLM分析：{len(new_signals)} 只")
 
     if not signals:
         logger.info("本周无信号，流水线结束")
@@ -396,32 +407,32 @@ async def main_async(
             chart_paths.append(cp)
             chart_labels.append(f"{s.get('symbol','')} ({s.get('name','')})")
 
-    # ── Step 2: Gemini 批量分析 ───────────────────────────────────────────────
+    # ── Step 2: LLM 批量分析 ───────────────────────────────────────────────
     report_path: Path | None = None
     gemini_text = ""
 
     if scan_only:
-        logger.info("【2/3】--scan-only 模式，跳过 Gemini 分析")
+        logger.info("【2/3】--scan-only 模式，跳过 LLM 分析")
     elif not new_signals:
-        logger.info("【2/3】无需 Gemini 分析的新信号，跳过")
+        logger.info("【2/3】无需 LLM 分析的新信号，跳过")
     else:
-        logger.info(f"【2/3】Gemini 批量分析（{len(new_signals)} 只，每批 ≤{BATCH_SIZE} 只）")
+        logger.info(f"【2/3】{llm_backend} 批量分析（{len(new_signals)} 只，每批 ≤{BATCH_SIZE} 只）")
         out_dir = ANALYSIS_OUT_DIR / today
         try:
-            gemini_text = await run_batched_gemini(new_signals)
+            gemini_text = await run_batched_gemini(new_signals, llm_backend=llm_backend)
             report_path = save_weekly_report(signals, gemini_text, out_dir)
         except Exception as e:
-            logger.error(f"Gemini 分析整体失败: {e}")
+            logger.error(f"{llm_backend} 分析整体失败: {e}")
 
-    # 统一产出可用于 PDF 的 markdown 报告（即使 Gemini 未执行/失败）
+    # 统一产出可用于 PDF 的 markdown 报告（即使 LLM 未执行/失败）
     if report_path is None:
         out_dir = ANALYSIS_OUT_DIR / today
         if scan_only:
-            gemini_text = "## 说明\n\n本次以 --scan-only 模式运行，未执行 Gemini 解读。"
+            gemini_text = "## 说明\n\n本次以 --scan-only 模式运行，未执行 LLM 解读。"
         elif not new_signals:
-            gemini_text = "## 说明\n\n本次信号均已在关注列表中，按规则跳过 Gemini 解读。"
+            gemini_text = "## 说明\n\n本次信号均已在关注列表中，按规则跳过 LLM 解读。"
         elif not gemini_text.strip():
-            gemini_text = "## 说明\n\nGemini 解读执行失败，请查看日志获取错误详情。"
+            gemini_text = "## 说明\n\nLLM 解读执行失败，请查看日志获取错误详情。"
         report_path = save_weekly_report(signals, gemini_text, out_dir)
 
     # ── Step 3: 生成 PDF + 发飞书 ────────────────────────────────────────────
@@ -496,11 +507,11 @@ async def main_async(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="周线 Vegas Short 扫描 + Gemini + 飞书 PDF")
+    parser = argparse.ArgumentParser(description="周线 Vegas Short 扫描 + Codex + 飞书 PDF")
     parser.add_argument("--lookback", type=int, default=1,
                         help="最近几周（默认 1 = 仅当周）")
     parser.add_argument("--scan-only", action="store_true",
-                        help="仅扫描，不调 Gemini，不发飞书通知")
+                        help="仅扫描，不调 LLM，不发飞书通知")
     parser.add_argument("--list", dest="list_mode", default="combined",
                         choices=["combined", "shawn", "us", "hk", "us-full"],
                         help="扫描标的列表（默认 combined = US tech + HK techman）")
@@ -508,6 +519,16 @@ def main() -> None:
                         help="跳过周线指标刷新（当日已刷新过时使用）")
     parser.add_argument("--force-send", action="store_true",
                         help="忽略去重保护，强制再次发送飞书 PDF")
+    parser.add_argument(
+        "--llm-backend",
+        choices=["gemini", "codex"],
+        default=(
+            os.environ.get("STOCK_ANA_WEEKLY_LLM_BACKEND")
+            or os.environ.get("STOCK_ANA_SCAN_LLM_BACKEND")
+            or "codex"
+        ).strip().lower(),
+        help="LLM 后端：codex（默认，通过本地 CLIProxyAPI 调 gpt-5.5）或 gemini",
+    )
     args = parser.parse_args()
     asyncio.run(main_async(
         lookback=args.lookback,
@@ -515,6 +536,7 @@ def main() -> None:
         list_mode=args.list_mode,
         skip_indicators=args.skip_indicators,
         force_send=args.force_send,
+        llm_backend=args.llm_backend,
     ))
 
 

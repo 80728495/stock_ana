@@ -52,6 +52,12 @@ Desktop.ini
 logs/
 *.log
 
+# 本机工具/备份，不随项目提交
+CLIProxyAPI/
+windows_update_backup_*/
+disable_windows_update_hard.ps1
+scripts/build_custom_holdings_sector_summary.py
+
 # youtube_trans 敏感/临时文件
 youtube_trans/.env
 youtube_trans/cookies.txt

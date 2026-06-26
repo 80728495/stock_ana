@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -27,6 +28,7 @@ from stock_ana.config import OUTPUT_DIR
 PROMPT_TEMPLATE_PATH = Path(__file__).parents[3] / "data" / "scan_signal_prompt.md"
 DEFAULT_OUT_DIR = OUTPUT_DIR / "scan_analysis"
 DEFAULT_MODEL = "gemini-3.0-pro"
+DEFAULT_LLM_BACKEND = "codex"
 
 # ─── Prompt 构建 ─────────────────────────────────────────────────────────────
 
@@ -100,9 +102,8 @@ async def _init_client(model: str = DEFAULT_MODEL):
     若 PSIDTS 已被 Google 服务端轮换（约每 1-3 小时），会自动打开浏览器访问
     Gemini，等 Chrome 拿到新 Cookie 后重新读取并重试（最多 2 次）。
     """
-    import os
     from pathlib import Path
-    from dotenv import load_dotenv
+
     from gemini_webapi import GeminiClient
     from gemini_webapi.exceptions import AuthError as _AuthError
 
@@ -279,6 +280,17 @@ async def _call_gemini(
     raise last_err  # type: ignore[misc]
 
 
+async def _call_codex(prompt: str, model: str | None = None) -> str:
+    """发送 prompt 到本地 CLIProxyAPI/Codex，返回文本结果。"""
+    from stock_ana.utils.codex_analyst import DEFAULT_CODEX_MODEL, call_codex_prompt
+
+    return await asyncio.to_thread(
+        call_codex_prompt,
+        prompt,
+        model=model or DEFAULT_CODEX_MODEL,
+    )
+
+
 # ─── 结果保存 ─────────────────────────────────────────────────────────────────
 
 def _save_result(signals: list[dict], analysis_text: str, out_dir: Path) -> Path:
@@ -319,6 +331,7 @@ async def analyze_signals(
     model: str = DEFAULT_MODEL,
     out_dir: Path | None = None,
     min_signal: str | None = None,
+    backend: str | None = None,
 ) -> Path:
     """
     批量分析股票列表，一次请求完成所有标的，保存为一个 .md 报告。
@@ -326,10 +339,12 @@ async def analyze_signals(
     Args:
         signals:    股票列表，每个元素至少包含 symbol、name 字段。
                     也可以是 run_scan() 的返回值（会自动按 min_signal 过滤）。
-        model:      Gemini 模型名
+        model:      模型名。Gemini 默认 gemini-3.0-pro；Codex 可传 gpt-5.5
         out_dir:    输出目录，默认 data/output/scan_analysis/YYYY-MM-DD/
         min_signal: 当 signals 来自扫描结果时，可指定最低等级过滤
                     （STRONG_BUY/BUY/HOLD）；None 则不过滤，全部分析。
+        backend:    "gemini" 或 "codex"。为 None 时读取 STOCK_ANA_SCAN_LLM_BACKEND，
+                    未设置则默认使用 Codex。
 
     Returns:
         生成的 .md 文件路径
@@ -348,9 +363,23 @@ async def analyze_signals(
         logger.info("没有符合条件的标的，跳过分析")
         raise ValueError("没有符合条件的标的")
 
+    resolved_backend = (
+        backend
+        or os.environ.get("STOCK_ANA_SCAN_LLM_BACKEND")
+        or DEFAULT_LLM_BACKEND
+    ).strip().lower()
+
     logger.info(f"构建批量 Prompt，共 {len(targets)} 个标的...")
     prompt = build_prompt(targets)
     logger.info(f"Prompt 长度: {len(prompt)} 字符")
+
+    if resolved_backend == "codex":
+        text = await _call_codex(prompt, model=None if model == DEFAULT_MODEL else model)
+        path = _save_result(targets, text, out_dir)
+        return path
+
+    if resolved_backend != "gemini":
+        raise ValueError(f"不支持的 LLM backend: {resolved_backend}，可选 gemini/codex")
 
     client = await _init_client(model)
     try:
