@@ -32,7 +32,7 @@ from stock_ana.data.fetcher_futu import quote_context
 
 HK_UNIVERSE_FILE = DATA_DIR / "hk_universe.csv"
 LISTS_DIR = Path(__file__).resolve().parents[3] / "data" / "lists"
-INDUSTRY_CACHE_FILE = DATA_DIR / "cache" / "hk_industry_map.csv"
+INDUSTRY_CACHE_FILE = DATA_DIR / "hk_industry_map.csv"  # 生成型 build 依赖，入 git（非 cache 快照）
 OUT_CSV = LISTS_DIR / "hk_techman.csv"
 OUT_MD = LISTS_DIR / "hk_techman.md"
 
@@ -100,7 +100,7 @@ def fetch_industry_map(use_cache: bool = False) -> pd.DataFrame:
     返回 DataFrame，列：futu_code, industry（多行业时用顿号合并）。
 
     Args:
-        use_cache: True 时读取本地缓存（data/cache/hk_industry_map.csv）
+        use_cache: True 时读取本地已生成的行业映射（data/hk_industry_map.csv）
     """
     if use_cache and INDUSTRY_CACHE_FILE.exists():
         logger.info(f"读取行业缓存: {INDUSTRY_CACHE_FILE}")
@@ -277,7 +277,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--no-futu", action="store_true",
-        help="使用本地缓存，不连富途 OpenD（需已有 cache/hk_industry_map.csv）",
+        help="使用本地已生成的行业映射，不连富途 OpenD（需已有 data/hk_industry_map.csv）",
     )
     args = parser.parse_args()
 
