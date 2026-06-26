@@ -188,12 +188,13 @@ def fit_logistic(df: pd.DataFrame, feature_cols: list[str]) -> tuple[pd.DataFram
     if len(usable) < 3:
         return pd.DataFrame(), pd.DataFrame()
 
-    xdf = binary[usable].apply(pd.to_numeric, errors="coerce")
+    xdf = binary[usable].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
     med = xdf.median()
-    xdf = xdf.fillna(med)
+    xdf = xdf.fillna(med).fillna(0.0)  # inf→NaN→中位数；第二次兜底极少数中位数仍 NaN 的列
     mean = xdf.mean()
     std = xdf.std(ddof=0).replace(0, 1)
-    x = ((xdf - mean) / std).to_numpy(dtype=float)
+    # 标准化后 winsorize 到 ±8σ：个别极端值（实测有 inf、53σ）会让梯度下降首步即发散成 NaN
+    x = np.clip(((xdf - mean) / std).to_numpy(dtype=float), -8.0, 8.0)
     y = (binary["label"] == "true_top").astype(float).to_numpy()
 
     xb = np.column_stack([np.ones(len(x)), x])
@@ -207,8 +208,8 @@ def fit_logistic(df: pd.DataFrame, feature_cols: list[str]) -> tuple[pd.DataFram
         grad[1:] += l2 * beta[1:] / len(y)
         beta -= lr * grad
 
-    all_x = df[usable].apply(pd.to_numeric, errors="coerce").fillna(med)
-    all_x = ((all_x - mean) / std).to_numpy(dtype=float)
+    all_x = df[usable].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(med).fillna(0.0)
+    all_x = np.clip(((all_x - mean) / std).to_numpy(dtype=float), -8.0, 8.0)
     all_xb = np.column_stack([np.ones(len(all_x)), all_x])
     prob = 1 / (1 + np.exp(-np.clip(all_xb @ beta, -30, 30)))
     scored = _build_scored_frame(df, prob)

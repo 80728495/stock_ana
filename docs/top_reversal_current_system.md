@@ -73,13 +73,45 @@
 - **任务2（watchlist 作验证集，样本大）**：**CN 必须分离**——分市场 AUC 0.751 vs 全局 0.621，铁证（CN 股性独立，混进 US/HK 严重拖累）。US/HK 上分市场 vs 全局在噪音内（全局偶尔借 US 样本略优）。
 - 绝对 AUC：watchlist-test US 仅 0.63-0.68（比 holding-test 0.77 低）→ 对更广人群泛化一般，holding OOS 数字偏乐观（持仓与训练相似）。
 
-## 0.8 前向 PE 估值特征（2026-06-21 夜）
+## 0.8 个股基本面特征：估值多乘数 + 增长（2026-06-23 扩充）
 
-`valuation_context.py`：`valuation_pe`（US 前向PE from stockanalysis.com `/api/symbol/s/{t}/statistics`；HK/CN trailing pe_ttm from Futu OpenD）+ `valuation_pe_pct_mkt`（**市场内分位**，三市场估值中枢不同、绝不跨市场比）。数据缓存 `data/cache/fundamentals/{us_forward_pe,futu_pe}.csv`。
+估值绝对值无意义，**只有「相对」才有意义**：相对市场（市场内分位）、相对增长（PEG）。
+不同股性适用不同乘数——盈利成长股看 PE、重资产/代工（中芯/华虹）看 PB、SaaS 看 PS——
+故同时提供三类乘数，由 SIC 子赛道 + 树自行选用。
 
-**效果（任务3，watchlist 验证，+PE vs 无PE）**：US AUC **0.635→0.705（+0.07，迄今单特征最大增益）**、HK 0.811→0.828、CN 0.751→0.711（噪音）。**`valuation_pe` 是 US gain 第1、CN 第3、HK 第5 特征**——估值是强顶部维度。
+**`valuation_context.py`（`VALUATION_FEATURES`，6 个）**：`valuation_{pe,pb,ps}` + 各自 `_pct_mkt`（**市场内分位**，三市场估值中枢不同、绝不跨市场比）。
+- US PE(前向)/PS(前向)/PB — stockanalysis.com `/api/symbol/s/{t}/statistics`
+- HK/CN PE(ttm)/PB — Futu OpenD（PS 暂无源）
 
-> ⚠️ **重大 caveat（必读）**：当前 PE 是**今天的快照**，用在历史候选上 = **未来信息泄漏**；且静态个股值会让树**记忆个股身份**（变相 leak）。**所以上面的 AUC 增益偏乐观，不是干净的实时信号。** 真实价值需逐时点历史前向 PE。**对实时打分（今天的候选用今天的 PE）有效。** 已 wire 进 pipeline（REALTIME 233 特征），但解读历史回测时务必扣除这层乐观。
+**`growth_context.py`（`GROWTH_FEATURES`，4 个）**：`earnings_growth`、`revenue_growth`、`sector_earnings_growth_mean`（子赛道盈利增长均值＝赛道基本面热度，**`is_semiconductor` 静态标签的通用替代**）、`valuation_peg`（=前向PE/盈利增长，仅 growth>5；PE 相对增长才有意义）。增长为**因果**（取候选年之前已披露财年，见 `_causal_year`），US 优先；HK/CN 增长源待接（Futu 财报）。
+数据缓存 `data/cache/fundamentals/{us_forward_pe,futu_pe,us_growth}.csv`，刷新 `src/stock_ana/research/top_reversal/refresh_valuation_pe.py`。
+
+**效果（2026-06-23，US holding-OOS，213 因果特征干净 BASE）**：
+| 特征集 | AUC | Δ |
+|---|---|---|
+| BASE（无基本面） | 0.696 | — |
+| +PE（pe + pct） | 0.726 | +0.030 |
+| +PE/PB/PS（全估值乘数） | 0.778 | +0.082 |
+| +growth（eg/rg/sector/peg） | 0.763 | +0.067 |
+| **+全基本面** | **0.843** | **+0.147** |
+
+- **PB 是最强单项估值乘数（+0.092）**，PS +0.064——**直接实证「代工看 PB、SaaS 看 PS」**：华虹(01347) PE=517 失真，PB=5.54 才有意义。
+- **`sector_earnings_growth_mean` 是最重要的基本面特征**（从全集移除 → 0.843 跌到 0.754），确认「赛道热度」就是 `is_semiconductor` 的通用动态替代。
+- PE/PEG 作为组贡献，PEG 单独略负、但在全集中 +0.007；raw `revenue_growth` 边际可负（与 earnings_growth 共线，候删）。
+
+**HK/CN 增长接入（2026-06-23）**：Futu `get_stock_filter` 最新年报 → `futu_growth.csv`（HK 258 / CN 293）。earnings←归母净利增长、revenue←营业总收入增长。华虹(01347) eg=−5.4%（盈利负增长）正解释其 PE=517 失真、PB=5.54 才有意义。
+
+**CN 板块映射 + watchlist 验证（2026-06-23）**：`src/stock_ana/research/top_reversal/build_cn_industry_map.py` 用 Futu `get_plate_list(SH, INDUSTRY)`→`get_plate_stock` 建 `cn_industry_map.csv`（5607 只 / 131 行业，如 688981=半导体、600519=白酒Ⅱ），`_build_sector_map` 加 CN 分支 → CN 也有 `sector_earnings_growth_mean`（非空 2207/2565）。CN 在 holding 只有 4 个正例噪音大，改用 **watchlist 作验证集**（训练=科技池非 watchlist 2121 只/正175，验证=watchlist 444 只/正19）：
+
+| 市场 | 验证方式 | BASE | +全基本面 | Δ |
+|---|---|---|---|---|
+| US | holding-OOS（16 正） | 0.696 | 0.843 | +0.147 |
+| HK | holding-OOS（10 正） | 0.756 | 0.796 | +0.040 |
+| **CN** | **watchlist 验证（19 正）** | 0.712 | **0.815** | **+0.103** |
+
+CN：+估值(pe/pb) 0.764、+增长(含sector) 0.772、**仅 `sector_earnings_growth_mean` +0.048**。三市场基本面均验证有效，sector 热度都是强特征。早先 CN holding-OOS −0.068 系 4 正例噪音，已被推翻（印证 §0.7：CN 须用 watchlist 验证）。
+
+> ⚠️ **重大 caveat（必读）**：估值乘数是**今天的快照**，用在历史候选上 = **未来信息泄漏**，且静态个股值会让树**记忆个股身份**。**所以估值侧 AUC 偏乐观，不是干净的实时信号；增长侧是因果的（年度序列、取候选年前），干净。** 估值乘数对**实时打分（今天的候选用今天的乘数）有效**。已 wire 进 pipeline（REALTIME 240 特征），解读历史回测时对估值乘数务必扣除这层乐观。
 
 ---
 
@@ -96,7 +128,7 @@
 三类策略统一在研究脚本中合并：
 
 ```python
-# scripts/build_top_candidate_research.py
+# src/stock_ana/research/top_reversal/build_top_candidate_research.py
 def _scan_pattern_candidates(df, args):
     shadow = scan_high_shadow(...)
     doji = scan_evening_star(...)
@@ -345,7 +377,7 @@ SMC 特征分组在 `feature_registry.py` 中登记。
 
 代码入口：
 
-- `scripts/build_top_candidate_research.py::_build_symbol_research_rows`
+- `src/stock_ana/research/top_reversal/build_top_candidate_research.py::_build_symbol_research_rows`
 - `src/stock_ana/research/top_reversal/candidate_sources.py`
 
 默认候选来源：
@@ -403,7 +435,7 @@ double_top
 
 - `src/stock_ana/research/top_reversal/coverage.py::strategy_coverage_report`
 - `src/stock_ana/research/top_reversal/candidate_sources.py::attach_strategy_matches`
-- `scripts/build_top_candidate_research.py::_score_performance_vs_universe`
+- `src/stock_ana/research/top_reversal/build_top_candidate_research.py::_score_performance_vs_universe`
 
 覆盖度计算方式：
 
@@ -421,8 +453,8 @@ double_top
 
 代码：
 
-- `scripts/build_top_candidate_research.py::_macro_zigzag_label`
-- `scripts/build_top_candidate_research.py::_label_candidate`
+- `src/stock_ana/research/top_reversal/build_top_candidate_research.py::_macro_zigzag_label`
+- `src/stock_ana/research/top_reversal/build_top_candidate_research.py::_label_candidate`
 
 标注分两层：
 
@@ -476,7 +508,7 @@ double_top
 入口：
 
 ```bash
-python3 scripts/build_top_candidate_research.py
+python3 src/stock_ana/research/top_reversal/build_top_candidate_research.py
 ```
 
 主要流程：
@@ -530,7 +562,7 @@ load_watchlist_data
 代码：
 
 - `src/stock_ana/research/top_reversal/modeling.py::fit_logistic`
-- `scripts/build_top_candidate_research.py::_research_bundle`
+- `src/stock_ana/research/top_reversal/build_top_candidate_research.py::_research_bundle`
 
 当前模型是轻量 logistic regression：
 
@@ -575,7 +607,7 @@ and (top distance to EMA144 >= 25% or top distance to EMA200 >= 30%)
 
 代码：
 
-- `scripts/build_top_candidate_research.py::_smc_model_comparison`
+- `src/stock_ana/research/top_reversal/build_top_candidate_research.py::_smc_model_comparison`
 
 对比模型：
 
@@ -600,7 +632,7 @@ and (top distance to EMA144 >= 25% or top distance to EMA200 >= 30%)
 当前结果来自最近一次运行：
 
 ```bash
-python3 scripts/build_top_candidate_research.py
+python3 src/stock_ana/research/top_reversal/build_top_candidate_research.py
 ```
 
 ### 5.1 当前集合规模
@@ -771,7 +803,7 @@ Mid Vegas 严格上涨趋势过滤后：
 
 标签接入：
 
-- `scripts/build_top_candidate_research.py::_macro_zigzag_label`
+- `src/stock_ana/research/top_reversal/build_top_candidate_research.py::_macro_zigzag_label`
 
 ### 6.3 判断规则
 

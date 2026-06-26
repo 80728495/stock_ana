@@ -10,6 +10,7 @@ from stock_ana.research.top_reversal.market_context import add_index_squeeze_fea
 from stock_ana.research.top_reversal.smc_context import add_smc_ob_features
 from stock_ana.research.top_reversal.macro_micro_context import add_macro_micro_features
 from stock_ana.research.top_reversal.prior_high_context import add_prior_high_features
+from stock_ana.research.top_reversal.growth_context import add_growth_features
 from stock_ana.research.top_reversal.valuation_context import add_valuation_features
 from stock_ana.research.top_reversal.vegas_context import add_mid_vegas_features
 
@@ -80,5 +81,6 @@ def add_research_features(
     out = add_prior_high_features(out, symbol_data=symbol_data)
     out = add_macro_micro_features(out, symbol_data=symbol_data)
     out = add_valuation_features(out, symbol_data=symbol_data)
+    out = add_growth_features(out, symbol_data=symbol_data)
     out = add_candle_interaction_features(out)
     return out

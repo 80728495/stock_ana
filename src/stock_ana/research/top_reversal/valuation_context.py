@@ -1,14 +1,13 @@
-"""Valuation (PE) features — market-separated, market-relative.
+"""Valuation features — point-in-time, market-separated, market-relative, multi-multiple.
 
-US uses forward PE (stockanalysis.com); HK/CN use trailing PE_TTM (Futu OpenD),
-because forward estimates are not readily available there.  The three markets'
-valuation centers differ completely, so PE is **normalized within each market**
-(percentile rank) — never compared across markets.
+估值绝对值无意义，只有「相对」才有意义：相对市场（市场内分位）、相对增长（PEG，见 growth_context）。
+不同股性适用不同乘数——盈利成长股看 PE，重资产/代工(中芯/华虹)看 PB，SaaS 看 PS——
+故同时提供 PE/PB/PS，由 SIC 子赛道 + 树自行选用。每个乘数都做 **市场内分位** 归一
+(三市场估值中枢不同，绝不跨市场比)。
 
-Caveat: the PE values are a *current snapshot*, not the PE at each historical
-candidate's date.  So this behaves as a static per-symbol attribute ("is this a
-richly-valued name within its market"), most accurate for live scoring and an
-approximation for historical training.  Documented intentionally.
+**point-in-time**：每个候选用 ``score_asof_date`` 当时已披露的最近一期基本面 + as-of 价重构，
+不再用今日快照（杜绝 look-ahead；实现见 pit_fundamentals）。今天的实时候选 asof=今天 →
+取最新一期 = 与快照等价，实时打分不受影响。详见 docs/top_reversal_current_system.md §0.8。
 """
 
 from __future__ import annotations
@@ -18,85 +17,91 @@ from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 
-from stock_ana.config import DATA_DIR
-
 VALUATION_FEATURES: tuple[str, ...] = (
-    "valuation_pe",
-    "valuation_pe_pct_mkt",
+    "valuation_pe", "valuation_pe_pct_mkt", "valuation_pe_pct_sector",
+    "valuation_pb", "valuation_pb_pct_mkt", "valuation_pb_pct_sector",
+    "valuation_ps", "valuation_ps_pct_mkt", "valuation_ps_pct_sector",
 )
 
-_DEFAULTS = {"valuation_pe": np.nan, "valuation_pe_pct_mkt": np.nan}
+# 子赛道内分位的最小同业样本数（不足则该分位置 NaN，仍由市场内分位兜底）
+_MIN_SECTOR_PEERS = 8
+
+_DEFAULTS = {c: np.nan for c in VALUATION_FEATURES}
 
 
-def _load_pe_map() -> dict[tuple[str, str], float]:
-    """(market, symbol) -> PE（US 前向，HK/CN trailing TTM）。"""
-    pe: dict[tuple[str, str], float] = {}
-    fdir = DATA_DIR / "cache" / "fundamentals"
-
-    us_path = fdir / "us_forward_pe.csv"
-    if us_path.exists():
-        us = pd.read_csv(us_path)
-        for _, r in us.iterrows():
-            t = str(r.get("ticker", "")).strip().upper()
-            v = r.get("forward_pe")
-            if not t:
-                continue
-            if pd.isna(v):
-                v = r.get("pe")  # 退化到 trailing
-            if pd.notna(v) and 0 < float(v) < 1000:
-                pe[("US", t)] = float(v)
-
-    futu_path = fdir / "futu_pe.csv"
-    if futu_path.exists():
-        ft = pd.read_csv(futu_path)
-        for _, r in ft.iterrows():
-            mk = str(r.get("market", "")).strip()
-            sym = str(r.get("symbol", "")).strip()
-            if mk == "US":
-                continue  # US 用 forward
-            sym = sym.zfill(5) if mk == "HK" else (sym.zfill(6) if mk == "CN" else sym)
-            v = r.get("pe_ttm")
-            if pd.isna(v):
-                v = r.get("pe")
-            if mk and sym and pd.notna(v) and 0 < float(v) < 1000:
-                pe[(mk, sym)] = float(v)
-    return pe
+def _asof_series(out: pd.DataFrame) -> pd.Series:
+    for col in ("score_asof_date", "confirm_date", "top_date"):
+        if col in out.columns:
+            return pd.to_datetime(out[col], errors="coerce")
+    return pd.Series(pd.NaT, index=out.index)
 
 
-def add_valuation_features(
-    dataset: pd.DataFrame,
-    symbol_data: Mapping[str, dict] | None = None,
-) -> pd.DataFrame:
-    """Attach market-relative PE features (static per-symbol attribute)."""
+def _coarse_sector(sec: object) -> str | None:
+    """US SIC 3 位主组 → 2 位大类（如 US_SIC367 → US_SIC36），作为分层回退的中间层。
+
+    HK/CN 行业映射只有一层 → 返回 None（直接回退市场）。回退到 SIC2 比回退到全市场更优：
+    仍保留行业归属（电子大类内排名 > 全市场混排），是严格更优的同侪集。
+    """
+    if isinstance(sec, str) and sec.startswith("US_SIC"):
+        digits = sec[len("US_SIC"):]
+        if digits.isdigit() and len(digits) >= 3:  # 仅 3 位→2 位；已是 2 位的直接回退市场
+            return "US_SIC" + digits[:-1]
+    return None
+
+
+def add_valuation_features(dataset: pd.DataFrame, symbol_data: Mapping[str, dict] | None = None) -> pd.DataFrame:
+    """Attach point-in-time PE/PB/PS (as-of score date) + market-relative percentile."""
+
+    from stock_ana.research.top_reversal.pit_fundamentals import pit_valuation
 
     out = dataset.copy()
-    for col in VALUATION_FEATURES:
-        if col not in out.columns:
-            out[col] = _DEFAULTS[col]
+    for c in VALUATION_FEATURES:
+        if c not in out.columns:
+            out[c] = _DEFAULTS[c]
     if out.empty:
         return out
 
-    pe_map = _load_pe_map()
-    if not pe_map:
-        return out
-
+    asof = _asof_series(out)
     markets = out["market"].astype(str)
     syms = out["sym"].astype(str)
-    out["valuation_pe"] = [pe_map.get((mk, s), np.nan) for mk, s in zip(markets, syms, strict=False)]
+    pe, pb, ps = [], [], []
+    for mk, sym, a in zip(markets, syms, asof, strict=False):
+        v = pit_valuation(mk, sym, a)
+        pe.append(v[0]); pb.append(v[1]); ps.append(v[2])
+    out["valuation_pe"] = np.round(pd.to_numeric(pd.Series(pe, index=out.index), errors="coerce"), 2)
+    out["valuation_pb"] = np.round(pd.to_numeric(pd.Series(pb, index=out.index), errors="coerce"), 2)
+    out["valuation_ps"] = np.round(pd.to_numeric(pd.Series(ps, index=out.index), errors="coerce"), 2)
 
-    # 市场内分位：用各市场「唯一标的」的 PE 排名，再映射回候选（避免按候选频次加权）
-    pe_col = pd.to_numeric(out["valuation_pe"], errors="coerce")
-    pct = pd.Series(np.nan, index=out.index)
-    for mk in markets.unique():
-        mask = markets == mk
-        uniq = (
-            pd.DataFrame({"sym": syms[mask], "pe": pe_col[mask]})
-            .dropna()
-            .drop_duplicates("sym")
-        )
-        if len(uniq) >= 5:
-            uniq["rank"] = uniq["pe"].rank(pct=True) * 100
-            rank_map = dict(zip(uniq["sym"], uniq["rank"], strict=False))
-            pct.loc[mask] = syms[mask].map(rank_map)
-    out["valuation_pe_pct_mkt"] = pct.round(1)
+    # 市场内分位（绝不跨市场比；每行按 as-of 自身值排名）
+    for metric in ("pe", "pb", "ps"):
+        col = f"valuation_{metric}"
+        pct = pd.Series(np.nan, index=out.index)
+        for mk in markets.unique():
+            mask = markets == mk
+            v = pd.to_numeric(out.loc[mask, col], errors="coerce")
+            if v.notna().sum() >= 5:
+                pct.loc[mask] = v.rank(pct=True) * 100
+        out[f"{col}_pct_mkt"] = pct.round(1)
+
+    # 行业内 as-of 分位（核心归一化）：不同行业 PE/PB/PS 基准不同（银行 PE~5 vs 科技 PE~40），
+    # 绝对值跨行业不可比。把候选估值排进「全行业宇宙成员在 ≤当月最近一个≥8 同侪的月」的分布
+    # （sector_valuation.sector_pct，SIC3→US-SIC2）。
+    # 纪律（实测验证）：① 跨全行业(市场级)排名 = 绝对值单调变换、无意义，**绝不回退市场**，行业内
+    # 凑不齐→NaN 由绝对值兜底；② 候选集内「跨期池化」排名会用未来候选=未来函数泄漏（CN 0.83→0.71），
+    # 故改用全行业成员 as-of 分布。候选用 panel-一致估值排名。
+    from stock_ana.research.top_reversal.macro_micro_context import _build_sector_map
+    from stock_ana.research.top_reversal.pit_fundamentals import _norm_sym
+    from stock_ana.research.top_reversal.sector_valuation import candidate_value, sector_pct
+    sector_map = _build_sector_map()
+    sectors = pd.Series(
+        [(sector_map.get((mk, _norm_sym(mk, s)), {}) or {}).get("sector")
+         for mk, s in zip(markets, syms, strict=False)],
+        index=out.index, dtype=object)
+    sectors_coarse = sectors.map(_coarse_sector)  # US SIC3→SIC2；HK/CN 为 None
+    cand_vals = [candidate_value(mk, s, a) for mk, s, a in zip(markets, syms, asof, strict=False)]
+    for metric in ("pe", "pb", "ps"):
+        pcts = [sector_pct(mk, sec, sec2, a, metric, cv.get(metric))
+                for mk, sec, sec2, a, cv in zip(markets, sectors, sectors_coarse, asof, cand_vals, strict=False)]
+        out[f"valuation_{metric}_pct_sector"] = np.round(
+            pd.to_numeric(pd.Series(pcts, index=out.index), errors="coerce"), 1)
     return out

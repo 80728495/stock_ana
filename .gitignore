@@ -8,6 +8,7 @@ dist/
 build/
 *.egg
 node_modules/
+node_modules
 
 # 虚拟环境
 .venv/
@@ -29,6 +30,10 @@ data/*
 !data/hk_full_list.csv
 !data/ana_prompt.txt
 !data/us_sec_profiles.csv
+!data/sector_valuation_summary.csv
+!data/sector_valuation_members.parquet
+!data/cn_industry_map.csv
+!data/hk_industry_map.csv
 !data/taxonomy_v2.yaml
 !data/taxonomy.yaml
 !data/stock_list.md
@@ -52,6 +57,12 @@ Desktop.ini
 logs/
 *.log
 
+# 本机工具/备份，不随项目提交
+CLIProxyAPI/
+windows_update_backup_*/
+disable_windows_update_hard.ps1
+scripts/build_custom_holdings_sector_summary.py
+
 # youtube_trans 敏感/临时文件
 youtube_trans/.env
 youtube_trans/cookies.txt
@@ -60,4 +71,8 @@ youtube_trans/__pycache__/
 # 本会话补充: 防噪音入库
 /node_modules/
 src/data/output/
+/equity_research/
 /analysis/
+
+# 研究过程一次性临时脚本（不入库）
+temp_scripts/

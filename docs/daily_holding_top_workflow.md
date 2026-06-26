@@ -11,9 +11,9 @@
 |---|---|---|---|
 | 每日盘后 | ① 刷新行情数据（你的既有更新流程） | — | — |
 | 每日盘后 | ② 同步持仓/自选 | `python sync_holding.py` | 秒级 |
-| 周期(可每日夜里) | ③ 刷新估值 PE | `python scripts/refresh_valuation_pe.py` | US ~8min / Futu ~2min |
-| 周期(可每日夜里) | ④ 重训模型 + 全量打分 | `python scripts/build_top_candidate_research.py` | ~1h(975只) |
-| 每日早上 | ⑤ 生成「持仓见顶」PDF | `python scripts/gen_holding_top_pdf.py --days 5` | 秒级 |
+| 周期(可每日夜里) | ③ 刷新估值 PE | `python src/stock_ana/research/top_reversal/refresh_valuation_pe.py` | US ~8min / Futu ~2min |
+| 周期(可每日夜里) | ④ 重训模型 + 全量打分 | `python src/stock_ana/research/top_reversal/build_top_candidate_research.py` | ~1h(975只) |
+| 每日早上 | ⑤ 生成「持仓见顶」PDF | `python src/stock_ana/research/top_reversal/gen_holding_top_pdf.py --days 5` | 秒级 |
 
 **建议**：③④放夜里跑（build 含候选生成+特征+按市场训练，~1h），⑤早上看 PDF。
 build 已把 holdings 折入训练宇宙并打分，⑤只做筛选+出图，秒级。
@@ -23,13 +23,13 @@ PDF 输出：`data/output/top_candidate_research/holding_signal_eval/holding_top
 
 ---
 
-## 2. 新增脚本（scripts/）
+## 2. 顶部研究入口（src/stock_ana/research/top_reversal/）
 
-| 脚本 | 作用 |
+| 入口 | 作用 |
 |---|---|
-| `build_top_candidate_research.py` | 顶部识别主流程。`--train-universe tech`(默认，三市场科技池+持仓)、`--per-market-model`(默认，US/HK/CN 各训一套 LR+lgb，永不合并)。输出 labeled / per-market scored / coef。 |
-| `refresh_valuation_pe.py` | 刷新估值 PE：US 前向(stockanalysis.com)、HK/CN trailing(Futu OpenD)。→ `data/cache/fundamentals/{us_forward_pe,futu_pe}.csv` |
-| `gen_holding_top_pdf.py` | 把持仓近 N 日、模型判见顶的信号出成 PDF（图 + 核心要素）。`--days/--band` |
+| `src/stock_ana/research/top_reversal/build_top_candidate_research.py` | 顶部识别主流程。`--train-universe tech`(默认，三市场科技池+持仓)、`--per-market-model`(默认，US/HK/CN 各训一套 LR+lgb，永不合并)。输出 labeled / per-market scored / coef。 |
+| `src/stock_ana/research/top_reversal/refresh_valuation_pe.py` | 刷新估值 PE：US 前向(stockanalysis.com)、HK/CN trailing(Futu OpenD)。→ `data/cache/fundamentals/{us_forward_pe,futu_pe}.csv` |
+| `src/stock_ana/research/top_reversal/gen_holding_top_pdf.py` | 把持仓近 N 日、模型判见顶的信号出成 PDF（图 + 核心要素）。`--days/--band` |
 
 ## 3. 新增模型/特征模块（src/stock_ana/research/top_reversal/）
 

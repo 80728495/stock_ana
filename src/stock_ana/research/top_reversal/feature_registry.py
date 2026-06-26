@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from stock_ana.research.top_reversal.macro_micro_context import MACRO_MICRO_FEATURES
 from stock_ana.research.top_reversal.prior_high_context import PRIOR_HIGH_FEATURES
+from stock_ana.research.top_reversal.growth_context import GROWTH_FEATURES
 from stock_ana.research.top_reversal.valuation_context import VALUATION_FEATURES
 from stock_ana.research.top_reversal.vegas_context import VEGAS_TREND_FEATURES
 
@@ -209,6 +210,7 @@ FEATURE_GROUPS = (
     FeatureGroup("prior_high_structure", "Causal prior-high hold and strict M/double-top shape.", PRIOR_HIGH_FEATURES),
     FeatureGroup("macro_micro", "Sector regime, cross-sectional rank, and parabolic over-extension.", MACRO_MICRO_FEATURES),
     FeatureGroup("valuation", "Market-relative PE (US forward / HK-CN trailing); see valuation_context caveat.", VALUATION_FEATURES),
+    FeatureGroup("growth", "Fundamental EPS/revenue growth (causal) + sub-sector growth heat; general replacement for industry tags.", GROWTH_FEATURES),
     FeatureGroup("resistance", "Future prior-high and resistance-zone features.", RESISTANCE_FEATURES),
 )
 
@@ -228,6 +230,7 @@ REALTIME_FEATURE_GROUPS = (
     FeatureGroup("prior_high_structure", "Causal prior-high hold and strict M/double-top shape.", PRIOR_HIGH_FEATURES),
     FeatureGroup("macro_micro", "Sector regime, cross-sectional rank, and parabolic over-extension.", MACRO_MICRO_FEATURES),
     FeatureGroup("valuation", "Market-relative PE (US forward / HK-CN trailing); see valuation_context caveat.", VALUATION_FEATURES),
+    FeatureGroup("growth", "Fundamental EPS/revenue growth (causal) + sub-sector growth heat; general replacement for industry tags.", GROWTH_FEATURES),
     FeatureGroup("resistance", "Future prior-high and resistance-zone features.", RESISTANCE_FEATURES),
 )
 

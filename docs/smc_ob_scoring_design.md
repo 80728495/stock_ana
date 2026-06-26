@@ -312,7 +312,7 @@ Remove-Item -Recurse data/cache/smc_ob_state
 ## 10. 已知问题 / 待改进
 
 ### 待实验
-- [ ] **权重调参**：`OB_SCORE_RULES` 中的 `zero_val` / `full_val` 均基于经验设定，未经系统优化。可用 `scripts/backtest_smc_ob.py`（已有）对历史 OB 做回归分析，找出与胜率相关性最强的阈值。
+- [ ] **权重调参**：`OB_SCORE_RULES` 中的 `zero_val` / `full_val` 均基于经验设定，未经系统优化。可用 `temp_scripts/backtest_smc_ob.py`（已有）对历史 OB 做回归分析，找出与胜率相关性最强的阈值。
 - [ ] **look-back 窗口**：`trend_before_5d` 固定用 5 日，`ATR` 固定用 14 日。不同市场波动率差异大，是否应自适应？
 - [ ] **看跌 OB 验证**：回测数据主要为美股科技股（多头市场），看跌 OB 的规则权重较少回测支撑。
 

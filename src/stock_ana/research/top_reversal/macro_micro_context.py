@@ -32,7 +32,6 @@ MACRO_MICRO_FEATURES: tuple[str, ...] = (
     "xsec_ret20_pct",
     "xsec_ret60_pct",
     # macro sector
-    "is_semiconductor",
     "sector_peers_ret60_mean",
     "sector_overheat_pct",
 )
@@ -62,7 +61,7 @@ def _build_sector_map() -> dict[tuple[str, str], dict]:
             else:
                 sub_sector = "US_" + (str(r.get("sector", "")).strip() or "other")
             smap[("US", t)] = {"sector": sub_sector, "is_semi": int("semiconductor" in sic)}
-    hk_path = DATA_DIR / "cache" / "hk_industry_map.csv"
+    hk_path = DATA_DIR / "hk_industry_map.csv"  # 生成型 build 依赖，入 git（非 cache 快照）
     if hk_path.exists():
         hk = pd.read_csv(hk_path)
         code_col = "futu_code" if "futu_code" in hk.columns else hk.columns[0]
@@ -74,6 +73,18 @@ def _build_sector_map() -> dict[tuple[str, str], dict]:
             ind = str(r.get("industry", "")).strip() or "HK_other"
             is_semi = int(("半导体" in ind) or ("芯片" in ind))
             smap[("HK", sym)] = {"sector": f"HK_{ind}", "is_semi": is_semi}
+    cn_path = DATA_DIR / "cn_industry_map.csv"  # 生成型 build 依赖，入 git（非 cache 快照）
+    if cn_path.exists():
+        cn = pd.read_csv(cn_path)
+        code_col = "futu_code" if "futu_code" in cn.columns else cn.columns[0]
+        for _, r in cn.iterrows():
+            code = str(r.get(code_col, "")).strip()
+            if not (code.startswith("SH.") or code.startswith("SZ.")):
+                continue
+            sym = code.split(".", 1)[1].zfill(6)
+            ind = str(r.get("industry", "")).strip() or "CN_other"
+            is_semi = int(("半导体" in ind) or ("芯片" in ind))
+            smap[("CN", sym)] = {"sector": f"CN_{ind}", "is_semi": is_semi}
     return smap
 
 
