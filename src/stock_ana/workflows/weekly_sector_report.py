@@ -5,7 +5,7 @@
   1. 更新美股价格数据
   2. 扫描本周异动股票
   3. 按板块聚合异动信号
-  4. 送 Gemini 深度分析，生成周报
+  4. 送 LLM 深度分析，生成周报
 
 用法:
     python -m stock_ana.workflows.weekly_sector_report                  # 完整流程
@@ -15,15 +15,15 @@
 """
 
 import asyncio
+import json
+import os
 from datetime import date, timedelta
 from pathlib import Path
-import json
 
-import numpy as np
 import pandas as pd
 from loguru import logger
 
-from stock_ana.config import DATA_DIR, CACHE_DIR, OUTPUT_DIR
+from stock_ana.config import DATA_DIR, OUTPUT_DIR
 from stock_ana.data.market_data import load_symbol_data
 from stock_ana.data.fetcher import update_us_price_data
 from stock_ana.strategies.impl.momentum_detector import (
@@ -35,6 +35,7 @@ from gemini_webapi import GeminiClient
 # ──────── 配置 ────────
 
 ANALYSIS_MODEL = "gemini-3.0-pro"
+CODEX_ANALYSIS_MODEL = "gpt-5.5"
 PROFILES_FILE = DATA_DIR / "us_sec_profiles.csv"
 REPORT_DIR = OUTPUT_DIR / "weekly_sector"
 
@@ -86,7 +87,7 @@ def _build_weekly_sector_text(
     min_breadth: int = DEFAULT_MIN_BREADTH,
 ) -> str:
     """
-    将本周扫描结果按板块聚合，生成供 Gemini 分析的文本。
+    将本周扫描结果按板块聚合，生成供 LLM 分析的文本。
     """
     if scan_result.empty:
         return "本周未检测到板块级异动。"
@@ -195,7 +196,7 @@ def _build_weekly_sector_text(
     return "\n".join(lines)
 
 
-# ──────── Step 3: Gemini 分析 ────────
+# ──────── Step 3: LLM 分析 ────────
 
 _WEEKLY_PROMPT = """角色设定：你是一位顶级宏观策略分析师和行业研究员，擅长从量化异动信号中发现板块性投资机会。
 
@@ -250,14 +251,22 @@ async def _init_client() -> GeminiClient:
 async def analyze_weekly(
     sector_text: str,
     model: str = ANALYSIS_MODEL,
+    backend: str | None = None,
 ) -> str:
     """
-    将本周板块异动数据送 Gemini 分析。
+    将本周板块异动数据送 LLM 分析。
 
     Returns:
-        Gemini 返回的分析文本
+        LLM 返回的分析文本
     """
     import gemini_webapi.exceptions as _gex
+
+    resolved_backend = (
+        backend
+        or os.environ.get("STOCK_ANA_WEEKLY_SECTOR_LLM_BACKEND")
+        or os.environ.get("STOCK_ANA_WEEKLY_LLM_BACKEND")
+        or "codex"
+    ).strip().lower()
 
     week_label = _week_label()
     prompt = _WEEKLY_PROMPT.format(
@@ -266,7 +275,21 @@ async def analyze_weekly(
     )
 
     logger.info(f"Prompt 长度: {len(prompt)} 字符")
-    logger.info("正在调用 Gemini 进行板块分析...")
+    logger.info(f"正在调用 {resolved_backend} 进行板块分析...")
+
+    if resolved_backend == "codex":
+        from stock_ana.utils.codex_analyst import call_codex_prompt
+
+        text = await asyncio.to_thread(
+            call_codex_prompt,
+            prompt,
+            model=os.environ.get("STOCK_ANA_CODEX_MODEL") or CODEX_ANALYSIS_MODEL,
+        )
+        logger.success(f"Codex 分析完成，返回 {len(text)} 字符")
+        return text
+
+    if resolved_backend != "gemini":
+        raise ValueError(f"不支持的 LLM backend: {resolved_backend}，可选 gemini/codex")
 
     client = await _init_client()
     try:
@@ -298,7 +321,12 @@ async def analyze_weekly(
 
 # ──────── 报告输出 ────────
 
-def _save_report(text: str, sector_text: str) -> Path:
+def _save_report(
+    text: str,
+    sector_text: str,
+    backend: str = "codex",
+    model: str = ANALYSIS_MODEL,
+) -> Path:
     """保存周报为 Markdown"""
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -308,15 +336,17 @@ def _save_report(text: str, sector_text: str) -> Path:
     filename = f"weekly_sector_{year}_W{week:02d}.md"
     path = REPORT_DIR / filename
 
+    backend_label = "Codex" if backend == "codex" else "Gemini" if backend == "gemini" else backend.upper()
     header = (
         f"# {week_label}美股板块异动分析\n\n"
         f"**生成日期**: {today.isoformat()}\n"
-        f"**分析模型**: {ANALYSIS_MODEL}\n\n"
+        f"**分析后端**: {backend}\n"
+        f"**分析模型**: {model}\n\n"
         f"---\n\n"
         f"## 异动数据摘要\n\n"
         f"```\n{sector_text}\n```\n\n"
         f"---\n\n"
-        f"## Gemini 深度分析\n\n"
+        f"## {backend_label} 深度分析\n\n"
     )
 
     path.write_text(header + text, encoding="utf-8")
@@ -390,7 +420,17 @@ async def _main():
     parser.add_argument("--skip-update", action="store_true",
                         help="跳过价格数据更新")
     parser.add_argument("--preview", action="store_true",
-                        help="仅预览板块数据，不调用 Gemini")
+                        help="仅预览板块数据，不调用 LLM")
+    parser.add_argument(
+        "--llm-backend",
+        choices=["gemini", "codex"],
+        default=(
+            os.environ.get("STOCK_ANA_WEEKLY_SECTOR_LLM_BACKEND")
+            or os.environ.get("STOCK_ANA_WEEKLY_LLM_BACKEND")
+            or "codex"
+        ).strip().lower(),
+        help="LLM 后端：codex（默认，通过本地 CLIProxyAPI 调 gpt-5.5）或 gemini",
+    )
     args = parser.parse_args()
 
     week_label = _week_label()
@@ -416,7 +456,7 @@ async def _main():
         return
 
     # Step 3: 聚合
-    logger.info("Step 3/3: 聚合板块数据 & Gemini 分析...")
+    logger.info(f"Step 3/3: 聚合板块数据 & {args.llm_backend} 分析...")
     sector_text = _build_weekly_sector_text(
         scan_result,
         lookback=args.lookback,
@@ -438,11 +478,12 @@ async def _main():
         print(f"\n摘要JSON: {summary_path}")
         return
 
-    # Step 4: Gemini 分析
-    result = await analyze_weekly(sector_text)
+    # Step 4: LLM 分析
+    result = await analyze_weekly(sector_text, backend=args.llm_backend)
 
     # 保存
-    path = _save_report(result, sector_text)
+    report_model = CODEX_ANALYSIS_MODEL if args.llm_backend == "codex" else ANALYSIS_MODEL
+    path = _save_report(result, sector_text, backend=args.llm_backend, model=report_model)
     summary_path = _save_weekly_summary(
         scan_result=scan_result,
         lookback=args.lookback,

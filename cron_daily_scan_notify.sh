@@ -30,7 +30,7 @@ fi
 
 echo "[daily-scan] 检测到新数据，开始扫描..."
 
-# 1) Vegas 扫描 + Gemini 汇总（先美股 tech，再港股）
+# 1) Vegas 扫描 + Codex 汇总（先美股 tech，再港股）
 SCAN_EXIT=0
 "$PYTHON_BIN" vegas_mid_daily_scan.py --list combined || SCAN_EXIT=$?
 

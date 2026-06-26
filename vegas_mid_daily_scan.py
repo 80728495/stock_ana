@@ -5,8 +5,8 @@
 执行顺序：
   1. 运行 Vegas Mid touch 策略扫描（美股科技板块，lookback=1）
   2. 针对每只信号股票生成 K 线图（集成在 run_scan 内）
-  3. 将所有 HOLD 以上信号发送 Gemini 批量基本面分析
-  4. 提取 Gemini 汇总表中每只股票的综合建议
+  3. 将所有 HOLD 以上信号发送 LLM 批量基本面分析
+  4. 提取 LLM 汇总表中每只股票的综合建议
   5. 输出 summary.json（供 clawbot 读取并推送消息）
 
 输出目录（每次运行覆盖当天）：
@@ -17,11 +17,11 @@
     signals_full.json     ← 含 base64 图表
     *.png                 ← 各标的 K 线图
   data/output/scan_analysis/{YYYY-MM-DD}/
-    *.md                  ← Gemini 完整分析报告
+    *.md                  ← LLM 完整分析报告
 
 用法：
-    python daily_scan.py               # 完整流程（扫描 + Gemini）
-    python daily_scan.py --scan-only   # 仅扫描，不调 Gemini
+    python daily_scan.py               # 完整流程（扫描 + Codex）
+    python daily_scan.py --scan-only   # 仅扫描，不调 LLM
     python daily_scan.py --lookback 3  # 扩大回看窗口（排查漏出的信号）
 """
 
@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 from datetime import date, datetime
@@ -111,11 +112,11 @@ def run_daily_scan(lookback: int = 1, list_mode: str = "tech") -> tuple[list[dic
 
 
 # ═══════════════════════════════════════════════════════
-#  Step 3：Gemini 基本面分析
+#  Step 3：LLM 基本面分析
 # ═══════════════════════════════════════════════════════
 
-async def run_gemini_analysis(signals: list[dict]) -> Path | None:
-    """对所有通过结构检验的信号发起 Gemini 批量分析，返回报告路径。
+async def run_gemini_analysis(signals: list[dict], llm_backend: str = "codex") -> Path | None:
+    """对所有通过结构检验的信号发起 LLM 批量分析，返回报告路径。
 
     包含 STRONG_BUY / BUY / HOLD，以及 structure_passed=True 的 AVOID
     （即评分不足但结构本身合格的标的）。
@@ -126,18 +127,18 @@ async def run_gemini_analysis(signals: list[dict]) -> Path | None:
     # 所有出现在 signals 列表里的标的都已通过结构检验，直接全量发送
     targets = list(signals)
     if not targets:
-        logger.info("无信号，跳过 Gemini 分析")
+        logger.info("无信号，跳过 LLM 分析")
         return None
 
     logger.info("=" * 60)
-    logger.info(f"【3/3】Gemini 基本面分析，共 {len(targets)} 只 ...")
+    logger.info(f"【3/3】{llm_backend} 基本面分析，共 {len(targets)} 只 ...")
     logger.info("=" * 60)
     try:
-        path = await analyze_signals(targets, min_signal=None)
-        logger.success(f"Gemini 分析完成 → {path}")
+        path = await analyze_signals(targets, min_signal=None, backend=llm_backend)
+        logger.success(f"{llm_backend} 分析完成 → {path}")
         return path
     except Exception as e:
-        logger.error(f"Gemini 分析失败 [{type(e).__name__}]: {e}")
+        logger.error(f"{llm_backend} 分析失败 [{type(e).__name__}]: {e}")
         return None
 
 
@@ -146,7 +147,7 @@ async def run_gemini_analysis(signals: list[dict]) -> Path | None:
 # ═══════════════════════════════════════════════════════
 
 def _extract_gemini_conclusions(report_text: str) -> dict[str, dict]:
-    """解析 Gemini 报告末尾汇总表，返回 {TICKER: {conclusion, fundamental_score, ...}}。"""
+    """解析 LLM 报告末尾汇总表，返回 {TICKER: {conclusion, fundamental_score, ...}}。"""
     conclusions: dict[str, dict] = {}
     lines = report_text.splitlines()
     col_idx: dict[str, int] = {}
@@ -235,13 +236,14 @@ def save_summary(
     filename: str = "summary.json",
     data_stale: bool = False,
     gemini_status: str = "",
+    llm_backend: str = "codex",
 ) -> Path:
     """生成 summary JSON，为 clawbot 提供消费入口。"""
     today = date.today().isoformat()
     out_dir = DAILY_SCAN_DIR / today
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 读取 Gemini 结论
+    # 读取 LLM 结论
     gemini_conclusions: dict[str, dict] = {}
     gemini_summary_table = ""
     if gemini_path and gemini_path.exists():
@@ -277,6 +279,7 @@ def save_summary(
         "signals_found":        len(signals),
         "data_stale":           data_stale,
         "gemini_status":        gemini_status,
+        "llm_backend":          llm_backend,
         "has_gemini_analysis":  gemini_path is not None and gemini_path.exists(),
         "gemini_report_path":   str(gemini_path) if gemini_path else None,
         "gemini_summary_table": gemini_summary_table,
@@ -300,13 +303,14 @@ async def _run_single_market(
     list_mode: str,
     market_label: str,
     filename: str,
+    llm_backend: str = "codex",
 ) -> Path:
     """扫描单个市场并保存 summary，返回 summary 路径。"""
     from datetime import timedelta
 
     signals, total_scanned = run_daily_scan(lookback=lookback, list_mode=list_mode)
 
-    # ── 陈旧数据检测：若信号与前一天完全相同，跳过 Gemini 和通知 ──
+    # ── 陈旧数据检测：若信号与前一天完全相同，跳过 LLM 和通知 ──
     data_stale = False
     if signals:
         prev_date = (date.today() - timedelta(days=1)).isoformat()
@@ -325,10 +329,10 @@ async def _run_single_market(
                 if curr_key and curr_key == prev_key:
                     logger.warning(
                         f"[{market_label}] 港股数据未更新（信号与昨日 {prev_date} 完全相同），"
-                        "跳过 Gemini 分析，summary 标记 data_stale=True"
+                        "跳过 LLM 分析，summary 标记 data_stale=True"
                     )
                     data_stale = True
-                    scan_only = True  # 不再调用 Gemini
+                    scan_only = True  # 不再调用 LLM
             except Exception as e:
                 logger.debug(f"陈旧检测读取失败，跳过检测: {e}")
 
@@ -343,7 +347,7 @@ async def _run_single_market(
         gemini_status = "failed"
 
     if not scan_only and signals:
-        gemini_path = await run_gemini_analysis(signals)
+        gemini_path = await run_gemini_analysis(signals, llm_backend=llm_backend)
         if gemini_path is not None and gemini_path.exists():
             gemini_status = "success"
 
@@ -352,10 +356,16 @@ async def _run_single_market(
         market_label=market_label, filename=filename,
         data_stale=data_stale,
         gemini_status=gemini_status,
+        llm_backend=llm_backend,
     )
 
 
-async def _main_async(lookback: int, scan_only: bool, list_mode: str = "tech") -> None:
+async def _main_async(
+    lookback: int,
+    scan_only: bool,
+    list_mode: str = "tech",
+    llm_backend: str = "codex",
+) -> None:
     t0 = datetime.now()
     logger.info("=" * 60)
     logger.info(f"  每日扫描流水线 — {t0.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -364,8 +374,8 @@ async def _main_async(lookback: int, scan_only: bool, list_mode: str = "tech") -
     if list_mode == "combined":
         # 先美股，再港股
         logger.info("【组合模式】先扫描美股科技板块，再扫描港股宇宙池")
-        await _run_single_market(lookback, scan_only, "tech",  "每日美股扫描", "summary_us.json")
-        await _run_single_market(lookback, scan_only, "hk",   "每日港股扫描", "summary_hk.json")
+        await _run_single_market(lookback, scan_only, "tech", "每日美股扫描", "summary_us.json", llm_backend)
+        await _run_single_market(lookback, scan_only, "hk", "每日港股扫描", "summary_hk.json", llm_backend)
         elapsed = (datetime.now() - t0).seconds
         logger.info("=" * 60)
         logger.info(f"  组合流水线完成 — 总耗时 {elapsed}s")
@@ -375,9 +385,16 @@ async def _main_async(lookback: int, scan_only: bool, list_mode: str = "tech") -
     if list_mode == "combined_cn":
         # 美股 + 港股 + A股高新技术
         logger.info("【完整组合模式】美股科技 + 港股 + A股高新技术")
-        await _run_single_market(lookback, scan_only, "tech",       "每日美股扫描",       "summary_us.json")
-        await _run_single_market(lookback, scan_only, "hk",        "每日港股扫描",       "summary_hk.json")
-        await _run_single_market(lookback, scan_only, "cn_hightech", "每日A股高新技术扫描", "summary_cn.json")
+        await _run_single_market(lookback, scan_only, "tech", "每日美股扫描", "summary_us.json", llm_backend)
+        await _run_single_market(lookback, scan_only, "hk", "每日港股扫描", "summary_hk.json", llm_backend)
+        await _run_single_market(
+            lookback,
+            scan_only,
+            "cn_hightech",
+            "每日A股高新技术扫描",
+            "summary_cn.json",
+            llm_backend,
+        )
         elapsed = (datetime.now() - t0).seconds
         logger.info("=" * 60)
         logger.info(f"  完整组合流水线完成 — 总耗时 {elapsed}s")
@@ -400,8 +417,8 @@ async def _main_async(lookback: int, scan_only: bool, list_mode: str = "tech") -
     market_label = _label_map.get(list_mode, "每日扫描")
     filename     = _file_map.get(list_mode, "summary.json")
 
-    # Step 1-5：统一走 _run_single_market（含陈旧检测 + Gemini + summary）
-    summary_path = await _run_single_market(lookback, scan_only, list_mode, market_label, filename)
+    # Step 1-5：统一走 _run_single_market（含陈旧检测 + LLM + summary）
+    summary_path = await _run_single_market(lookback, scan_only, list_mode, market_label, filename, llm_backend)
 
     elapsed = (datetime.now() - t0).seconds
     logger.info("=" * 60)
@@ -411,9 +428,15 @@ async def _main_async(lookback: int, scan_only: bool, list_mode: str = "tech") -
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="每日 Vegas Mid 扫描 + Gemini 分析")
+    parser = argparse.ArgumentParser(description="每日 Vegas Mid 扫描 + Codex 分析")
     parser.add_argument("--lookback",  type=int, default=1, help="回看天数（默认 1）")
-    parser.add_argument("--scan-only", action="store_true", help="仅扫描，不调 Gemini")
+    parser.add_argument("--scan-only", action="store_true", help="仅扫描，不调 LLM")
+    parser.add_argument(
+        "--llm-backend",
+        choices=["gemini", "codex"],
+        default=(os.environ.get("STOCK_ANA_SCAN_LLM_BACKEND") or "codex").strip().lower(),
+        help="LLM 后端：codex（默认，通过本地 CLIProxyAPI 调 gpt-5.5）或 gemini",
+    )
     parser.add_argument(
         "--list",
         dest="list_mode",
@@ -424,7 +447,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    asyncio.run(_main_async(lookback=args.lookback, scan_only=args.scan_only, list_mode=args.list_mode))
+    asyncio.run(
+        _main_async(
+            lookback=args.lookback,
+            scan_only=args.scan_only,
+            list_mode=args.list_mode,
+            llm_backend=args.llm_backend,
+        )
+    )
 
 
 if __name__ == "__main__":

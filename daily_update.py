@@ -97,19 +97,34 @@ def _release_run_lock(fd: int | None) -> None:
 # ─────────────────────── 各步更新函数 ───────────────────────
 
 def _launch_context() -> str:
-    """Return process context to identify unexpected scheduled launchers."""
+    """Return process ancestry to identify unexpected scheduled launchers."""
     pid = os.getpid()
     ppid = os.getppid()
     argv = " ".join(sys.argv)
     try:
         import psutil  # type: ignore
 
-        proc = psutil.Process(ppid)
-        parent_cmd = " ".join(proc.cmdline())
-        parent = f"parent={proc.name()} pid={ppid} cmd={parent_cmd}"
+        def _proc_line(proc, depth: int) -> str:
+            try:
+                cmd = " ".join(proc.cmdline())
+            except Exception as exc:
+                cmd = f"<cmdline unavailable: {type(exc).__name__}>"
+            try:
+                created = datetime.fromtimestamp(proc.create_time()).isoformat(timespec="seconds")
+            except Exception:
+                created = "unknown"
+            try:
+                name = proc.name()
+            except Exception:
+                name = "unknown"
+            return f"  [{depth}] pid={proc.pid} name={name} created={created} cmd={cmd}"
+
+        current = psutil.Process(pid)
+        chain = [current] + current.parents()[:8]
+        lines = [_proc_line(proc, depth) for depth, proc in enumerate(chain)]
+        return f"pid={pid}, ppid={ppid}, argv={argv}\n进程祖先链:\n" + "\n".join(lines)
     except Exception as exc:
-        parent = f"parent_pid={ppid} ({type(exc).__name__})"
-    return f"pid={pid}, argv={argv}, {parent}"
+        return f"pid={pid}, ppid={ppid}, argv={argv}, process_chain_unavailable={type(exc).__name__}: {exc}"
 
 
 def sync_futu() -> dict:
@@ -382,7 +397,35 @@ def update_waves() -> dict:
         return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e)}
 
 
-def validate_data() -> dict:
+def _load_validation_targets(market: str, cache_dir: Path) -> set[str]:
+    """Return the current active symbols for a market validation pass."""
+    from stock_ana.data.list_manager import (
+        load_cn_hightech_list,
+        load_cn_list,
+        load_hk_universe_list,
+        load_us_universe_list,
+    )
+
+    try:
+        if market == "us":
+            return {s.upper() for s in load_us_universe_list()}
+        if market == "hk":
+            return {s.zfill(5) for s in load_hk_universe_list()}
+        if market == "cn":
+            targets: set[str] = set()
+            for loader in (load_cn_list, load_cn_hightech_list):
+                try:
+                    targets.update(s.zfill(6) for s in loader())
+                except Exception as exc:
+                    logger.warning(f"[校验] CN 列表加载失败，跳过该来源: {type(exc).__name__}: {exc}")
+            return targets
+    except Exception as exc:
+        logger.warning(f"[校验] {market.upper()} 当前列表加载失败，回落到缓存全集: {type(exc).__name__}: {exc}")
+
+    return {p.stem.upper() if market == "us" else p.stem for p in cache_dir.glob("*.parquet")}
+
+
+def validate_data(markets_to_validate: set[str] | None = None) -> dict:
     """
     校验各市场缓存数据是否已更新到近期。
 
@@ -405,6 +448,8 @@ def validate_data() -> dict:
         "hk": CACHE_DIR / "hk",
         "cn": CACHE_DIR / "cn",
     }
+    if markets_to_validate is not None:
+        markets = {m: p for m, p in markets.items() if m in markets_to_validate}
 
     all_ok = True
     details = {}
@@ -412,39 +457,54 @@ def validate_data() -> dict:
     for market, cache_dir in markets.items():
         if not cache_dir.exists():
             continue
-        files = list(cache_dir.glob("*.parquet"))
+        files = {p.stem.upper() if market == "us" else p.stem: p for p in cache_dir.glob("*.parquet")}
         if not files:
             continue
+        targets = _load_validation_targets(market, cache_dir)
+        if not targets:
+            targets = set(files)
+        ignored_cache_count = max(0, len(set(files) - targets))
         stale = []
-        for p in files:
+        for symbol in sorted(targets):
+            p = files.get(symbol)
+            if p is None:
+                stale.append({"ticker": symbol, "last_date": "missing", "days_behind": None})
+                continue
             try:
                 df = pd.read_parquet(p, columns=[])
                 last = pd.Timestamp(df.index.max()).normalize()
                 if last < expected_last_date:
-                    stale.append({"ticker": p.stem, "last_date": last.date().isoformat(),
+                    stale.append({"ticker": symbol, "last_date": last.date().isoformat(),
                                   "days_behind": int((expected_last_date - last).days)})
             except Exception:
-                pass
-        ratio = len(stale) / len(files) if files else 0
+                stale.append({"ticker": symbol, "last_date": "unreadable", "days_behind": None})
+        ratio = len(stale) / len(targets) if targets else 0
         is_stale = ratio > stale_ratio_warn
         if is_stale:
             all_ok = False
             logger.warning(
-                f"[校验] {market.upper()} 数据落后：{len(stale)}/{len(files)} 只 "
+                f"[校验] {market.upper()} 数据落后：{len(stale)}/{len(targets)} 只 "
                 f"({ratio*100:.1f}%) 最新日期早于 {expected_last_date.date()}"
             )
             for s in stale[:10]:
-                logger.warning(f"  {s['ticker']}: 最新 {s['last_date']} (落后 {s['days_behind']} 天)")
+                behind = "未知" if s["days_behind"] is None else f"{s['days_behind']} 天"
+                logger.warning(f"  {s['ticker']}: 最新 {s['last_date']} (落后 {behind})")
             if len(stale) > 10:
                 logger.warning(f"  ... 共 {len(stale)} 只，仅显示前10")
         else:
-            logger.info(f"[校验] {market.upper()} 数据正常：{len(files)} 只，落后 {len(stale)} 只 ({ratio*100:.1f}%)")
+            logger.info(
+                f"[校验] {market.upper()} 数据正常：{len(targets)} 只，"
+                f"落后 {len(stale)} 只 ({ratio*100:.1f}%)"
+            )
+        if ignored_cache_count:
+            logger.info(f"[校验] {market.upper()} 忽略非当前列表缓存：{ignored_cache_count} 只")
         details[market] = {
-            "total": len(files),
+            "total": len(targets),
             "stale_count": len(stale),
             "stale_ratio": round(ratio, 4),
             "is_stale": is_stale,
             "stale_tickers": [s["ticker"] for s in stale],
+            "ignored_cache_count": ignored_cache_count,
         }
 
     return {"ok": all_ok, "details": details}
@@ -567,9 +627,16 @@ def main():
     if args.lists:
         results["列表同步"] = sync_lists()
 
-    # ── 数据校验（run_all 或有 OHLCV 步骤时自动执行）──
+    # ── 数据校验（只校验本次实际更新过的市场）──
     if run_all or args.us or args.hk:
-        results["数据校验"] = validate_data()
+        validation_markets: set[str] = set()
+        if run_all or args.us:
+            validation_markets.add("us")
+        if run_all or args.hk:
+            validation_markets.add("hk")
+        if run_all or args.cn or getattr(args, "cn_hightech", False):
+            validation_markets.add("cn")
+        results["数据校验"] = validate_data(validation_markets)
 
     elapsed = time.time() - t_total
     logger.info(f"\n{'=' * 60}")

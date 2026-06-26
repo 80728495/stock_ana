@@ -58,31 +58,32 @@ if (Test-Path $StampFile) {
 
 Write-Host "[daily-scan] New data detected, starting scan..."
 
-# Wait for Google/Gemini to be reachable (proxy may need a moment to become active)
+# Wait for local Codex proxy to be reachable (proxy may need a moment to become active)
 $maxWaitSec = 180   # 最多等 3 分钟
 $intervalSec = 20
 $elapsed = 0
 $reachable = $false
 while (-not $reachable -and $elapsed -lt $maxWaitSec) {
     try {
-        $null = Invoke-WebRequest -Uri "https://gemini.google.com" -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+        $conn = Test-NetConnection 127.0.0.1 -Port 8317 -WarningAction SilentlyContinue
+        if (-not $conn.TcpTestSucceeded) { throw "Codex proxy port 8317 is not reachable" }
         $reachable = $true
-        Write-Host "[daily-scan] gemini.google.com reachable."
+        Write-Host "[daily-scan] Codex proxy reachable."
     } catch {
-        Write-Host "[daily-scan] gemini.google.com unreachable, waiting ${intervalSec}s... (${elapsed}/${maxWaitSec}s)"
+        Write-Host "[daily-scan] Codex proxy unreachable, waiting ${intervalSec}s... (${elapsed}/${maxWaitSec}s)"
         Start-Sleep -Seconds $intervalSec
         $elapsed += $intervalSec
     }
 }
 if (-not $reachable) {
-    Write-Host "[daily-scan] WARNING: gemini.google.com still unreachable after ${maxWaitSec}s, proceeding anyway..."
+    Write-Host "[daily-scan] WARNING: Codex proxy still unreachable after ${maxWaitSec}s, proceeding anyway..."
 }
 
 # Ensure log dir exists
 $logDir = Join-Path $ProjectDir "data\logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 
-# 1) Watchlist Vegas touch scan (Mid + Long) — 不依赖 Gemini，最先运行，完成即推送飞书
+# 1) Watchlist Vegas touch scan (Mid + Long) — 不依赖 LLM，最先运行，完成即推送飞书
 Write-Host "[daily-scan] Step 1/4: Watchlist Vegas scan..."
 try {
     & $PythonBin watchlist_vegas_scan.py
@@ -90,8 +91,8 @@ try {
     Write-Host "[daily-scan] watchlist_vegas_scan error: $_"
 }
 
-# 2) 美股 scan + Gemini → 完成后立即发飞书（含每日数据更新状态）
-Write-Host "[daily-scan] Step 2/4: US scan + Gemini..."
+# 2) 美股 scan + Codex → 完成后立即发飞书（含每日数据更新状态）
+Write-Host "[daily-scan] Step 2/4: US scan + Codex..."
 $usScanExit = 0
 try {
     & $PythonBin vegas_mid_daily_scan.py --list tech
@@ -102,8 +103,8 @@ try {
 }
 & $PythonBin notify_daily_scan_result.py --market us --scan-exit-code $usScanExit --no-email
 
-# 3) 港股 scan + Gemini → 完成后立即发飞书（跳过重复的数据更新状态）
-Write-Host "[daily-scan] Step 3/4: HK scan + Gemini..."
+# 3) 港股 scan + Codex → 完成后立即发飞书（跳过重复的数据更新状态）
+Write-Host "[daily-scan] Step 3/4: HK scan + Codex..."
 $hkScanExit = 0
 try {
     & $PythonBin vegas_mid_daily_scan.py --list hk
@@ -114,8 +115,8 @@ try {
 }
 & $PythonBin notify_daily_scan_result.py --market hk --skip-update --no-email --scan-exit-code $hkScanExit
 
-# 4) A股高新技术 scan + Gemini → 完成后立即发飞书
-Write-Host "[daily-scan] Step 4/4: CN scan + Gemini..."
+# 4) A股高新技术 scan + Codex → 完成后立即发飞书
+Write-Host "[daily-scan] Step 4/4: CN scan + Codex..."
 $cnScanExit = 0
 try {
     & $PythonBin vegas_mid_daily_scan.py --list cn_hightech

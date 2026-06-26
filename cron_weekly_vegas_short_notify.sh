@@ -10,5 +10,5 @@ fi
 
 cd "$PROJECT_DIR"
 
-# Full pipeline: refresh weekly indicators -> weekly short vegas scan -> Gemini analysis -> PDF -> Feishu send.
+# Full pipeline: refresh weekly indicators -> weekly short vegas scan -> Codex analysis -> PDF -> Feishu send.
 "$PYTHON_BIN" weekly_vegas_short_notify.py --list combined --lookback 1

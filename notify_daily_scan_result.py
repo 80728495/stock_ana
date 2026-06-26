@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 import urllib.request
@@ -250,6 +249,16 @@ def _group_signals(signals: list[dict]) -> dict[str, list[dict]]:
     return grouped
 
 
+def _llm_label(summary: dict | None) -> str:
+    """Return display name for the analysis backend stored in summary.json."""
+    backend = str((summary or {}).get("llm_backend") or "codex").strip().lower()
+    if backend == "codex":
+        return "Codex"
+    if backend == "gemini":
+        return "Gemini"
+    return backend.upper() if backend else "LLM"
+
+
 def build_scan_blocks(summary: dict | None, token: str) -> tuple[str, list[list[dict]]]:
     if not summary:
         return (
@@ -264,12 +273,13 @@ def build_scan_blocks(summary: dict | None, token: str) -> tuple[str, list[list[
     has_gemini = bool(summary.get("has_gemini_analysis", False))
     report_path = summary.get("gemini_report_path") or "N/A"
     signals = summary.get("signals", [])
+    llm_label = _llm_label(summary)
 
     title = f"📊 {market_label} {scan_date}"
     head = [
         f"扫描总数: {total_scanned}",
         f"触发信号: {signals_found}",
-        f"Gemini分析: {'完成' if has_gemini else '未完成'}",
+        f"{llm_label}分析: {'完成' if has_gemini else '未完成'}",
         f"报告: {report_path}",
     ]
 
@@ -309,7 +319,7 @@ def build_scan_blocks(summary: dict | None, token: str) -> tuple[str, list[list[
                 if gm_t:
                     score_detail.append(f"技术{gm_t}")
                 tail = f" ({', '.join(score_detail)})" if score_detail else ""
-                lines.append(f"  Gemini: {gm}{tail}")
+                lines.append(f"  {llm_label}: {gm}{tail}")
 
         blocks.append([{"tag": "text", "text": "\n".join(lines)}])
 
@@ -338,7 +348,7 @@ def build_scan_blocks(summary: dict | None, token: str) -> tuple[str, list[list[
     table = summary.get("gemini_summary_table", "")
     if table:
         clipped = table[:2800]
-        blocks.append([{"tag": "text", "text": "Gemini 汇总表:\n" + clipped}])
+        blocks.append([{"tag": "text", "text": f"{llm_label} 汇总表:\n" + clipped}])
 
     return title, blocks
 
@@ -474,8 +484,8 @@ def _send_scan_notification(
     """
     扫描通知三分支：
       A. scan 退出码非0：只发错误卡片
-      B. scan OK + Gemini 失败：飞书摘要卡片 + 逐张图表图片，不发 PDF，不发邮件
-      C. scan OK + Gemini 成功：飞书摘要卡片 + PDF 文件，邮件发 PDF，不单独发图片
+      B. scan OK + LLM 失败：飞书摘要卡片 + 逐张图表图片，不发 PDF，不发邮件
+      C. scan OK + LLM 成功：飞书摘要卡片 + PDF 文件，邮件发 PDF，不单独发图片
     """
     ok = True
     market_label = (summary or {}).get("market_label") or "每日扫描"
@@ -486,6 +496,7 @@ def _send_scan_notification(
     has_gemini    = bool((summary or {}).get("has_gemini_analysis", False))
     gemini_status = str((summary or {}).get("gemini_status") or "").lower()
     report_path_raw = (summary or {}).get("gemini_report_path")
+    llm_label = _llm_label(summary)
 
     # 收集有效图表路径
     chart_paths:  list[Path] = []
@@ -509,17 +520,17 @@ def _send_scan_notification(
     sig_text = _format_signals_text(signals)
     head_text = f"扫描：{total_scanned} 只  |  信号：{signals_found} 只"
 
-    # ── 分支 B：只有 Gemini 最终失败才发半成品图文消息 ──
+    # ── 分支 B：只有 LLM 最终失败才发半成品图文消息 ──
     if not has_gemini:
         if gemini_status != "failed":
             status_text = gemini_status or "unknown"
             print(
-                f"⚠️ {market_label} {scan_date_str} Gemini 未完成但非最终失败 "
+                f"⚠️ {market_label} {scan_date_str} {llm_label} 未完成但非最终失败 "
                 f"(status={status_text})，跳过飞书半成品消息"
             )
             return ok
 
-        summary_text = head_text + "  |  Gemini：最终失败\n\n" + sig_text
+        summary_text = head_text + f"  |  {llm_label}：最终失败\n\n" + sig_text
         img_blocks: list[list[dict]] = []
         for cp, label in zip(chart_paths, chart_labels):
             image_key = upload_chart_to_feishu(token, cp)
@@ -532,7 +543,7 @@ def _send_scan_notification(
             ok = False
         return ok
 
-    # ── 分支 C：Gemini 成功 → 直接发 PDF（飞书 + 邮件），不发文字卡 ──────
+    # ── 分支 C：LLM 成功 → 直接发 PDF（飞书 + 邮件），不发文字卡 ──────
     md_content = ""
     if report_path_raw:
         rp = Path(report_path_raw)
@@ -610,8 +621,9 @@ def main() -> int:
         pdfs: list[tuple[bytes, str]] = []
         for mkt, path in [("us", summary_us_path), ("hk", summary_hk_path), ("cn", summary_cn_path)]:
             summary = _read_json(path) if path else None
+            llm_label = _llm_label(summary)
             if not summary or not summary.get("has_gemini_analysis"):
-                print(f"⚠️ {mkt} 无 Gemini 分析，跳过 PDF")
+                print(f"⚠️ {mkt} 无 {llm_label} 分析，跳过 PDF")
                 continue
             pdf_bytes = _build_pdf_for_summary(summary)
             if pdf_bytes:
@@ -632,7 +644,7 @@ def main() -> int:
                 print("⚠️ 合并邮件发送失败")
                 return 1
         else:
-            print("⚠️ 无可用 PDF（所有市场 Gemini 均未完成），跳过邮件")
+            print("⚠️ 无可用 PDF（所有市场 LLM 分析均未完成），跳过邮件")
             return 0
 
     # ── --no-new-data：今日缓存无更新，直接发通知后退出，不发扫描结果 ──
