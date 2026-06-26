@@ -21,6 +21,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Snapshot current Futu positions and industry distribution.")
     parser.add_argument("--out-dir", type=Path, default=OUT_DIR)
     parser.add_argument("--markets", nargs="+", default=["HK", "US"], choices=["HK", "US"])
+    parser.add_argument("--base-currency", default="HKD", choices=["HKD"], help="Currency for combined HK/US summary.")
+    parser.add_argument(
+        "--usd-hkd",
+        type=float,
+        default=7.8358,
+        help="USD/HKD rate used to convert US market value into HKD for combined summary.",
+    )
     return parser.parse_args()
 
 
@@ -204,6 +211,39 @@ def build_summaries(positions: pd.DataFrame, industry_map: pd.DataFrame) -> tupl
     return detail, industry_summary
 
 
+def build_combined_summary(positions: pd.DataFrame, usd_hkd: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+    df = positions.copy()
+    rate_map = {"HKD": 1.0, "USD": usd_hkd}
+    df["fx_to_hkd"] = df["currency"].map(rate_map).fillna(1.0)
+    df["market_value_hkd"] = df["market_val"] * df["fx_to_hkd"]
+    df["unrealized_pl_hkd"] = df["unrealized_pl"] * df["fx_to_hkd"]
+    total_value = df["market_value_hkd"].sum()
+    df["position_weight_combined"] = df["market_value_hkd"] / total_value if total_value else 0.0
+
+    combined = (
+        df.groupby(["industry"], dropna=False)
+        .agg(
+            market_value_hkd=("market_value_hkd", "sum"),
+            unrealized_pl_hkd=("unrealized_pl_hkd", "sum"),
+            original_market_values=(
+                "market_val",
+                lambda s: " / ".join(
+                    f"{currency}: {value:,.2f}"
+                    for currency, value in df.loc[s.index].groupby("currency")["market_val"].sum().items()
+                ),
+            ),
+            symbols=("code", "count"),
+            holdings=("stock_name", lambda s: " / ".join(s.astype(str).tolist())),
+            markets=("market", lambda s: " / ".join(dict.fromkeys(s.astype(str).tolist()))),
+        )
+        .reset_index()
+    )
+    combined["weight_combined"] = combined["market_value_hkd"] / total_value if total_value else 0.0
+    combined = combined.sort_values("market_value_hkd", ascending=False)
+    detail = df.sort_values("market_value_hkd", ascending=False)
+    return detail, combined
+
+
 def write_markdown(positions: pd.DataFrame, industry_summary: pd.DataFrame, out_path: Path) -> None:
     lines = ["# Current Holdings Industry Snapshot", ""]
     market_totals = (
@@ -237,6 +277,35 @@ def write_markdown(positions: pd.DataFrame, industry_summary: pd.DataFrame, out_
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def write_combined_markdown(
+    positions: pd.DataFrame,
+    combined_summary: pd.DataFrame,
+    out_path: Path,
+    usd_hkd: float,
+) -> None:
+    total_hkd = positions["market_value_hkd"].sum()
+    total_pl_hkd = positions["unrealized_pl_hkd"].sum()
+    lines = [
+        "# Current Holdings Combined Industry Snapshot",
+        "",
+        f"- Base currency: HKD",
+        f"- USD/HKD: {usd_hkd:.4f}",
+        f"- Total market value: {total_hkd:,.2f} HKD",
+        f"- Total unrealized P/L: {total_pl_hkd:,.2f} HKD",
+        f"- Symbols: {positions['code'].nunique()}",
+        "",
+        "| Industry | Combined value | Weight | Unrealized P/L | Original market values | Markets | Holdings |",
+        "|---|---:|---:|---:|---|---|---|",
+    ]
+    for _, row in combined_summary.iterrows():
+        lines.append(
+            f"| {row['industry']} | {row['market_value_hkd']:,.2f} HKD | "
+            f"{row['weight_combined']:.2%} | {row['unrealized_pl_hkd']:,.2f} HKD | "
+            f"{row['original_market_values']} | {row['markets']} | {row['holdings']} |"
+        )
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def main() -> None:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -250,16 +319,28 @@ def main() -> None:
     codes = sorted(positions["code"].dropna().unique().tolist())
     industry_map, raw_plates = fetch_owner_plates(codes)
     detailed, industry_summary = build_summaries(positions, industry_map)
+    combined_detail, combined_summary = build_combined_summary(detailed, args.usd_hkd)
 
     accounts.to_csv(args.out_dir / "futu_accounts_snapshot.csv", index=False, encoding="utf-8-sig")
     positions.to_csv(args.out_dir / "current_positions_full_snapshot_raw.csv", index=False, encoding="utf-8-sig")
     raw_plates.to_csv(args.out_dir / "current_positions_owner_plates_raw.csv", index=False, encoding="utf-8-sig")
     detailed.to_csv(args.out_dir / "current_positions_by_symbol_industry.csv", index=False, encoding="utf-8-sig")
     industry_summary.to_csv(args.out_dir / "current_positions_industry_summary.csv", index=False, encoding="utf-8-sig")
+    combined_detail.to_csv(args.out_dir / "current_positions_combined_by_symbol_industry.csv", index=False, encoding="utf-8-sig")
+    combined_summary.to_csv(args.out_dir / "current_positions_combined_industry_summary.csv", index=False, encoding="utf-8-sig")
     write_markdown(detailed, industry_summary, args.out_dir / "current_positions_industry_summary.md")
+    write_combined_markdown(
+        combined_detail,
+        combined_summary,
+        args.out_dir / "current_positions_combined_industry_summary.md",
+        args.usd_hkd,
+    )
 
     print((args.out_dir / "current_positions_industry_summary.md").resolve())
     print(industry_summary.to_string(index=False))
+    print()
+    print((args.out_dir / "current_positions_combined_industry_summary.md").resolve())
+    print(combined_summary.to_string(index=False))
 
 
 if __name__ == "__main__":
