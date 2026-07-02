@@ -864,42 +864,9 @@ def _label_candidate(
         bars_to_new_high = 0
         pre_low_reclaim_pct = np.nan
 
-    anchor_rise = _coerce_float(
-        row.get(
-            "label_anchor_rise_pct",
-            row.get("oracle_rise_from_anchor_low_pct", row.get("rise_from_anchor_low_pct", np.nan)),
-        )
-    )
-
-    forward_label = "ambiguous"
-    forward_reason = "no_forward_data" if confirm_pos >= end_pos else "middle"
-    forward_true_top = (
-        anchor_rise >= args.min_anchor_rise_pct
-        and not pd.isna(drawdown_pct)
-        and drawdown_pct <= -abs(args.true_drop_pct)
-        and decline_bars >= args.min_decline_bars
-        and pre_low_reclaim_pct <= args.max_reclaim_pct
-    )
-    forward_continuation = (
-        not pd.isna(future_high_pct)
-        and future_high_pct >= args.continuation_gain_pct
-        and (bars_to_new_high < decline_bars or drawdown_pct > -abs(args.continuation_max_dd_pct))
-    )
-    if forward_true_top:
-        forward_label = "true_top"
-        forward_reason = "anchor_rise_and_deep_decline"
-    elif forward_continuation:
-        forward_label = "continuation"
-        forward_reason = "future_new_high"
-
     structure = _macro_zigzag_label(df, row, wave_result, args)
-    label_mode = str(getattr(args, "label_mode", "macro_zigzag"))
-    if label_mode == "legacy_forward":
-        label = forward_label
-        reason = forward_reason
-    else:
-        label = str(structure.get("structure_label", "ambiguous"))
-        reason = str(structure.get("structure_label_reason", "macro_unclassified"))
+    label = str(structure.get("structure_label", "ambiguous"))
+    reason = str(structure.get("structure_label_reason", "macro_unclassified"))
 
     # 标签确认的两段式（SMC 只替换「最近 N 根内趋势没走完、无法判断」这一段，不碰更早的点）：
     #   ‹远端› 距数据末尾 >= recent_window 根：趋势已走完，完全由全局 pivot/大浪结构判定，
@@ -925,46 +892,9 @@ def _label_candidate(
         label = "unconfirmed"
         reason = "recent_zone_no_smc_structural_reversal"
 
-    top_vs_252high = _coerce_float(row.get("top_vs_252high_pct"))
-    top_dist_ema144 = _coerce_float(row.get("top_dist_ema144_pct"))
-    top_dist_ema200 = _coerce_float(row.get("top_dist_ema200_pct"))
-    major_wave_rise = _coerce_float(row.get("major_wave_rise_pct"))
-    rise_values = [value for value in (anchor_rise, major_wave_rise) if not pd.isna(value)]
-    best_rise = max(rise_values) if rise_values else np.nan
-    escape_rise_ok = best_rise >= args.escape_top_min_anchor_rise_pct
-    escape_high_ok = top_vs_252high >= -abs(args.escape_top_near_252high_pct)
-    escape_ema_ok = (
-        top_dist_ema144 >= args.escape_top_min_dist_ema144_pct
-        or top_dist_ema200 >= args.escape_top_min_dist_ema200_pct
-    )
-    escape_candidate_pool = bool(escape_rise_ok and escape_high_ok and escape_ema_ok)
-    escape_top = bool(label == "true_top" and escape_candidate_pool)
-    if escape_top:
-        escape_label = "escape_top"
-        escape_reason = "macro_top_after_high_extension"
-    elif escape_candidate_pool and label == "continuation":
-        escape_label = "high_continuation"
-        escape_reason = "macro_higher_peak_ahead"
-    elif escape_candidate_pool:
-        escape_label = "ambiguous"
-        escape_reason = reason
-    else:
-        escape_label = "out_of_escape_pool"
-        escape_reason = "not_high_extension_candidate"
-
     values = {
         "label": label,
         "label_reason": reason,
-        "drawdown_label": forward_label,
-        "drawdown_label_reason": forward_reason,
-        "legacy_forward_label": forward_label,
-        "legacy_forward_label_reason": forward_reason,
-        "escape_top_label": escape_label,
-        "escape_top_label_reason": escape_reason,
-        "escape_top_candidate_pool": int(escape_candidate_pool),
-        "escape_top_rise_ok": int(escape_rise_ok),
-        "escape_top_near_high_ok": int(escape_high_ok),
-        "escape_top_long_ema_ok": int(escape_ema_ok),
         "future_low_date": _date_text(low_date),
         "future_low_price": round(low_price, 4) if not pd.isna(low_price) else np.nan,
         "future_drawdown_pct": round(drawdown_pct, 2) if not pd.isna(drawdown_pct) else np.nan,
@@ -1213,35 +1143,6 @@ def _research_bundle(dataset: pd.DataFrame, model_feature_cols: list[str] | None
     }
 
 
-def _escape_top_task_dataset(dataset: pd.DataFrame) -> pd.DataFrame:
-    """Build the second-stage escape-top task from high-extension candidates.
-
-    The legacy ``label`` column remains the drawdown-avoidance task everywhere
-    else.  The escape-top model is trained only inside the first-stage
-    high-extension pool so negatives are comparable high-position continuations,
-    not low/base/rebound candidates.
-    """
-
-    out = dataset.copy()
-    if "drawdown_label" not in out.columns:
-        out["drawdown_label"] = out.get("label", "")
-    if "escape_top_label" not in out.columns:
-        out["escape_top_label"] = "ambiguous"
-    if "escape_top_candidate_pool" in out.columns:
-        pool = pd.to_numeric(out["escape_top_candidate_pool"], errors="coerce").fillna(0).astype(int).eq(1)
-        out = out[pool].copy()
-    mapped = out["escape_top_label"].map({
-        "escape_top": "true_top",
-        "high_continuation": "continuation",
-        "not_escape_top": "continuation",
-    })
-    out["label"] = mapped.fillna("ambiguous")
-    if "escape_top_label_reason" in out.columns:
-        out["label_reason"] = out["escape_top_label_reason"]
-    out["model_task"] = "escape_top"
-    return out
-
-
 def _filter_mid_vegas_dataset(dataset: pd.DataFrame, args: argparse.Namespace, label: str) -> pd.DataFrame:
     if dataset.empty or not getattr(args, "require_mid_vegas_uptrend", True):
         return dataset
@@ -1428,9 +1329,90 @@ def _score_performance_vs_universe(
     return pd.DataFrame(rows)
 
 
-def main() -> None:
-    global OUT_DIR
+_SAMPLE_NAMES = ("pattern", "smc_confirmed", "smc_raw", "smc_appear", "smc_early", "unified", "universe")
 
+
+def _stage1_select_samples(data: dict, args: argparse.Namespace) -> tuple[tuple[pd.DataFrame, ...], int]:
+    """Stage 1：逐股扫描召回 + ZigZag 顶部全集 + 打标签 → 7 个样本集 DataFrame（不含模型特征）。"""
+    pattern_rows: list[dict] = []
+    smc_confirmed_rows: list[dict] = []
+    smc_raw_rows: list[dict] = []
+    smc_appear_rows: list[dict] = []
+    smc_early_rows: list[dict] = []
+    unified_rows: list[dict] = []
+    universe_rows: list[dict] = []
+    failed = 0
+    for i, item in enumerate(data.values(), 1):
+        try:
+            (
+                symbol_pattern_rows, symbol_smc_rows, symbol_smc_raw_rows, symbol_smc_appear_rows,
+                symbol_smc_early_rows, symbol_unified_rows, symbol_universe_rows,
+            ) = _build_symbol_research_rows(item, args)
+            pattern_rows.extend(symbol_pattern_rows)
+            smc_confirmed_rows.extend(symbol_smc_rows)
+            smc_raw_rows.extend(symbol_smc_raw_rows)
+            smc_appear_rows.extend(symbol_smc_appear_rows)
+            smc_early_rows.extend(symbol_smc_early_rows)
+            unified_rows.extend(symbol_unified_rows)
+            universe_rows.extend(symbol_universe_rows)
+            if symbol_unified_rows or symbol_universe_rows or symbol_pattern_rows:
+                logger.info(
+                    f"[{i}/{len(data)}] {item['market']}:{item['symbol']} "
+                    f"形态 {len(symbol_pattern_rows)} / SMC appear {len(symbol_smc_appear_rows)} / "
+                    f"SMC early {len(symbol_smc_early_rows)} / 统一 {len(symbol_unified_rows)} / "
+                    f"顶部全集 {len(symbol_universe_rows)}"
+                )
+        except Exception as exc:
+            failed += 1
+            logger.warning(f"{item['market']}:{item['symbol']} 失败: {exc}")
+        if i % 50 == 0 or i == len(data):
+            logger.info(
+                f"进度 [{i}/{len(data)}] 形态={len(pattern_rows)} 统一={len(unified_rows)} "
+                f"顶部全集={len(universe_rows)} 失败={failed}"
+            )
+    return (
+        pd.DataFrame(pattern_rows), pd.DataFrame(smc_confirmed_rows), pd.DataFrame(smc_raw_rows),
+        pd.DataFrame(smc_appear_rows), pd.DataFrame(smc_early_rows), pd.DataFrame(unified_rows),
+        pd.DataFrame(universe_rows),
+    ), failed
+
+
+def _save_samples(samples_dir: Path, frames: tuple[pd.DataFrame, ...]) -> None:
+    """Stage 1 产物（召回+标签的样本集，不含模型特征）落盘，作为 Stage 1→2 的接口。"""
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    for name, df in zip(_SAMPLE_NAMES, frames, strict=True):
+        df.to_csv(samples_dir / f"{name}.csv", index=False, encoding="utf-8-sig")
+
+
+def _load_samples(samples_dir: Path) -> tuple[pd.DataFrame, ...]:
+    missing = [n for n in _SAMPLE_NAMES if not (samples_dir / f"{n}.csv").exists()]
+    if missing:
+        raise FileNotFoundError(f"样本集缺失 {missing}，请先跑 `--stage sample`。目录: {samples_dir}")
+
+    def _read(name: str) -> pd.DataFrame:
+        try:  # sym 必须按字符串读——否则 HK/CN 代码("00700")丢前导零变 700，按(market,sym)匹配
+            return pd.read_csv(samples_dir / f"{name}.csv", low_memory=False, dtype={"sym": str})
+        except pd.errors.EmptyDataError:  # 被禁用的数据集(smc_confirmed/smc_raw)写出的是空文件
+            return pd.DataFrame()
+
+    return tuple(_read(n) for n in _SAMPLE_NAMES)
+
+
+def _filter_sample_markets(frames: tuple[pd.DataFrame, ...], markets: set[str]) -> tuple[pd.DataFrame, ...]:
+    if not markets or markets == {"US", "HK", "CN"}:
+        return frames
+    out = []
+    for df in frames:
+        if df.empty or "market" not in df.columns:
+            out.append(df)
+            continue
+        mask = df["market"].astype(str).str.upper().isin(markets)
+        out.append(df[mask].copy())
+    return tuple(out)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    """构建 CLI 参数解析器（抽出以便扫描等脚本复用默认召回/特征参数：build_arg_parser().parse_args([])）。"""
     parser = argparse.ArgumentParser(description="构建 watchlist 顶部候选研究数据集并做标签/特征统计")
     parser.add_argument("--watchlist", type=Path, default=DATA_DIR / "lists" / "watchlist.md")
     parser.add_argument("--out-dir", type=Path, default=OUT_DIR, help="研究输出目录，默认 data/output/top_candidate_research")
@@ -1439,18 +1421,6 @@ def main() -> None:
     parser.add_argument("--strategy-cooldown", type=int, default=0, help="候选研究默认不做冷却，保留所有形态")
     parser.add_argument("--strategy-min-prior-rise-pct", type=float, default=0.0, help="候选研究默认不使用长上影策略内部前涨幅过滤")
     parser.add_argument("--lookahead-bars", type=int, default=90)
-    parser.add_argument("--min-anchor-rise-pct", type=float, default=30.0)
-    parser.add_argument("--true-drop-pct", type=float, default=30.0)
-    parser.add_argument("--min-decline-bars", type=int, default=20)
-    parser.add_argument("--max-reclaim-pct", type=float, default=5.0)
-    parser.add_argument("--continuation-gain-pct", type=float, default=8.0)
-    parser.add_argument("--continuation-max-dd-pct", type=float, default=12.0)
-    parser.add_argument(
-        "--label-mode",
-        choices=["macro_zigzag", "legacy_forward"],
-        default="macro_zigzag",
-        help="训练标签来源；默认使用全局 ZigZag/大浪结构，legacy_forward 为旧的未来涨跌窗口规则",
-    )
     parser.add_argument("--label-double-top-tolerance-pct", type=float, default=2.5, help="宏观结构标签中双顶/同一顶部的价格容差")
     parser.add_argument("--label-double-top-min-separation-bars", type=int, default=5, help="宏观双顶两头之间的最小 bar 数")
     parser.add_argument("--label-double-top-max-separation-bars", type=int, default=80, help="宏观双顶两头之间的最大 bar 数")
@@ -1463,10 +1433,6 @@ def main() -> None:
         default=60,
         help="近端区边界（根）：距数据末尾不足该根数的 true_top 视为趋势未走完、大结构不可信，改由 SMC 结构反转确认（确认→true_top，否则→unconfirmed）；更早的点完全由全局 pivot 结构判定，不受 SMC 影响",
     )
-    parser.add_argument("--escape-top-min-anchor-rise-pct", type=float, default=80.0)
-    parser.add_argument("--escape-top-near-252high-pct", type=float, default=8.0)
-    parser.add_argument("--escape-top-min-dist-ema144-pct", type=float, default=25.0)
-    parser.add_argument("--escape-top-min-dist-ema200-pct", type=float, default=30.0)
     parser.add_argument(
         "--smc-confirmed-min-score",
         dest="smc_confirmed_min_score",
@@ -1526,7 +1492,19 @@ def main() -> None:
         help="只处理这些市场（逗号分隔，如 US 或 HK,CN）。US/HK/CN 本就分市场独立建模，"
              "分市场单独跑可把内存峰值压到单市场量级、并提供分阶段 checkpoint。默认三市场全跑",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--stage",
+        choices=["all", "sample", "model"],
+        default="all",
+        help="两段式：sample=只跑 Stage1(扫描召回+打标签)→落盘样本集；model=跳过扫描、读样本集只跑 Stage2"
+             "(特征+训练+评估)；all=两段连跑(默认)。改召回/标签才需重跑 sample；只调特征/模型用 model 即可，省去重扫",
+    )
+    return parser
+
+
+def main() -> None:
+    global OUT_DIR
+    args = build_arg_parser().parse_args()
     OUT_DIR = args.out_dir
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1540,69 +1518,36 @@ def main() -> None:
         before = len(data)
         data = {k: v for k, v in data.items() if str(v.get("market", "")).upper() in sel_markets}
         logger.info(f"按市场过滤 {sorted(sel_markets)}: {before} -> {len(data)} 只（分市场跑以控内存）")
-    logger.info(f"watchlist 可用样本 {len(data)} 只，开始扫描顶部候选 ...")
-
-    pattern_rows: list[dict] = []
-    smc_confirmed_rows: list[dict] = []
-    smc_raw_rows: list[dict] = []
-    smc_appear_rows: list[dict] = []
-    smc_early_rows: list[dict] = []
-    unified_rows: list[dict] = []
-    universe_rows: list[dict] = []
+    samples_dir = OUT_DIR / "_samples"
     failed = 0
-    for i, item in enumerate(data.values(), 1):
-        try:
-            (
-                symbol_pattern_rows,
-                symbol_smc_rows,
-                symbol_smc_raw_rows,
-                symbol_smc_appear_rows,
-                symbol_smc_early_rows,
-                symbol_unified_rows,
-                symbol_universe_rows,
-            ) = _build_symbol_research_rows(item, args)
-            pattern_rows.extend(symbol_pattern_rows)
-            smc_confirmed_rows.extend(symbol_smc_rows)
-            smc_raw_rows.extend(symbol_smc_raw_rows)
-            smc_appear_rows.extend(symbol_smc_appear_rows)
-            smc_early_rows.extend(symbol_smc_early_rows)
-            unified_rows.extend(symbol_unified_rows)
-            universe_rows.extend(symbol_universe_rows)
-            if symbol_pattern_rows or symbol_smc_rows or symbol_smc_raw_rows or symbol_smc_appear_rows or symbol_smc_early_rows or symbol_unified_rows or symbol_universe_rows:
-                logger.info(
-                    f"[{i}/{len(data)}] {item['market']}:{item['symbol']} "
-                    f"形态 {len(symbol_pattern_rows)} / SMC confirmed {len(symbol_smc_rows)} / "
-                    f"SMC raw {len(symbol_smc_raw_rows)} / "
-                    f"SMC appear {len(symbol_smc_appear_rows)} / "
-                    f"SMC early {len(symbol_smc_early_rows)} / "
-                    f"统一 {len(symbol_unified_rows)} / 顶部全集 {len(symbol_universe_rows)}"
-                )
-        except Exception as exc:
-            failed += 1
-            logger.warning(f"{item['market']}:{item['symbol']} 失败: {exc}")
-        if i % 50 == 0 or i == len(data):
-            logger.info(
-                f"进度 [{i}/{len(data)}] "
-                f"形态候选={len(pattern_rows)} SMC confirmed={len(smc_confirmed_rows)} "
-                f"SMC raw={len(smc_raw_rows)} SMC appear={len(smc_appear_rows)} SMC early={len(smc_early_rows)} "
-                f"统一候选={len(unified_rows)} 顶部全集={len(universe_rows)} 失败={failed}"
-            )
+    if args.stage == "model":
+        logger.info(f"Stage2(仅特征+训练+评估)：从 {samples_dir} 读入样本集，跳过扫描/标签")
+        (pattern_dataset, smc_confirmed_dataset, smc_raw_dataset, smc_appear_dataset,
+         smc_early_dataset, dataset, universe) = _load_samples(samples_dir)
+    else:
+        logger.info(f"Stage1(扫描召回+打标签)：{len(data)} 只，开始 ...")
+        (pattern_dataset, smc_confirmed_dataset, smc_raw_dataset, smc_appear_dataset,
+         smc_early_dataset, dataset, universe), failed = _stage1_select_samples(data, args)
+        _save_samples(samples_dir, (pattern_dataset, smc_confirmed_dataset, smc_raw_dataset,
+                                    smc_appear_dataset, smc_early_dataset, dataset, universe))
+        logger.info(f"Stage1 完成：样本集落盘 {samples_dir}（统一候选 {len(dataset)} / 顶部全集 {len(universe)}）")
+        if args.stage == "sample":
+            return  # 只选样本，特征+训练交给 `--stage model`
+    (pattern_dataset, smc_confirmed_dataset, smc_raw_dataset, smc_appear_dataset,
+     smc_early_dataset, dataset, universe) = _filter_sample_markets(
+        (pattern_dataset, smc_confirmed_dataset, smc_raw_dataset, smc_appear_dataset,
+         smc_early_dataset, dataset, universe),
+        sel_markets,
+    )
 
-    pattern_dataset = pd.DataFrame(pattern_rows)
-    smc_confirmed_dataset = pd.DataFrame(smc_confirmed_rows)
-    smc_raw_dataset = pd.DataFrame(smc_raw_rows)
-    smc_appear_dataset = pd.DataFrame(smc_appear_rows)
-    smc_early_dataset = pd.DataFrame(smc_early_rows)
-    dataset = pd.DataFrame(unified_rows)
-    universe = pd.DataFrame(universe_rows)
     if pattern_dataset.empty and smc_confirmed_dataset.empty and smc_raw_dataset.empty and smc_appear_dataset.empty and smc_early_dataset.empty:
-        logger.error("没有生成任何召回候选")
+        logger.error("没有任何召回候选")
         return
     if dataset.empty:
-        logger.error("没有生成任何统一召回候选")
+        logger.error("没有任何统一召回候选")
         return
     if universe.empty:
-        logger.error("没有生成任何 ZigZag 顶部全集候选")
+        logger.error("没有任何 ZigZag 顶部全集候选")
         return
 
     dataset = add_research_features(dataset, symbol_data=data)
@@ -1654,22 +1599,10 @@ def main() -> None:
         near_bars=args.merge_bars,
     )
 
-    escape_dataset = _escape_top_task_dataset(dataset)
-    escape_universe = _escape_top_task_dataset(universe)
-    escape_bundle = _research_bundle(escape_dataset, model_feature_cols=PRIMARY_MODEL_FEATURE_COLS, per_market=args.per_market_model)
-    escape_universe_bundle = _research_bundle(escape_universe, model_feature_cols=PRIMARY_MODEL_FEATURE_COLS, per_market=args.per_market_model)
-    escape_coverage = strategy_coverage_report(escape_universe)
-    escape_universe_score_perf = _score_performance_vs_universe(
-        escape_bundle["scored"],
-        escape_universe,
-        near_bars=args.merge_bars,
-    )
-
     covered_flag = pd.to_numeric(universe["covered_by_recall"], errors="coerce").fillna(0)
     missed_universe = universe[(universe["label"] == "true_top") & (covered_flag == 0)].copy()
     missed_universe = missed_universe.sort_values(["market", "sym", "top_date"]).reset_index(drop=True)
 
-    dataset_csv = OUT_DIR / "watchlist_top_candidates_labeled.csv"
     unified_dataset_csv = OUT_DIR / "watchlist_unified_recall_candidates_labeled.csv"
     pattern_dataset_csv = OUT_DIR / "watchlist_pattern_candidates_labeled.csv"
     smc_confirmed_dataset_csv = OUT_DIR / "watchlist_smc_confirmed_recall_candidates_labeled.csv"
@@ -1691,7 +1624,6 @@ def main() -> None:
     universe_missed_csv = OUT_DIR / "universe_true_tops_missed_by_recall.csv"
     universe_missed_by_patterns_csv = OUT_DIR / "universe_true_tops_missed_by_patterns.csv"
     coverage_csv = OUT_DIR / "recall_coverage_by_true_top.csv"
-    legacy_coverage_csv = OUT_DIR / "pattern_coverage_by_true_top.csv"
     universe_summary_md = OUT_DIR / "universe_top_candidate_label_summary.md"
     universe_feature_diff_csv = OUT_DIR / "universe_top_candidate_feature_diff.csv"
     universe_feature_diff_md = OUT_DIR / "universe_top_candidate_feature_diff.md"
@@ -1700,30 +1632,11 @@ def main() -> None:
     universe_scored_csv = OUT_DIR / "universe_top_candidate_logistic_scored.csv"
     universe_score_perf_csv = OUT_DIR / "universe_top_candidate_score_performance.csv"
 
-    escape_dataset_csv = OUT_DIR / "watchlist_escape_top_candidates_labeled.csv"
-    escape_summary_md = OUT_DIR / "escape_top_candidate_label_summary.md"
-    escape_feature_diff_csv = OUT_DIR / "escape_top_candidate_feature_diff.csv"
-    escape_feature_diff_md = OUT_DIR / "escape_top_candidate_feature_diff.md"
-    escape_buckets_csv = OUT_DIR / "escape_top_candidate_bucket_stats.csv"
-    escape_coef_csv = OUT_DIR / "escape_top_candidate_logistic_coefficients.csv"
-    escape_scored_csv = OUT_DIR / "escape_top_candidate_logistic_scored.csv"
-    escape_score_perf_csv = OUT_DIR / "escape_top_candidate_score_performance.csv"
-    escape_universe_recall_score_perf_csv = OUT_DIR / "escape_top_universe_recall_score_performance.csv"
-    escape_coverage_csv = OUT_DIR / "escape_top_recall_coverage_by_true_top.csv"
-    escape_universe_dataset_csv = OUT_DIR / "watchlist_escape_top_universe_candidates_labeled.csv"
-    escape_universe_summary_md = OUT_DIR / "escape_top_universe_label_summary.md"
-    escape_universe_feature_diff_csv = OUT_DIR / "escape_top_universe_feature_diff.csv"
-    escape_universe_feature_diff_md = OUT_DIR / "escape_top_universe_feature_diff.md"
-    escape_universe_buckets_csv = OUT_DIR / "escape_top_universe_bucket_stats.csv"
-    escape_universe_coef_csv = OUT_DIR / "escape_top_universe_logistic_coefficients.csv"
-    escape_universe_scored_csv = OUT_DIR / "escape_top_universe_logistic_scored.csv"
-    escape_universe_score_perf_csv = OUT_DIR / "escape_top_universe_score_performance.csv"
-
     _write_research_outputs(
         title="Unified Recall Top Candidate Research Summary",
         dataset=dataset,
         bundle=unified_bundle,
-        dataset_csv=dataset_csv,
+        dataset_csv=unified_dataset_csv,
         summary_md=summary_md,
         feature_diff_csv=feature_diff_csv,
         feature_diff_md=feature_diff_md,
@@ -1732,7 +1645,6 @@ def main() -> None:
         scored_csv=scored_csv,
         score_perf_csv=score_perf_csv,
     )
-    dataset.to_csv(unified_dataset_csv, index=False, encoding="utf-8-sig")
     pattern_dataset.to_csv(pattern_dataset_csv, index=False, encoding="utf-8-sig")
     smc_confirmed_dataset.to_csv(smc_confirmed_dataset_csv, index=False, encoding="utf-8-sig")
     smc_raw_dataset.to_csv(smc_raw_dataset_csv, index=False, encoding="utf-8-sig")
@@ -1755,34 +1667,6 @@ def main() -> None:
         scored_csv=universe_scored_csv,
         score_perf_csv=universe_score_perf_csv,
     )
-    _write_research_outputs(
-        title="Escape Top Candidate Research Summary",
-        dataset=escape_dataset,
-        bundle=escape_bundle,
-        dataset_csv=escape_dataset_csv,
-        summary_md=escape_summary_md,
-        feature_diff_csv=escape_feature_diff_csv,
-        feature_diff_md=escape_feature_diff_md,
-        buckets_csv=escape_buckets_csv,
-        coef_csv=escape_coef_csv,
-        scored_csv=escape_scored_csv,
-        score_perf_csv=escape_score_perf_csv,
-    )
-    escape_universe_score_perf.to_csv(escape_universe_recall_score_perf_csv, index=False, encoding="utf-8-sig")
-    escape_coverage.to_csv(escape_coverage_csv, index=False, encoding="utf-8-sig")
-    _write_research_outputs(
-        title="Escape Top Universe Research Summary",
-        dataset=escape_universe,
-        bundle=escape_universe_bundle,
-        dataset_csv=escape_universe_dataset_csv,
-        summary_md=escape_universe_summary_md,
-        feature_diff_csv=escape_universe_feature_diff_csv,
-        feature_diff_md=escape_universe_feature_diff_md,
-        buckets_csv=escape_universe_buckets_csv,
-        coef_csv=escape_universe_coef_csv,
-        scored_csv=escape_universe_scored_csv,
-        score_perf_csv=escape_universe_score_perf_csv,
-    )
     missed_universe.to_csv(universe_missed_csv, index=False, encoding="utf-8-sig")
     pattern_covered_flag = pd.to_numeric(universe["covered_by_patterns"], errors="coerce").fillna(0)
     universe[(universe["label"] == "true_top") & (pattern_covered_flag == 0)].copy().sort_values(["market", "sym", "top_date"]).to_csv(
@@ -1791,7 +1675,6 @@ def main() -> None:
         encoding="utf-8-sig",
     )
     coverage.to_csv(coverage_csv, index=False, encoding="utf-8-sig")
-    coverage.to_csv(legacy_coverage_csv, index=False, encoding="utf-8-sig")
     if not coverage.empty:
         universe_summary = universe_summary_md.read_text(encoding="utf-8")
         universe_summary_md.write_text(
@@ -1806,15 +1689,6 @@ def main() -> None:
             + to_markdown_table(unified_universe_score_perf),
             encoding="utf-8",
         )
-    if not escape_universe_score_perf.empty:
-        summary = escape_summary_md.read_text(encoding="utf-8")
-        summary += "\n## Model Performance Against Recalled Universe Escape Tops\n\n"
-        summary += to_markdown_table(escape_universe_score_perf)
-        if not escape_coverage.empty:
-            summary += "\n## Recall Coverage On Universe Escape Tops\n\n"
-            summary += to_markdown_table(escape_coverage)
-        escape_summary_md.write_text(summary, encoding="utf-8")
-
     print("\n" + "═" * 78)
     print("  Watchlist 顶部候选研究数据集")
     print("═" * 78)
@@ -1850,20 +1724,7 @@ def main() -> None:
     if not coverage.empty:
         print("\n  召回策略对顶部全集真顶的覆盖:")
         print(coverage.to_string(index=False))
-    print("\n  真正逃顶任务标签分布:")
-    print(escape_bundle["summary"].to_string(index=False))
-    if not escape_bundle["coef"].empty:
-        print("\n  真正逃顶任务：轻量 logistic 权重 Top:")
-        print(escape_bundle["coef"].head(12).to_string(index=False))
-    if not escape_universe_score_perf.empty:
-        print("\n  真正逃顶任务：以当前召回可触达逃顶为分母的表现:")
-        print(escape_universe_score_perf.to_string(index=False))
-    if not escape_coverage.empty:
-        print("\n  召回策略对顶部全集逃顶的覆盖:")
-        print(escape_coverage.to_string(index=False))
-
-    print(f"\n  主候选数据集:     {dataset_csv}")
-    print(f"  统一候选数据集:   {unified_dataset_csv}")
+    print(f"\n  统一候选数据集:   {unified_dataset_csv}")
     print(f"  形态候选数据集:   {pattern_dataset_csv}")
     print(f"  SMC confirmed候选数据集:  {smc_confirmed_dataset_csv}")
     print(f"  SMC raw候选数据集: {smc_raw_dataset_csv}")
@@ -1875,20 +1736,11 @@ def main() -> None:
     print(f"  召回覆盖率:       {coverage_csv}")
     print(f"  主候选汇总报告:   {summary_md}")
     print(f"  顶部全集汇总报告: {universe_summary_md}")
-    print(f"  逃顶候选数据集:   {escape_dataset_csv}")
-    print(f"  逃顶候选汇总报告: {escape_summary_md}")
-    print(f"  逃顶全集数据集:   {escape_universe_dataset_csv}")
-    print(f"  逃顶全集汇总报告: {escape_universe_summary_md}")
     if not unified_bundle["coef"].empty:
         print(f"  主候选打分:       {scored_csv}")
         print(f"  主候选分数表现:   {score_perf_csv}")
         print(f"  主候选全集召回表现: {universe_recall_score_perf_csv}")
         print(f"  SMC 分层对比:     {smc_model_perf_csv}")
-    if not escape_bundle["coef"].empty:
-        print(f"  逃顶候选打分:     {escape_scored_csv}")
-        print(f"  逃顶候选分数表现: {escape_score_perf_csv}")
-        print(f"  逃顶全集召回表现: {escape_universe_recall_score_perf_csv}")
-        print(f"  逃顶召回覆盖率:   {escape_coverage_csv}")
     if not universe_bundle["coef"].empty:
         print(f"  顶部全集候选打分: {universe_scored_csv}")
         print(f"  顶部全集分数表现: {universe_score_perf_csv}")

@@ -236,6 +236,26 @@ REALTIME_FEATURE_GROUPS = (
 
 REALTIME_FEATURE_COLS = [col for group in REALTIME_FEATURE_GROUPS for col in group.columns]
 
+# 顶后确认型特征：必须等顶后跌出结构/确认才发育——确认 K 线读数(confirm_drop_from_top_pct、
+# vol_ratio_confirm_50、rsi14_confirm、macd_hist_confirm_pct)、swing-CHoCH 确认召回
+# (smc_confirmed_recall_*，当前该召回禁用→恒为空)、双顶颈线破位(double_top_recall_neckline/
+# failed)、两根 K 线破位确认(shadow_d2_break_d1_low)。它们语义属于"进一步确认"，
+# 对早期发现(L0，顶后 lag 1-2 天)零 OOS 增益却系统性压低新鲜点分数
+# (实测剔除后 watchlist-OOS lgb AUC 变动 <0.006)。发现打分应剔除，"确认"交给段 B 结构判定
+# (swing CHoCH↓，见 escape_signal_tracker)。详见 memory: top-reversal-discovery-no-confirm-features。
+POST_CONFIRMATION_FEATURE_COLS = (
+    "recalled_by_smc_confirmed",
+    "smc_confirmed_recall_count", "smc_confirmed_recall_score_max",
+    "smc_confirmed_recall_struct_score_max", "smc_confirmed_recall_confirm_lag_min",
+    "smc_confirmed_recall_zone_width_pct", "smc_confirmed_recall_volume_ratio",
+    "double_top_recall_neckline_break_pct", "double_top_recall_failed_rebound_vs_neckline_pct",
+    "confirm_drop_from_top_pct", "vol_ratio_confirm_50",
+    "rsi14_confirm", "macd_hist_confirm_pct", "shadow_d2_break_d1_low",
+)
+
+# 早期发现(L0)打分用特征 = 实时特征剔除顶后确认型。段 A 早发现模型专用。
+DISCOVERY_FEATURE_COLS = [c for c in REALTIME_FEATURE_COLS if c not in set(POST_CONFIRMATION_FEATURE_COLS)]
+
 ORACLE_ZIGZAG_CONTEXT_COLS = tuple(f"oracle_{col}" for col in ZIGZAG_ANCHOR_FEATURES + WAVE_STRUCTURE_FEATURES)
 
 BUCKET_COLS = [

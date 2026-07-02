@@ -1,6 +1,6 @@
 # Shawn 关注股票列表
 
-> 人工维护，最后更新：2026-05-21
+> 人工维护，最后更新：2026-07-02
 >
 > 重点跟踪标的，兼顾港股、美股与大A。
 
@@ -28,6 +28,38 @@
 | 800700 | 恒生科技指数 | 恒生科技指数 |
 | HTImain | 恒生科技指数期货主连 (2605) | 恒生科技指数期货主连 (2605) |
 | 07552 | 南方两倍做空恒科 | 南方两倍做空恒科 |
+| 03986 | 兆易创新 | 兆易创新 |
+| 06613 | 蓝思科技 | 蓝思科技 |
+| 07709 | 南方两倍做多海力士 | 南方两倍做多海力士 |
+| 02631 | 天岳先进 | 天岳先进 |
+| 06809 | 澜起科技 | 澜起科技 |
+| 03896 | 金山云 | 金山云 |
+| 00175 | 吉利汽车 | 吉利汽车 |
+| 03750 | 宁德时代 | 宁德时代 |
+| 01378 | 中国宏桥 | 中国宏桥 |
+| 03931 | 中创新航 | 中创新航 |
+| 03393 | 威胜控股 | 威胜控股 |
+| 01277 | 力量发展 | 力量发展 |
+| 06181 | 老铺黄金 | 老铺黄金 |
+| 02533 | 黑芝麻智能 | 黑芝麻智能 |
+| 01860 | 汇量科技 | 汇量科技 |
+| 09926 | 康方生物 | 康方生物 |
+| 810758 | 乐自天成(临时代码) | 乐自天成(临时代码) |
+| 800125 | 恒指波幅指数 | 恒指波幅指数 |
+| 07300 | 南方一倍做空恒指 | 南方一倍做空恒指 |
+| 02097 | 蜜雪集团 | 蜜雪集团 |
+| 07226 | 南方两倍做多恒科 | 南方两倍做多恒科 |
+| 01070 | TCL电子 | TCL电子 |
+| 00066 | 港铁公司 | 港铁公司 |
+| 01211 | 比亚迪股份 | 比亚迪股份 |
+| 00883 | 中国海洋石油 | 中国海洋石油 |
+| 01398 | 工商银行 | 工商银行 |
+| 03988 | 中国银行 | 中国银行 |
+| 00939 | 建设银行 | 建设银行 |
+| 09618 | 京东集团-SW | 京东集团-SW |
+| 02015 | 理想汽车-W | 理想汽车-W |
+| 01357 | 美图公司 | 美图公司 |
+| 09961 | 携程集团-S | 携程集团-S |
 
 ## 美股 (US)
 
@@ -191,6 +223,60 @@
 | NTNX | Nutanix | Nutanix |
 | CDNS | 铿腾电子 | 铿腾电子 |
 | NET | Cloudflare | Cloudflare |
+| CEG | Constellation Energy | Constellation Energy |
+| NBIS | NEBIUS | NEBIUS |
+| AME | 阿美特克 | 阿美特克 |
+| TT | Trane技术 | Trane技术 |
+| PL | Planet Labs PBC | Planet Labs PBC |
+| BAND | Bandwidth | Bandwidth |
+| NICE | NICE Ltd | NICE Ltd |
+| MNDY | monday.com | monday.com |
+| MDB | MongoDB | MongoDB |
+| MBLY | Mobileye Global | Mobileye Global |
+| MANH | Manhattan Associates | Manhattan Associates |
+| KVYO | Klaviyo | Klaviyo |
+| INTA | Intapp | Intapp |
+| GWRE | Guidewire Software | Guidewire Software |
+| GTLB | Gitlab | Gitlab |
+| GLBE | Global-E Online | Global-E Online |
+| GEN | Gen Digital | Gen Digital |
+| FRSH | Freshworks | Freshworks |
+| EA | 艺电 | 艺电 |
+| DSGX | 笛卡尔物流系统集团 | 笛卡尔物流系统集团 |
+| DOCU | DocuSign | DocuSign |
+| DBX | Dropbox | Dropbox |
+| CWAN | Clearwater Analytics | Clearwater Analytics |
+| CVLT | 康沃系统 | 康沃系统 |
+| CLBT | Cellebrite | Cellebrite |
+| CHKP | Check Point软件 | Check Point软件 |
+| CCC | CCC Intelligent Solutions Holdings | CCC Intelligent Solutions Holdings |
+| BSY | Bentley Systems | Bentley Systems |
+| NAVN | Navan | Navan |
+| BRZE | Braze | Braze |
+| BOX | Box Inc | Box Inc |
+| BL | BlackLine | BlackLine |
+| BILL | BILL Holdings | BILL Holdings |
+| AVPT | AvePoint | AvePoint |
+| ADSK | 欧特克 | 欧特克 |
+| ACIW | ACI环球 | ACI环球 |
+| ASTS | AST SpaceMobile | AST SpaceMobile |
+| ODFL | Old Dominion Freight Line | Old Dominion Freight Line |
+| CSX | CSX运输 | CSX运输 |
+| ADI | 亚德诺 | 亚德诺 |
+| PYPL | PayPal | PayPal |
+| AVGO | 博通 | 博通 |
+| QTUM | Defiance Quantum ETF | Defiance Quantum ETF |
+| PONY | 小马智行 | 小马智行 |
+| CHYM | Chime Financial | Chime Financial |
+| HIMS | Hims & Hers Health | Hims & Hers Health |
+| ADBE | Adobe | Adobe |
+| DRAM | Roundhill Memory ETF | Roundhill Memory ETF |
+| INTC | 英特尔 | 英特尔 |
+| MPWR | Monolithic Power Systems | Monolithic Power Systems |
+| DOV | 都福集团 | 都福集团 |
+| ETN | 伊顿 | 伊顿 |
+| ROG | 罗杰斯 | 罗杰斯 |
+| CC | The Chemours | The Chemours |
 
 ## 大A (CN)
 
@@ -235,3 +321,6 @@
 | 300850 | 新强联 | 新强联 |
 | 002409 | 雅克科技 | 雅克科技 |
 | 600487 | 亨通光电 | 亨通光电 |
+| 688234 | 天岳先进 | 天岳先进 |
+| 603650 | 彤程新材 | 彤程新材 |
+| 002130 | 沃尔核材 | 沃尔核材 |

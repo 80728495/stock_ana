@@ -30,7 +30,7 @@ from stock_ana.research.top_reversal.feature_registry import (  # noqa: E402
     apply_legacy_feature_aliases,
 )
 
-LABELED = DATA_DIR / "output" / "top_candidate_research" / "watchlist_escape_top_candidates_labeled.csv"
+LABELED = DATA_DIR / "output" / "top_candidate_research" / "watchlist_unified_recall_candidates_labeled.csv"
 WATCHLIST = DATA_DIR / "lists" / "watchlist.md"
 MARKETS = ["US", "HK", "CN"]
 

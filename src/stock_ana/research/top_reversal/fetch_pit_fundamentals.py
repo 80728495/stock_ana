@@ -33,7 +33,7 @@ from stock_ana.config import DATA_DIR  # noqa: E402
 
 _SA_UA = {"User-Agent": "Mozilla/5.0 (Macintosh)"}
 
-# 用统一候选全集（escape-top 是其子集）作抓取 universe，覆盖所有训练/验证候选
+# 用统一候选全集作抓取 universe，覆盖所有训练/验证候选
 LABELED = DATA_DIR / "output" / "top_candidate_research" / "watchlist_unified_recall_candidates_labeled.csv"
 OUTDIR = DATA_DIR / "cache" / "fundamentals" / "pit"
 
