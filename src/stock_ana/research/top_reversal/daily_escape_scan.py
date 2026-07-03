@@ -34,6 +34,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 import pandas as pd  # noqa: E402
 
 from stock_ana.config import DATA_DIR  # noqa: E402
+from stock_ana.research.top_reversal.discovery_model import (  # noqa: E402
+    MODEL_DIR,
+    load_discovery_models,
+    predict_discovery,
+)
 from stock_ana.research.top_reversal.escape_signal_tracker import (  # noqa: E402
     SignalConfig,
     WatchState,
@@ -42,13 +47,11 @@ from stock_ana.research.top_reversal.escape_signal_tracker import (  # noqa: E40
     _prep_prices,
     advance_state,
     scan_candidates,
-    score_discovery,
 )
 
 warnings.filterwarnings("ignore")
 
 _OUT = DATA_DIR / "output" / "top_candidate_research"
-TRAIN_LABELED = _OUT / "watchlist_unified_recall_candidates_labeled.csv"  # 周期性 build 产物=模型训练集
 DEFAULT_STATE = _OUT / "escape_signal_state.json"
 
 
@@ -100,17 +103,19 @@ def main() -> None:
         confirm_include_bos=(args.confirm_mode == "choch_bos"),
     )
 
-    # 1) 训练集（周期性 build 产物）+ 2) 最新扫描候选 + 3) 段A 打分
-    lab = pd.read_csv(TRAIN_LABELED, low_memory=False)
-    lab["sym"] = lab["sym"].astype(str)
-    train = lab[lab["label"].isin(("true_top", "continuation"))]
+    # 1) 加载已训模型（周期性 discovery_model --train 落盘，入 git）+ 2) 扫描 + 3) 段A 预测
+    models = load_discovery_models()
+    if not models:
+        print(f"未找到早发现模型（{MODEL_DIR}）。先训练一次：\n"
+              f"  python -m stock_ana.research.top_reversal.discovery_model --train")
+        return
     print(f"[1/4] 扫描持仓最新候选（scan_candidates，asof={args.asof or '最新'}）...", flush=True)
     cand = scan_candidates(asof=args.asof)
     if cand.empty:
         print("无候选，退出。")
         return
-    print(f"[2/4] 段A 打分 {len(cand)} 候选（DISCOVERY {len(cand)}）...", flush=True)
-    scored = score_discovery(cand, train, cfg)
+    print(f"[2/4] 段A 加载模型打分 {len(cand)} 候选（市场 {sorted(models)}）...", flush=True)
+    scored = predict_discovery(models, cand)
     scored["_asof"] = pd.to_datetime(scored["score_asof_date"], errors="coerce")
     scored["market"] = scored["market"].astype(str)
     scored["sym"] = scored["sym"].astype(str)

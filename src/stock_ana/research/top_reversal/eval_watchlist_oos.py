@@ -96,8 +96,11 @@ def usable_features(train: pd.DataFrame, cols: list[str]) -> list[str]:
             and pd.to_numeric(train[c], errors="coerce").replace([np.inf, -np.inf], np.nan).notna().sum() >= thr]
 
 
-def fit_logistic_oos(train, test, feats):
-    """与生产 fit_logistic 同口径（含 inf 清洗 + ±8σ clip），但 fit=train / score=test。"""
+def fit_logistic(train, feats) -> dict:
+    """训练生产口径 logistic（inf 清洗 + 中位填补 + 标准化 + ±8σ clip + GD）。
+
+    返回可 JSON 序列化的 bundle（feats/med/mean/std/beta），供落盘复用；预测见 predict_logistic。
+    """
     xdf = train[feats].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
     med = xdf.median()
     xdf = xdf.fillna(med).fillna(0.0)
@@ -113,28 +116,59 @@ def fit_logistic_oos(train, test, feats):
         grad = (xb.T @ (p - y)) / len(y)
         grad[1:] += l2 * beta[1:] / len(y)
         beta -= lr * grad
-    tx = test[feats].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(med).fillna(0.0)
+    return {"feats": list(feats), "med": {k: float(v) for k, v in med.items()},
+            "mean": {k: float(v) for k, v in mean.items()}, "std": {k: float(v) for k, v in std.items()},
+            "beta": beta.tolist()}
+
+
+def predict_logistic(bundle: dict, df) -> np.ndarray:
+    """用 fit_logistic 的 bundle 打分（与训练同口径预处理）。"""
+    feats = bundle["feats"]
+    med = pd.Series(bundle["med"])
+    mean = pd.Series(bundle["mean"])
+    std = pd.Series(bundle["std"])
+    beta = np.asarray(bundle["beta"], dtype=float)
+    tx = df.reindex(columns=feats).apply(pd.to_numeric, errors="coerce").replace(
+        [np.inf, -np.inf], np.nan).fillna(med).fillna(0.0)
     tx = np.clip(((tx - mean) / std).to_numpy(float), -8.0, 8.0)
     txb = np.column_stack([np.ones(len(tx)), tx])
     return 1 / (1 + np.exp(-np.clip(txb @ beta, -30, 30)))
 
 
-def fit_lightgbm_oos(train, test, feats):
-    """与生产 fit_lightgbm 同参数，5 seed 平均；fit=train / score=test。"""
+def fit_logistic_oos(train, test, feats):
+    """与生产 fit_logistic 同口径，fit=train / score=test（= fit_logistic + predict_logistic）。"""
+    return predict_logistic(fit_logistic(train, feats), test)
+
+
+def fit_lightgbm(train, feats) -> dict:
+    """训练生产口径 lgb（5 seed）。返回 {feats, boosters:[model_str×5]}，可 JSON 序列化落盘。"""
     import lightgbm as lgb
     x_tr = train[feats].apply(pd.to_numeric, errors="coerce").to_numpy(float)
     y_tr = (train["label"] == "true_top").astype(float).to_numpy()
-    x_te = test[feats].apply(pd.to_numeric, errors="coerce").to_numpy(float)
     pos = max(1.0, float((y_tr == 1).sum()))
     params = dict(objective="binary", verbose=-1, num_threads=4, max_depth=3, num_leaves=7,
                   min_data_in_leaf=40, learning_rate=0.03, feature_fraction=0.6,
                   bagging_fraction=0.7, bagging_freq=1, lambda_l2=5.0, lambda_l1=1.0,
                   scale_pos_weight=float((y_tr == 0).sum() / pos))
-    preds = []
+    boosters = []
     for seed in range(5):
         m = lgb.train(dict(params, seed=seed), lgb.Dataset(x_tr, label=y_tr), num_boost_round=300)
-        preds.append(m.predict(x_te))
+        boosters.append(m.model_to_string())
+    return {"feats": list(feats), "boosters": boosters}
+
+
+def predict_lightgbm(bundle: dict, df) -> np.ndarray:
+    """用 fit_lightgbm 的 bundle 打分（5 seed 平均）。"""
+    import lightgbm as lgb
+    feats = bundle["feats"]
+    x = df.reindex(columns=feats).apply(pd.to_numeric, errors="coerce").to_numpy(float)
+    preds = [lgb.Booster(model_str=s).predict(x) for s in bundle["boosters"]]
     return np.mean(preds, axis=0)
+
+
+def fit_lightgbm_oos(train, test, feats):
+    """与生产 fit_lightgbm 同参数，5 seed 平均；fit=train / score=test。"""
+    return predict_lightgbm(fit_lightgbm(train, feats), test)
 
 
 def main():

@@ -1,0 +1,24 @@
+{
+  "markets": {
+    "US": {
+      "n_train": 5983,
+      "n_pos": 443,
+      "n_features": 197,
+      "trained_at": "2026-07-03T09:00:46Z"
+    },
+    "HK": {
+      "n_train": 1958,
+      "n_pos": 197,
+      "n_features": 194,
+      "trained_at": "2026-07-03T09:00:50Z"
+    },
+    "CN": {
+      "n_train": 3906,
+      "n_pos": 212,
+      "n_features": 197,
+      "trained_at": "2026-07-03T09:00:52Z"
+    }
+  },
+  "feature_set": "DISCOVERY_FEATURE_COLS",
+  "built_at": "2026-07-03T09:00:54Z"
+}

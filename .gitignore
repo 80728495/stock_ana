@@ -42,6 +42,7 @@ data/*
 data/lists/.gitkeep
 !data/output
 data/output/*
+!data/models/
 *.pkl
 *.h5
 
