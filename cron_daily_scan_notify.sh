@@ -30,14 +30,18 @@ fi
 
 echo "[daily-scan] 检测到新数据，开始扫描..."
 
-# 1) Vegas 扫描 + Codex 汇总（先美股 tech，再港股）
+# 1) Vegas 扫描 + Gemini 汇总（先美股 tech，再港股）
 SCAN_EXIT=0
 "$PYTHON_BIN" vegas_mid_daily_scan.py --list combined || SCAN_EXIT=$?
 
 # 2) 扫描完成后推送给 main agent（无论扫描成功或失败都推送）
 "$PYTHON_BIN" notify_daily_scan_result.py --scan-exit-code "$SCAN_EXIT" --no-email
 
-# 3) 更新时间戳（只在扫描实际执行后才更新）
+# 3) SMC OB / 顶部逃顶单独通知（有事件才发）
+"$PYTHON_BIN" notify_smc_ob.py || true
+"$PYTHON_BIN" notify_top_escape.py || true
+
+# 4) 更新时间戳（只在扫描实际执行后才更新）
 touch "$STAMP_FILE"
 
 exit "$SCAN_EXIT"

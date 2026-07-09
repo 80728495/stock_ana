@@ -34,7 +34,7 @@ from gemini_webapi import GeminiClient
 
 # ──────── 配置 ────────
 
-ANALYSIS_MODEL = "gemini-3.0-pro"
+ANALYSIS_MODEL = os.environ.get("STOCK_ANA_GEMINI_MODEL") or "gemini-3.1-pro"
 CODEX_ANALYSIS_MODEL = "gpt-5.5"
 PROFILES_FILE = DATA_DIR / "us_sec_profiles.csv"
 REPORT_DIR = OUTPUT_DIR / "weekly_sector"
@@ -291,12 +291,15 @@ async def analyze_weekly(
     if resolved_backend != "gemini":
         raise ValueError(f"不支持的 LLM backend: {resolved_backend}，可选 gemini/codex")
 
+    from stock_ana.utils.scan_analyst import resolve_gemini_model
+
+    resolved_model = resolve_gemini_model(model)
     client = await _init_client()
     try:
         for attempt in range(2):
             last_text = ""
             try:
-                async for output in client._generate(prompt, model=model):
+                async for output in client._generate(prompt, model=resolved_model):
                     if output.text:
                         last_text = output.text
             except _gex.APIError as e:

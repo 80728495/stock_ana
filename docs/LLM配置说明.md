@@ -46,7 +46,7 @@ RHINO_LLM_REASONING_EFFORT=high
 | `youtube_trans/rhino_finance_test.py` | RhinoFinance 测试脚本 | `RHINO_LLM_*` |
 
 Vegas 扫描、周报等分析流程默认使用 Codex/`gpt-5.5`，通过本地
-CLIProxyAPI 调用；如需临时回退，可传 `--llm-backend gemini`。
+CLIProxyAPI 调用；如需临时回退 Gemini，可传 `--llm-backend gemini`。
 
 ## Codex / GPT-5.5 本地代理配置
 
@@ -64,16 +64,21 @@ cd C:\Users\shawn\stock_ana\CLIProxyAPI
 STOCK_ANA_CODEX_BASE_URL=http://127.0.0.1:8317
 STOCK_ANA_CODEX_API_KEY=your_cli_proxy_api_key_here
 STOCK_ANA_CODEX_MODEL=gpt-5.5
-STOCK_ANA_CODEX_REASONING_EFFORT=xhigh
+STOCK_ANA_CODEX_REASONING_EFFORT=high
 STOCK_ANA_CODEX_WEB_SEARCH=required
+STOCK_ANA_CODEX_TIMEOUT_SEC=1200
+STOCK_ANA_CODEX_BATCH_SIZE=3
 ```
 
 如果未设置 `STOCK_ANA_CODEX_API_KEY`，代码会尝试读取
 `CLIProxyAPI/config.local.yaml` 中的第一个 `api-keys`。
 
-`STOCK_ANA_CODEX_REASONING_EFFORT=xhigh` 表示使用 GPT-5.5 的超高推理档位。
+`STOCK_ANA_CODEX_REASONING_EFFORT=high` 表示使用 GPT-5.5 的高推理档位。
 `STOCK_ANA_CODEX_WEB_SEARCH=required` 表示每次请求都会注入 web search 工具并强制使用。
 可选值为 `off`、`auto`、`required`。
+`STOCK_ANA_CODEX_TIMEOUT_SEC=1200` 表示单次 Codex 请求最多等待 20 分钟。
+`STOCK_ANA_CODEX_BATCH_SIZE=3` 是 Codex 后端的兼容批大小配置。
+默认扫描分析使用 `STOCK_ANA_SCAN_LLM_BATCH_SIZE=3` 控制分批。
 
 每日 Vegas Mid 扫描默认：
 
@@ -99,6 +104,17 @@ python -m stock_ana.workflows.weekly_sector_report --skip-update --llm-backend c
 STOCK_ANA_SCAN_LLM_BACKEND=codex
 STOCK_ANA_WEEKLY_LLM_BACKEND=codex
 STOCK_ANA_WEEKLY_SECTOR_LLM_BACKEND=codex
+STOCK_ANA_GEMINI_MODEL=gemini-3.1-pro
+STOCK_ANA_SCAN_LLM_BATCH_SIZE=3
+```
+
+Gemini 默认使用 `gemini-3.1-pro`（网页端 Pro Extended/Pro 档位）。
+当前 `gemini_webapi` 内置枚举尚未包含该模型名，因此项目通过
+`model_header` 自定义模式传入。若 Google 网页端内部 header 变更导致
+请求失败，可临时回退：
+
+```ini
+STOCK_ANA_GEMINI_MODEL=gemini-3.0-pro
 ```
 
 临时回退 Gemini：

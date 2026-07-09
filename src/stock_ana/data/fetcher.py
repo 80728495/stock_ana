@@ -329,6 +329,168 @@ def update_us_data(
     )
 
 
+def _normalise_us_tickers(tickers: list[str]) -> list[str]:
+    """Return de-duplicated uppercase US tickers while preserving list order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for ticker in tickers:
+        t = str(ticker).strip().upper()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def update_us_tech_data_futu(
+    tickers: list[str] | None = None,
+    force: bool = False,
+    max_stale_days: int = 1,
+) -> dict[str, int]:
+    """
+    使用富途 OpenD 更新美股科技池（data/lists/us_tech_list.md）行情。
+
+    该池直接服务每日 Vegas Mid 美股扫描，因此优先走 Futu，避免早盘时
+    AkShare/新浪源部分标的尚未更新导致扫描被阻塞。
+    """
+    if tickers is None:
+        from stock_ana.data.list_manager import load_us_tech_list
+
+        tickers = [entry["ticker"] for entry in load_us_tech_list()]
+
+    tickers = _normalise_us_tickers(tickers)
+    today = pd.Timestamp.now().normalize()
+    end_date = today.strftime("%Y-%m-%d")
+    three_years_ago = (today - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
+
+    need_full: list[str] = []
+    need_incr: dict[str, pd.Timestamp] = {}
+    skipped = 0
+
+    for ticker in tickers:
+        local = load_us_local_data(ticker)
+        if force:
+            need_full.append(ticker)
+            continue
+        if local is None or local.empty:
+            need_full.append(ticker)
+            continue
+        last_date = pd.Timestamp(local.index.max()).normalize()
+        if (today - last_date).days > max_stale_days:
+            need_incr[ticker] = last_date
+        else:
+            skipped += 1
+
+    logger.info(
+        f"US Tech(Futu) 数据状态：全量下载 {len(need_full)} 只 | "
+        f"增量更新 {len(need_incr)} 只 | 已最新 {skipped} 只"
+    )
+
+    updated = 0
+    failed = 0
+
+    if not need_full and not need_incr:
+        return {"updated": updated, "skipped": skipped, "failed": failed, "total": len(tickers)}
+
+    from stock_ana.data.fetcher_futu import fetch_us_stock_with_ctx, quote_context
+
+    # Futu OpenD history K-line limit: at most 60 requests per 30 seconds.
+    # Keep a little headroom because one symbol may occasionally need retry/page work.
+    max_requests_per_window = 58
+    window_seconds = 31.0
+    window_start = time.monotonic()
+    window_count = 0
+
+    def _wait_for_futu_quota() -> None:
+        nonlocal window_start, window_count
+        elapsed = time.monotonic() - window_start
+        if elapsed >= window_seconds:
+            window_start = time.monotonic()
+            window_count = 0
+            return
+        if window_count >= max_requests_per_window:
+            sleep_s = max(0.0, window_seconds - elapsed)
+            logger.info(f"Futu 历史K线限频保护：已请求 {window_count} 次，等待 {sleep_s:.1f}s")
+            time.sleep(sleep_s)
+            window_start = time.monotonic()
+            window_count = 0
+
+    def _fetch_us_with_quota(ctx, ticker: str, start_date: str) -> pd.DataFrame:
+        nonlocal window_count, window_start
+        for attempt in range(1, 3):
+            _wait_for_futu_quota()
+            window_count += 1
+            try:
+                return fetch_us_stock_with_ctx(ctx, ticker, start_date=start_date, end_date=end_date)
+            except Exception as exc:
+                msg = str(exc)
+                if attempt == 1 and ("频率太高" in msg or "too high" in msg.lower()):
+                    logger.warning(f"{ticker}: Futu 限频，等待 {window_seconds:.0f}s 后重试")
+                    time.sleep(window_seconds)
+                    window_start = time.monotonic()
+                    window_count = 0
+                    continue
+                raise
+
+    with quote_context() as ctx:
+        for i, ticker in enumerate(need_full, 1):
+            try:
+                df = _fetch_us_with_quota(ctx, ticker, three_years_ago)
+                if df.empty:
+                    failed += 1
+                    logger.warning(f"[Futu全量 {i}/{len(need_full)}] {ticker}: 返回空")
+                    continue
+                save_us_local_data(ticker, df)
+                updated += 1
+                logger.info(f"[Futu全量 {i}/{len(need_full)}] {ticker}: {len(df)} 行")
+            except Exception as e:
+                failed += 1
+                logger.error(f"[Futu全量 {i}/{len(need_full)}] {ticker}: 更新失败 - {e}")
+
+        for i, (ticker, last_date) in enumerate(need_incr.items(), 1):
+            try:
+                start = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
+                new_df = _fetch_us_with_quota(ctx, ticker, start)
+                if new_df.empty:
+                    logger.debug(f"[Futu增量 {i}/{len(need_incr)}] {ticker}: 无新数据")
+                    continue
+                old_df = load_us_local_data(ticker)
+                combined = pd.concat([old_df, new_df]) if old_df is not None else new_df
+                combined = combined[~combined.index.duplicated(keep="last")]
+                combined = combined.sort_index()
+                save_us_local_data(ticker, combined)
+                updated += 1
+                logger.info(
+                    f"[Futu增量 {i}/{len(need_incr)}] {ticker}: "
+                    f"新增 {len(new_df)} 行，总计 {len(combined)} 行"
+                )
+            except Exception as e:
+                failed += 1
+                logger.error(f"[Futu增量 {i}/{len(need_incr)}] {ticker}: 更新失败 - {e}")
+
+    logger.info(f"US Tech(Futu) 更新完成: 成功 {updated}, 跳过 {skipped}, 失败 {failed}")
+    return {"updated": updated, "skipped": skipped, "failed": failed, "total": len(tickers)}
+
+
+def update_us_non_tech_data(
+    force: bool = False,
+    max_stale_days: int = 1,
+) -> dict[str, int]:
+    """
+    使用原 AkShare/新浪路径更新美股 universe 中 tech list 之外的标的。
+
+    这部分不参与每日 Vegas Mid 的新鲜度闸门，可作为低优先级补充任务。
+    """
+    from stock_ana.data.list_manager import load_us_tech_list, load_us_universe_list
+
+    universe = _normalise_us_tickers(load_us_universe_list())
+    tech = {entry["ticker"].strip().upper() for entry in load_us_tech_list() if entry.get("ticker")}
+    rest = [ticker for ticker in universe if ticker not in tech]
+    logger.info(f"US 非科技 universe：{len(rest)} 只（总 universe {len(universe)}，tech {len(tech)}）")
+    result = update_us_data(tickers=rest, force=force, max_stale_days=max_stale_days)
+    result["total"] = len(rest)
+    return result
+
+
 def load_all_ndx100_data() -> dict[str, pd.DataFrame]:
     """
     读取 NDX100 成分股数据。

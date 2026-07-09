@@ -8,6 +8,7 @@ Gemini AI 股票分析模块
 """
 
 import asyncio
+import os
 import re
 from pathlib import Path
 
@@ -18,9 +19,10 @@ from gemini_webapi import GeminiClient
 from loguru import logger
 
 from stock_ana.config import OUTPUT_DIR
+from stock_ana.utils.scan_analyst import resolve_gemini_model
 
 # ──────── 默认模型 ────────
-DEFAULT_MODEL = "gemini-3.0-pro"
+DEFAULT_MODEL = os.environ.get("STOCK_ANA_GEMINI_MODEL") or "gemini-3.1-pro"
 
 # ──────── Prompt 模板 ────────
 
@@ -122,9 +124,10 @@ async def analyze_stock(
     logger.info(f"正在分析 {ticker} ({name})...")
 
     last_err = None
+    resolved_model = resolve_gemini_model(model)
     for attempt in range(max_retries + 1):
         try:
-            response = await client.generate_content(prompt, model=model)
+            response = await client.generate_content(prompt, model=resolved_model)
             text = response.text or ""
             logger.success(f"✅ {ticker} 分析完成，共 {len(text)} 字符")
             return text
@@ -436,6 +439,7 @@ async def rank_and_summarize(
 
     # 初始化客户端
     client = await _init_client(model)
+    resolved_model = resolve_gemini_model(model)
 
     try:
         # 上传文件 + prompt
@@ -443,7 +447,7 @@ async def rank_and_summarize(
         response = await client.generate_content(
             _RANK_PROMPT,
             files=file_strs,
-            model=model,
+            model=resolved_model,
         )
         text = response.text or ""
         logger.success(f"✅ 综合排序完成，共 {len(text)} 字符")

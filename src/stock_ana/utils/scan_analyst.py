@@ -27,8 +27,45 @@ from stock_ana.config import OUTPUT_DIR
 # ─── 路径常量 ───────────────────────────────────────────────────────────────
 PROMPT_TEMPLATE_PATH = Path(__file__).parents[3] / "data" / "scan_signal_prompt.md"
 DEFAULT_OUT_DIR = OUTPUT_DIR / "scan_analysis"
-DEFAULT_MODEL = "gemini-3.0-pro"
+DEFAULT_MODEL = os.environ.get("STOCK_ANA_GEMINI_MODEL") or "gemini-3.1-pro"
 DEFAULT_LLM_BACKEND = "codex"
+DEFAULT_LLM_BATCH_SIZE = 3
+
+GEMINI_WEB_MODEL_HEADERS: dict[str, dict[str, str]] = {
+    # Gemini web internal Pro mode header. Kept separate from gemini_webapi's
+    # built-in enum so we can move faster when the web app exposes a new model.
+    "gemini-3.1-pro": {
+        "x-goog-ext-525001261-jspb": (
+            '[1,null,null,null,"e6fa609c3fa255c0",null,null,0,[4,5,6,8],'
+            'null,null,2,null,null,3,1,"09D681E7-26F2-4A94-A465-38386B7AB93B"]'
+        )
+    },
+}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"{name}={raw!r} 不是有效整数，使用默认值 {default}")
+        return default
+    return value if value > 0 else default
+
+
+def resolve_gemini_model(model: str | dict) -> str | dict:
+    """Return a gemini_webapi-compatible model value."""
+    if isinstance(model, dict):
+        return model
+    model_name = str(model).strip()
+    if model_name in GEMINI_WEB_MODEL_HEADERS:
+        return {
+            "model_name": model_name,
+            "model_header": GEMINI_WEB_MODEL_HEADERS[model_name],
+        }
+    return model_name
 
 # ─── Prompt 构建 ─────────────────────────────────────────────────────────────
 
@@ -228,12 +265,13 @@ async def _call_gemini(
     import gemini_webapi.exceptions as _gex
 
     last_err = None
+    resolved_model = resolve_gemini_model(model)
     for attempt in range(max_retries + 1):
         try:
             # 直接 iterate _generate，遇到 APIError("interrupted") 时
             # 如果已经拿到文本就视为成功，否则重新抛出。
             last_output = None
-            async for last_output in client._generate(prompt=prompt, model=model):
+            async for last_output in client._generate(prompt=prompt, model=resolved_model):
                 pass
             # 正常完成
             text = (last_output.text if last_output else "") or ""
@@ -291,6 +329,69 @@ async def _call_codex(prompt: str, model: str | None = None) -> str:
     )
 
 
+def _analysis_batch_size() -> int:
+    return _env_int(
+        "STOCK_ANA_SCAN_LLM_BATCH_SIZE",
+        _env_int("STOCK_ANA_CODEX_BATCH_SIZE", DEFAULT_LLM_BATCH_SIZE),
+    )
+
+
+async def _call_codex_for_targets(targets: list[dict], model: str | None = None) -> str:
+    """Analyze targets with Codex, splitting large lists into stable batches."""
+    batch_size = _analysis_batch_size()
+    if len(targets) <= batch_size:
+        prompt = build_prompt(targets)
+        logger.info(f"Prompt 长度: {len(prompt)} 字符")
+        return await _call_codex(prompt, model=model)
+
+    batches = [targets[i : i + batch_size] for i in range(0, len(targets), batch_size)]
+    logger.info(
+        f"Codex 分批分析：{len(targets)} 个标的，分 {len(batches)} 批"
+        f"（每批 ≤{batch_size} 只）"
+    )
+    texts: list[str] = []
+    for idx, batch in enumerate(batches, 1):
+        symbols = ", ".join(str(s.get("symbol", "?")) for s in batch)
+        prompt = build_prompt(batch)
+        logger.info(
+            f"  Codex 第 {idx}/{len(batches)} 批：{symbols}，"
+            f"Prompt 长度: {len(prompt)} 字符"
+        )
+        text = await _call_codex(prompt, model=model)
+        texts.append(
+            f"## Codex Batch {idx}/{len(batches)} — {symbols}\n\n{text.strip()}"
+        )
+    return "\n\n---\n\n".join(texts)
+
+
+async def _call_gemini_for_targets(targets: list[dict], client, model: str) -> str:
+    """Analyze targets with Gemini, splitting large lists into stable batches."""
+    batch_size = _analysis_batch_size()
+    if len(targets) <= batch_size:
+        prompt = build_prompt(targets)
+        logger.info(f"Prompt 长度: {len(prompt)} 字符")
+        return await _call_gemini(prompt, client, model=model, max_retries=1)
+
+    batches = [targets[i : i + batch_size] for i in range(0, len(targets), batch_size)]
+    logger.info(
+        f"Gemini 分批分析：{len(targets)} 个标的，分 {len(batches)} 批"
+        f"（每批 ≤{batch_size} 只）"
+    )
+    texts: list[str] = []
+    for idx, batch in enumerate(batches, 1):
+        symbols = ", ".join(str(s.get("symbol", "?")) for s in batch)
+        prompt = build_prompt(batch)
+        logger.info(
+            f"  Gemini 第 {idx}/{len(batches)} 批：{symbols}，"
+            f"Prompt 长度: {len(prompt)} 字符"
+        )
+        text = await _call_gemini(prompt, client, model=model, max_retries=1)
+        texts.append(
+            f"## Gemini Batch {idx}/{len(batches)} — {symbols}\n\n{text.strip()}"
+        )
+    return "\n\n---\n\n".join(texts)
+
+
 # ─── 结果保存 ─────────────────────────────────────────────────────────────────
 
 def _save_result(signals: list[dict], analysis_text: str, out_dir: Path) -> Path:
@@ -339,7 +440,7 @@ async def analyze_signals(
     Args:
         signals:    股票列表，每个元素至少包含 symbol、name 字段。
                     也可以是 run_scan() 的返回值（会自动按 min_signal 过滤）。
-        model:      模型名。Gemini 默认 gemini-3.0-pro；Codex 可传 gpt-5.5
+        model:      模型名。Gemini 默认 gemini-3.1-pro；Codex 可传 gpt-5.5
         out_dir:    输出目录，默认 data/output/scan_analysis/YYYY-MM-DD/
         min_signal: 当 signals 来自扫描结果时，可指定最低等级过滤
                     （STRONG_BUY/BUY/HOLD）；None 则不过滤，全部分析。
@@ -369,12 +470,9 @@ async def analyze_signals(
         or DEFAULT_LLM_BACKEND
     ).strip().lower()
 
-    logger.info(f"构建批量 Prompt，共 {len(targets)} 个标的...")
-    prompt = build_prompt(targets)
-    logger.info(f"Prompt 长度: {len(prompt)} 字符")
-
     if resolved_backend == "codex":
-        text = await _call_codex(prompt, model=None if model == DEFAULT_MODEL else model)
+        logger.info(f"构建 Codex 分析任务，共 {len(targets)} 个标的...")
+        text = await _call_codex_for_targets(targets, model=None if model == DEFAULT_MODEL else model)
         path = _save_result(targets, text, out_dir)
         return path
 
@@ -383,7 +481,8 @@ async def analyze_signals(
 
     client = await _init_client(model)
     try:
-        text = await _call_gemini(prompt, client, model=model, max_retries=1)
+        logger.info(f"构建 Gemini 分析任务，共 {len(targets)} 个标的...")
+        text = await _call_gemini_for_targets(targets, client, model=model)
         path = _save_result(targets, text, out_dir)
     finally:
         await client.close()

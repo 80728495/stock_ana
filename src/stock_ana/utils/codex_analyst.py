@@ -21,12 +21,24 @@ from stock_ana.config import PROJECT_ROOT
 
 DEFAULT_CODEX_BASE_URL = "http://127.0.0.1:8317"
 DEFAULT_CODEX_MODEL = "gpt-5.5"
-DEFAULT_CODEX_REASONING_EFFORT = "xhigh"
+DEFAULT_CODEX_REASONING_EFFORT = "high"
 DEFAULT_CODEX_WEB_SEARCH = "required"
-DEFAULT_TIMEOUT_SEC = 600
+DEFAULT_TIMEOUT_SEC = 1200
 MAX_RETRIES = 2
 BACKOFF_BASE_SEC = 20
 _WEB_SEARCH_TOOL = {"type": "web_search_preview"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"{name}={raw!r} 不是有效整数，使用默认值 {default}")
+        return default
+    return value if value > 0 else default
 
 
 def _normalize_base_url(raw: str) -> str:
@@ -114,13 +126,14 @@ def call_codex_prompt(
     max_output_tokens: int = 8192,
     reasoning_effort: str | None = None,
     web_search: str | None = None,
-    timeout_sec: int = DEFAULT_TIMEOUT_SEC,
+    timeout_sec: int | None = None,
 ) -> str:
     """Call local CLIProxyAPI/Codex with a text prompt and return plain text."""
     cfg_base_url, cfg_api_key, cfg_model = get_codex_config()
     resolved_base_url = _normalize_base_url(base_url or cfg_base_url)
     resolved_api_key = (api_key or cfg_api_key).strip()
     resolved_model = (model or cfg_model).strip()
+    resolved_timeout_sec = timeout_sec or _env_int("STOCK_ANA_CODEX_TIMEOUT_SEC", DEFAULT_TIMEOUT_SEC)
 
     if not resolved_api_key:
         raise ValueError(
@@ -175,13 +188,14 @@ def call_codex_prompt(
             logger.info(
                 f"[Codex] 发送请求 (尝试 {attempt}/{MAX_RETRIES + 1}, "
                 f"model={resolved_model}, reasoning={effort}, "
-                f"web_search={search_mode}, prompt={len(prompt)} chars)"
+                f"web_search={search_mode}, timeout={resolved_timeout_sec}s, "
+                f"prompt={len(prompt)} chars)"
             )
             resp = requests.post(
                 url,
                 headers=headers,
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                timeout=timeout_sec,
+                timeout=resolved_timeout_sec,
             )
             if resp.status_code == 200:
                 data = resp.json()

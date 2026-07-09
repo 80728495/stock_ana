@@ -20,7 +20,7 @@
     *.md                  ← LLM 完整分析报告
 
 用法：
-    python daily_scan.py               # 完整流程（扫描 + Codex）
+    python daily_scan.py               # 完整流程（扫描 + Gemini）
     python daily_scan.py --scan-only   # 仅扫描，不调 LLM
     python daily_scan.py --lookback 3  # 扩大回看窗口（排查漏出的信号）
 """
@@ -154,32 +154,75 @@ def _extract_gemini_conclusions(report_text: str) -> dict[str, dict]:
     header_found = False
     in_table = False
 
+    def _detect_summary_columns(cells: list[str]) -> dict[str, int] | None:
+        detected: dict[str, int] = {}
+        for i, h in enumerate(cells):
+            h_clean = re.sub(r"\*+", "", h).strip()
+            h_lower = h_clean.lower()
+            if (
+                "ticker" in h_lower
+                or "代号" in h_clean
+                or "代码" in h_clean
+                or "測瘍" in h_clean
+                or "浠ｅ彿" in h_clean
+            ):
+                detected["symbol"] = i
+            elif (
+                "recommendation" in h_lower
+                or "suggestion" in h_lower
+                or "rating" in h_lower
+                or "综合建议" in h_clean
+                or "建议" in h_clean
+                or "軘磁膘祜" in h_clean
+                or "寤鸿" in h_clean
+            ):
+                detected["conclusion"] = i
+            elif (
+                "fundamental" in h_lower
+                or "基本面" in h_clean
+                or "價掛醱" in h_clean
+                or "鍩烘湰闈" in h_clean
+            ):
+                detected["fundamental"] = i
+            elif (
+                "valuation" in h_lower
+                or "估值" in h_clean
+                or "嘛硉" in h_clean
+                or "浼板€" in h_clean
+            ):
+                detected["valuation"] = i
+            elif (
+                (
+                    "technical" in h_lower
+                    or "技术" in h_clean
+                    or "技術" in h_clean
+                    or "撮扲" in h_clean
+                    or "鎶€鏈" in h_clean
+                )
+                and "信号" not in h_clean
+                and "陓瘍" not in h_clean
+            ):
+                detected["technical"] = i
+        if "symbol" in detected and "conclusion" in detected:
+            return detected
+        return None
+
     for line in lines:
         stripped = line.strip()
         if not stripped.startswith("|"):
             if in_table:
-                break
+                header_found = False
+                in_table = False
+                col_idx = {}
             continue
 
         cells = [c.strip() for c in stripped.strip("|").split("|")]
 
         # 检测表头行（含"代号"或"综合建议"）
         if not header_found:
-            has_ticker  = any("代号" in c or "ticker" in c.lower() for c in cells)
-            has_suggest = any("综合建议" in c or "建议" in c for c in cells)
-            if has_ticker and has_suggest:
-                for i, h in enumerate(cells):
-                    h_clean = re.sub(r"\*+", "", h).strip()
-                    if "代号" in h_clean or "ticker" in h_clean.lower():
-                        col_idx["symbol"] = i
-                    elif "综合建议" in h_clean:
-                        col_idx["conclusion"] = i
-                    elif "基本面" in h_clean:
-                        col_idx["fundamental"] = i
-                    elif "估值" in h_clean:
-                        col_idx["valuation"] = i
-                    elif "技术" in h_clean and "信号" not in h_clean:
-                        col_idx["technical"] = i
+            detected = _detect_summary_columns(cells)
+            if detected:
+                col_idx = detected
                 header_found = True
             continue
 
@@ -207,20 +250,43 @@ def _extract_gemini_conclusions(report_text: str) -> dict[str, dict]:
 def _extract_summary_table(report_text: str) -> str:
     """提取报告中汇总表格原文（Markdown 格式）。"""
     lines = report_text.splitlines()
+    tables: list[list[str]] = []
     table_lines: list[str] = []
     collecting = False
 
+    def _is_summary_header(line: str) -> bool:
+        return line.startswith("|") and (
+            "recommendation" in line.lower()
+            or "suggestion" in line.lower()
+            or "综合建议" in line
+            or "建议" in line
+            or "軘磁膘祜" in line
+            or "寤鸿" in line
+            or "代号" in line
+            or "代码" in line
+            or "測瘍" in line
+            or "浠ｅ彿" in line
+        )
+
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("|") and ("综合建议" in stripped or "代号" in stripped):
+        if _is_summary_header(stripped):
+            if table_lines:
+                tables.append(table_lines)
+                table_lines = []
             collecting = True
         if collecting:
             if stripped.startswith("|"):
                 table_lines.append(line)
             elif table_lines:
-                break
+                tables.append(table_lines)
+                table_lines = []
+                collecting = False
 
-    return "\n".join(table_lines)
+    if table_lines:
+        tables.append(table_lines)
+
+    return "\n\n".join("\n".join(table) for table in tables)
 
 
 # ═══════════════════════════════════════════════════════
@@ -428,14 +494,14 @@ async def _main_async(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="每日 Vegas Mid 扫描 + Codex 分析")
+    parser = argparse.ArgumentParser(description="每日 Vegas Mid 扫描 + Gemini 分析")
     parser.add_argument("--lookback",  type=int, default=1, help="回看天数（默认 1）")
     parser.add_argument("--scan-only", action="store_true", help="仅扫描，不调 LLM")
     parser.add_argument(
         "--llm-backend",
         choices=["gemini", "codex"],
         default=(os.environ.get("STOCK_ANA_SCAN_LLM_BACKEND") or "codex").strip().lower(),
-        help="LLM 后端：codex（默认，通过本地 CLIProxyAPI 调 gpt-5.5）或 gemini",
+        help="LLM 后端：gemini（默认）或 codex（通过本地 CLIProxyAPI 调 gpt-5.5）",
     )
     parser.add_argument(
         "--list",

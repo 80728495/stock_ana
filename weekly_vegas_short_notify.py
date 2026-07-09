@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-周线 Vegas Short 扫描 + Codex 批量分析 + 飞书 PDF 推送
+周线 Vegas Short 扫描 + Gemini 批量分析 + 飞书 PDF 推送
 
 流程：
   1. 运行周线 Vegas Short 扫描，找出近期 touch 信号（scan 内置图表渲染）
@@ -507,7 +507,7 @@ async def main_async(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="周线 Vegas Short 扫描 + Codex + 飞书 PDF")
+    parser = argparse.ArgumentParser(description="周线 Vegas Short 扫描 + Gemini + 飞书 PDF")
     parser.add_argument("--lookback", type=int, default=1,
                         help="最近几周（默认 1 = 仅当周）")
     parser.add_argument("--scan-only", action="store_true",
@@ -527,7 +527,7 @@ def main() -> None:
             or os.environ.get("STOCK_ANA_SCAN_LLM_BACKEND")
             or "codex"
         ).strip().lower(),
-        help="LLM 后端：codex（默认，通过本地 CLIProxyAPI 调 gpt-5.5）或 gemini",
+        help="LLM 后端：gemini（默认）或 codex（通过本地 CLIProxyAPI 调 gpt-5.5）",
     )
     args = parser.parse_args()
     asyncio.run(main_async(

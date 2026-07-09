@@ -173,6 +173,34 @@ def fetch_hk_stock_with_ctx(
     return df
 
 
+def fetch_us_stock_with_ctx(
+    ctx,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """
+    使用已有的 quote_context 获取美股日 K 线（供批量操作复用连接）。
+
+    Args:
+        ctx:        OpenQuoteContext 实例（调用方负责生命周期）
+        symbol:     股票代码，如 "AAPL"（不含市场前缀）
+        start_date: "YYYY-MM-DD"
+        end_date:   "YYYY-MM-DD"
+
+    Returns:
+        DataFrame，index=date，columns=[open, high, low, close, volume]
+
+    Raises:
+        RuntimeError: 请求失败
+    """
+    futu_code = to_futu_code(symbol, market="US")
+    raw = _request_all_kline(ctx, futu_code, start_date, end_date)
+    if raw.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    return _normalize_kline(raw)
+
+
 # ─────────────────────── 公共接口 ───────────────────────
 
 def fetch_us_stock_futu(

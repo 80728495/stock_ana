@@ -29,6 +29,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import date, datetime
@@ -152,7 +153,7 @@ def sync_futu() -> dict:
     except Exception as e:
         elapsed = time.time() - t0
         logger.warning(f"⚠️  Futu 同步失败（OpenD 未运行？）: {e}")
-        return {"ok": False, "elapsed": round(elapsed), "error": str(e)}
+        return {"ok": False, "blocking": False, "elapsed": round(elapsed), "error": str(e)}
 
 
 def update_us() -> dict:
@@ -175,6 +176,78 @@ def update_us() -> dict:
     except Exception as e:
         logger.error(f"❌ 美股更新失败: {e}")
         return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e)}
+
+
+def update_us_tech() -> dict:
+    """使用富途 OpenD 更新每日 Vegas Mid 依赖的美股科技池 OHLCV。"""
+    logger.info("=" * 60)
+    logger.info("【1a/5】更新美股科技池（Futu OpenD）...")
+    logger.info("=" * 60)
+    t0 = time.time()
+    try:
+        from stock_ana.data.fetcher import update_us_tech_data_futu
+
+        result = update_us_tech_data_futu(force=False, max_stale_days=1)
+        elapsed = time.time() - t0
+        logger.success(
+            f"✅ 美股科技池更新完成 ({elapsed:.0f}s): "
+            f"更新 {result['updated']}, 跳过 {result['skipped']}, "
+            f"失败 {result['failed']}, 总数 {result.get('total', '-')}"
+        )
+        total = int(result.get("total") or 0)
+        failed = int(result["failed"])
+        # Futu may not recognize a few symbols or return no fresh bar for newly listed names.
+        # Let the dedicated freshness validation decide whether the scan-critical pool is usable.
+        ok = (failed == 0) or (total > 0 and failed / total <= 0.05)
+        return {
+            "ok": ok,
+            "elapsed": round(elapsed),
+            "updated": result["updated"],
+            "skipped": result["skipped"],
+            "failed": failed,
+            "total": total,
+            "source": "futu",
+        }
+    except Exception as e:
+        logger.error(f"❌ 美股科技池更新失败: {e}")
+        return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e), "source": "futu"}
+
+
+def update_us_non_tech() -> dict:
+    """使用旧 AkShare/新浪路径更新美股非科技 universe，失败不阻塞扫描。"""
+    logger.info("=" * 60)
+    logger.info("【1z/5】更新美股非科技 universe（AkShare，非阻塞）...")
+    logger.info("=" * 60)
+    t0 = time.time()
+    try:
+        from stock_ana.data.fetcher import update_us_non_tech_data
+
+        result = update_us_non_tech_data(force=False, max_stale_days=1)
+        elapsed = time.time() - t0
+        logger.success(
+            f"✅ 美股非科技 universe 更新完成 ({elapsed:.0f}s): "
+            f"更新 {result['updated']}, 跳过 {result['skipped']}, "
+            f"失败 {result['failed']}, 总数 {result.get('total', '-')}"
+        )
+        return {
+            "ok": result["failed"] == 0,
+            "blocking": False,
+            "elapsed": round(elapsed),
+            "updated": result["updated"],
+            "skipped": result["skipped"],
+            "failed": result["failed"],
+            "total": result.get("total"),
+            "source": "akshare_sina",
+        }
+    except Exception as e:
+        logger.error(f"❌ 美股非科技 universe 更新失败（非阻塞）: {e}")
+        return {
+            "ok": False,
+            "blocking": False,
+            "elapsed": round(time.time() - t0),
+            "error": str(e),
+            "source": "akshare_sina",
+        }
 
 
 def update_ndx() -> dict:
@@ -369,6 +442,79 @@ def update_smc_ob() -> dict:
         return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e)}
 
 
+def update_top_escape() -> dict:
+    """运行持仓顶部逃顶状态机，落盘每日事件供单独通知读取。"""
+    logger.info("=" * 60)
+    logger.info("【5c】持仓顶部逃顶信号状态更新 ...")
+    logger.info("=" * 60)
+    t0 = time.time()
+
+    out_dir = PROJECT_ROOT / "data" / "output" / "top_candidate_research"
+    events_out = out_dir / f"escape_events_{date.today().isoformat()}.json"
+    model_manifest = PROJECT_ROOT / "data" / "models" / "top_reversal" / "manifest.json"
+    if not model_manifest.exists():
+        msg = f"顶部早发现模型不存在: {model_manifest}"
+        logger.error(f"❌ 持仓顶部逃顶信号更新失败: {msg}")
+        return {"ok": False, "elapsed": round(time.time() - t0), "error": msg}
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "stock_ana.research.top_reversal.daily_escape_scan",
+        "--events-out",
+        str(events_out),
+    ]
+    try:
+        child_env = os.environ.copy()
+        child_env.setdefault("PYTHONIOENCODING", "utf-8")
+        proc = subprocess.run(
+            cmd,
+            cwd=PROJECT_ROOT,
+            env=child_env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60 * 30,
+            check=False,
+        )
+        elapsed = time.time() - t0
+        if proc.stdout:
+            for line in proc.stdout.splitlines()[-20:]:
+                logger.info(f"[top_escape] {line}")
+        if proc.stderr:
+            for line in proc.stderr.splitlines()[-20:]:
+                logger.warning(f"[top_escape] {line}")
+        if proc.returncode != 0:
+            logger.error(f"❌ 持仓顶部逃顶信号更新失败: exit={proc.returncode}")
+            return {
+                "ok": False,
+                "elapsed": round(elapsed),
+                "exit_code": proc.returncode,
+                "error": (proc.stderr or proc.stdout or "")[-1000:],
+            }
+
+        event_count = 0
+        if events_out.exists():
+            try:
+                event_count = len(json.loads(events_out.read_text(encoding="utf-8")))
+            except Exception:
+                event_count = -1
+        logger.success(f"✅ 持仓顶部逃顶信号更新完成 ({elapsed:.0f}s): 事件 {event_count}")
+        return {
+            "ok": True,
+            "elapsed": round(elapsed),
+            "events": event_count,
+            "events_file": str(events_out),
+        }
+    except subprocess.TimeoutExpired as e:
+        logger.error(f"❌ 持仓顶部逃顶信号更新超时: {e}")
+        return {"ok": False, "elapsed": round(time.time() - t0), "error": "timeout"}
+    except Exception as e:
+        logger.error(f"❌ 持仓顶部逃顶信号更新失败: {e}")
+        return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e)}
+
+
 def update_waves() -> dict:
     """
     更新全量 US + HK 股票的 Wave 结构（大浪/子浪）。
@@ -403,12 +549,12 @@ def _load_validation_targets(market: str, cache_dir: Path) -> set[str]:
         load_cn_hightech_list,
         load_cn_list,
         load_hk_universe_list,
-        load_us_universe_list,
+        load_us_tech_list,
     )
 
     try:
         if market == "us":
-            return {s.upper() for s in load_us_universe_list()}
+            return {entry["ticker"].strip().upper() for entry in load_us_tech_list() if entry.get("ticker")}
         if market == "hk":
             return {s.zfill(5) for s in load_hk_universe_list()}
         if market == "cn":
@@ -568,13 +714,15 @@ def main():
     parser.add_argument("--indicators", action="store_true", help="仅更新技术指标")
     parser.add_argument("--waves",      action="store_true", help="仅更新 Wave 结构（全量 US+HK）")
     parser.add_argument("--smc",        action="store_true", help="仅更新 SMC OB 增量状态（富途自选股）")
+    parser.add_argument("--top-escape", action="store_true", help="仅更新持仓顶部逃顶信号状态")
     parser.add_argument("--lists",      action="store_true", help="仅同步 MD 列表文件")
     args = parser.parse_args()
 
     # 若无任何参数，执行全流程（含 Futu 同步）
     run_all = not any([args.futu, args.us, args.ndx, args.hk, args.cn,
                        getattr(args, "cn_hightech", False),
-                       args.indicators, args.waves, args.smc, args.lists])
+                       args.indicators, args.waves, args.smc,
+                       getattr(args, "top_escape", False), args.lists])
 
     logger.info(f"{'=' * 60}")
     logger.info(f"  每日数据更新 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -591,11 +739,12 @@ def main():
     if run_all or args.futu:
         results["Futu同步"] = sync_futu()
 
-    # ── Step 1-3：OHLCV 数据更新 ──
-    # 注：纳指100 股票已包含在美股全量更新中（cache/us/），不再单独更新。
-    # --ndx 参数保留但在 run_all 时跳过，只在显式指定时执行（向后兼容）。
+    # ── Step 1-3：扫描关键 OHLCV 数据更新 ──
+    # 美股拆分为：
+    #   1) us_tech_list.md：每日 Vegas Mid 依赖，优先使用 Futu OpenD；
+    #   2) universe 中非 tech 标的：低优先级 AkShare 补充，放在关键校验后执行。
     if run_all or args.us:
-        results["美股OHLCV"] = update_us()
+        results["美股科技OHLCV"] = update_us_tech()
 
     if args.ndx and not run_all:
         results["纳指100OHLCV"] = update_ndx()
@@ -611,6 +760,25 @@ def main():
     if run_all or args.cn or getattr(args, "cn_hightech", False):
         results["A股高新技术OHLCV"] = update_cn_hightech()
 
+    # ── 关键数据校验：US 仅校验 tech list，非 tech universe 不阻塞 Vegas ──
+    if run_all or args.us or args.hk:
+        validation_markets: set[str] = set()
+        if run_all or args.us:
+            validation_markets.add("us")
+        if run_all or args.hk:
+            validation_markets.add("hk")
+        if run_all or args.cn or getattr(args, "cn_hightech", False):
+            validation_markets.add("cn")
+        results["数据校验"] = validate_data(validation_markets)
+
+    # 先写出 scan_ready 状态；后续非关键任务继续跑，不再挡住每日 Vegas 扫描。
+    if run_all or args.us or args.hk or args.cn or getattr(args, "cn_hightech", False):
+        _save_status(results, round(time.time() - t_total), in_progress=True)
+
+    # ── 非关键 OHLCV 补充：美股 universe 中 tech list 之外的标的 ──
+    if run_all or args.us:
+        results["美股非科技OHLCV"] = update_us_non_tech()
+
     # ── Step 4：技术指标 ──
     if run_all or args.indicators:
         results["技术指标"] = update_indicators()
@@ -623,20 +791,13 @@ def main():
     if run_all or args.smc:
         results["SMC OB"] = update_smc_ob()
 
+    # ── Step 5c：持仓顶部逃顶状态更新 ──
+    if run_all or getattr(args, "top_escape", False):
+        results["持仓顶部逃顶"] = update_top_escape()
+
     # ── 列表同步（需显式指定 --lists）──
     if args.lists:
         results["列表同步"] = sync_lists()
-
-    # ── 数据校验（只校验本次实际更新过的市场）──
-    if run_all or args.us or args.hk:
-        validation_markets: set[str] = set()
-        if run_all or args.us:
-            validation_markets.add("us")
-        if run_all or args.hk:
-            validation_markets.add("hk")
-        if run_all or args.cn or getattr(args, "cn_hightech", False):
-            validation_markets.add("cn")
-        results["数据校验"] = validate_data(validation_markets)
 
     elapsed = time.time() - t_total
     logger.info(f"\n{'=' * 60}")
@@ -651,16 +812,35 @@ def main():
     _save_status(results, round(elapsed))
 
 
-def _save_status(results: dict, total_elapsed: int) -> None:
+def _result_ok(res: object) -> bool:
+    return res.get("ok", False) if isinstance(res, dict) else bool(res)
+
+
+def _result_blocks(res: object) -> bool:
+    return not (isinstance(res, dict) and res.get("blocking") is False)
+
+
+def _compute_scan_ready(results: dict, all_ok: bool) -> bool:
+    """Return whether the data needed by the daily Vegas scan is ready."""
+    critical_steps = ["美股科技OHLCV", "港股OHLCV", "A股高新技术OHLCV", "数据校验"]
+    present = [name for name in critical_steps if name in results]
+    if not present:
+        return all_ok
+    return all(_result_ok(results[name]) for name in present)
+
+
+def _save_status(results: dict, total_elapsed: int, in_progress: bool = False) -> None:
     """将本次运行结果保存为 data/output/daily_update/{date}/status.json。"""
     today = date.today().isoformat()
     out_dir = PROJECT_ROOT / "data" / "output" / "daily_update" / today
     out_dir.mkdir(parents=True, exist_ok=True)
 
     all_ok = all(
-        (r.get("ok", False) if isinstance(r, dict) else bool(r))
+        _result_ok(r)
         for r in results.values()
+        if _result_blocks(r)
     )
+    scan_ready = _compute_scan_ready(results, all_ok)
 
     steps = []
     for name, res in results.items():
@@ -673,6 +853,8 @@ def _save_status(results: dict, total_elapsed: int) -> None:
         "update_date":    today,
         "generated_at":   datetime.now().isoformat(timespec="seconds"),
         "all_ok":         all_ok,
+        "scan_ready":     scan_ready,
+        "in_progress":    in_progress,
         "total_elapsed":  total_elapsed,
         "steps":          steps,
     }

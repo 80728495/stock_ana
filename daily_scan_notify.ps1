@@ -31,8 +31,15 @@ try {
     exit 0
 }
 
-if (-not $UpdateStatus.all_ok) {
-    Write-Host "[daily-scan] Today's daily_update status is not OK, sending Feishu notification and skipping scan..."
+$ScanReady = $false
+if ($null -ne $UpdateStatus.PSObject.Properties["scan_ready"]) {
+    $ScanReady = [bool]$UpdateStatus.scan_ready
+} else {
+    $ScanReady = [bool]$UpdateStatus.all_ok
+}
+
+if (-not $ScanReady) {
+    Write-Host "[daily-scan] Today's scan-critical daily_update status is not ready, sending Feishu notification and skipping scan..."
     & $PythonBin notify_daily_scan_result.py --no-new-data
     exit 0
 }
@@ -58,25 +65,24 @@ if (Test-Path $StampFile) {
 
 Write-Host "[daily-scan] New data detected, starting scan..."
 
-# Wait for local Codex proxy to be reachable (proxy may need a moment to become active)
+# Wait for Google/Gemini to be reachable (proxy may need a moment to become active)
 $maxWaitSec = 180   # 最多等 3 分钟
 $intervalSec = 20
 $elapsed = 0
 $reachable = $false
 while (-not $reachable -and $elapsed -lt $maxWaitSec) {
     try {
-        $conn = Test-NetConnection 127.0.0.1 -Port 8317 -WarningAction SilentlyContinue
-        if (-not $conn.TcpTestSucceeded) { throw "Codex proxy port 8317 is not reachable" }
+        $null = Invoke-WebRequest -Uri "https://gemini.google.com" -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
         $reachable = $true
-        Write-Host "[daily-scan] Codex proxy reachable."
+        Write-Host "[daily-scan] gemini.google.com reachable."
     } catch {
-        Write-Host "[daily-scan] Codex proxy unreachable, waiting ${intervalSec}s... (${elapsed}/${maxWaitSec}s)"
+        Write-Host "[daily-scan] gemini.google.com unreachable, waiting ${intervalSec}s... (${elapsed}/${maxWaitSec}s)"
         Start-Sleep -Seconds $intervalSec
         $elapsed += $intervalSec
     }
 }
 if (-not $reachable) {
-    Write-Host "[daily-scan] WARNING: Codex proxy still unreachable after ${maxWaitSec}s, proceeding anyway..."
+    Write-Host "[daily-scan] WARNING: gemini.google.com still unreachable after ${maxWaitSec}s, proceeding anyway..."
 }
 
 # Ensure log dir exists
@@ -91,8 +97,8 @@ try {
     Write-Host "[daily-scan] watchlist_vegas_scan error: $_"
 }
 
-# 2) 美股 scan + Codex → 完成后立即发飞书（含每日数据更新状态）
-Write-Host "[daily-scan] Step 2/4: US scan + Codex..."
+# 2) 美股 scan + Gemini → 完成后立即发飞书（含每日数据更新状态）
+Write-Host "[daily-scan] Step 2/4: US scan + Gemini..."
 $usScanExit = 0
 try {
     & $PythonBin vegas_mid_daily_scan.py --list tech
@@ -103,8 +109,8 @@ try {
 }
 & $PythonBin notify_daily_scan_result.py --market us --scan-exit-code $usScanExit --no-email
 
-# 3) 港股 scan + Codex → 完成后立即发飞书（跳过重复的数据更新状态）
-Write-Host "[daily-scan] Step 3/4: HK scan + Codex..."
+# 3) 港股 scan + Gemini → 完成后立即发飞书（跳过重复的数据更新状态）
+Write-Host "[daily-scan] Step 3/4: HK scan + Gemini..."
 $hkScanExit = 0
 try {
     & $PythonBin vegas_mid_daily_scan.py --list hk
@@ -115,8 +121,8 @@ try {
 }
 & $PythonBin notify_daily_scan_result.py --market hk --skip-update --no-email --scan-exit-code $hkScanExit
 
-# 4) A股高新技术 scan + Codex → 完成后立即发飞书
-Write-Host "[daily-scan] Step 4/4: CN scan + Codex..."
+# 4) A股高新技术 scan + Gemini → 完成后立即发飞书
+Write-Host "[daily-scan] Step 4/4: CN scan + Gemini..."
 $cnScanExit = 0
 try {
     & $PythonBin vegas_mid_daily_scan.py --list cn_hightech
@@ -128,18 +134,26 @@ try {
 & $PythonBin notify_daily_scan_result.py --market cn --skip-update --no-email --scan-exit-code $cnScanExit
 
 # 5) SMC OB 飞书通知（有事件才发）
-Write-Host "[daily-scan] Step 5/6: SMC OB 飞书通知..."
+Write-Host "[daily-scan] Step 5/7: SMC OB 飞书通知..."
 try {
     & $PythonBin notify_smc_ob.py
 } catch {
     Write-Host "[daily-scan] notify_smc_ob error: $_"
 }
 
-# 6) 三市场合并邮件（各市场飞书已单独发完，此处只发一封合并 PDF 邮件）
-Write-Host "[daily-scan] Step 6/6: 发送合并邮件..."
+# 6) 持仓顶部逃顶信号飞书通知（有事件才发）
+Write-Host "[daily-scan] Step 6/7: 持仓顶部逃顶信号飞书通知..."
+try {
+    & $PythonBin notify_top_escape.py
+} catch {
+    Write-Host "[daily-scan] notify_top_escape error: $_"
+}
+
+# 7) 三市场合并邮件（各市场飞书已单独发完，此处只发一封合并 PDF 邮件）
+Write-Host "[daily-scan] Step 7/7: 发送合并邮件..."
 & $PythonBin notify_daily_scan_result.py --send-combined-email
 
-# 6) Update timestamp
+# 8) Update timestamp
 Set-Content -Path $StampFile -Value (Get-Date -Format "o") -Encoding ASCII
 
 # 整体退出码：任一非零则返回非零
