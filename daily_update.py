@@ -31,6 +31,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -53,6 +54,104 @@ logger.add(
     enqueue=True,   # 异步写入，防止多进程/多 sink 写入竞争
 )
 LOCK_PATH = LOG_DIR / "daily_update.lock"
+DEFAULT_DAILY_UPDATE_TIMEOUT_SEC = 3 * 60 * 60
+WATCHDOG_EXIT_CODE = 124
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"{name}={raw!r} 不是有效整数，使用默认值 {default}")
+        return default
+    if value <= 0:
+        logger.warning(f"{name}={raw!r} 必须大于 0，使用默认值 {default}")
+        return default
+    return value
+
+
+def _write_watchdog_status(timeout_sec: int) -> None:
+    """Atomically mark the daily run as timed out before hard exit."""
+    today = date.today().isoformat()
+    out_dir = PROJECT_ROOT / "data" / "output" / "daily_update" / today
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "status.json"
+    status: dict = {}
+    if path.exists():
+        try:
+            status = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            status = {}
+
+    status.update({
+        "update_date": today,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "all_ok": False,
+        "in_progress": False,
+        "timed_out": True,
+        "timeout_sec": timeout_sec,
+        "total_elapsed": timeout_sec,
+        "error": f"daily_update exceeded hard timeout ({timeout_sec}s)",
+    })
+    status.setdefault("scan_ready", False)
+    status.setdefault("steps", [])
+
+    tmp_path = path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
+def _watchdog_main(
+    stop_event: threading.Event,
+    timeout_sec: int,
+    exit_fn=None,
+    lock_fd: int | None = None,
+) -> None:
+    if stop_event.wait(timeout_sec):
+        return
+
+    message = f"daily_update 超过总运行时上限 {timeout_sec}s，watchdog 强制终止进程"
+    try:
+        logger.critical(message)
+        _write_watchdog_status(timeout_sec)
+    except Exception as exc:
+        message = f"{message}; 写入超时状态失败: {exc}"
+    try:
+        sys.stderr.write(message + "\n")
+        sys.stderr.flush()
+    finally:
+        try:
+            if lock_fd is not None:
+                os.close(lock_fd)
+            lock_owner = LOCK_PATH.read_text(encoding="utf-8") if LOCK_PATH.exists() else ""
+            if f"pid={os.getpid()}" in lock_owner:
+                LOCK_PATH.unlink()
+        except Exception:
+            pass
+        (exit_fn or os._exit)(WATCHDOG_EXIT_CODE)
+
+
+def _start_watchdog(
+    timeout_sec: int | None = None,
+    lock_fd: int | None = None,
+) -> tuple[threading.Event, threading.Thread]:
+    resolved_timeout = timeout_sec or _positive_env_int(
+        "STOCK_ANA_DAILY_UPDATE_TIMEOUT_SEC",
+        DEFAULT_DAILY_UPDATE_TIMEOUT_SEC,
+    )
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_watchdog_main,
+        args=(stop_event, resolved_timeout, None, lock_fd),
+        name="daily-update-watchdog",
+        daemon=True,
+    )
+    thread.start()
+    logger.info(f"daily_update watchdog 已启动：总运行时上限 {resolved_timeout}s")
+    return stop_event, thread
 
 
 def _acquire_run_lock(max_age_hours: int = 8) -> int | None:
@@ -167,12 +266,20 @@ def update_us() -> dict:
         # max_stale_days=1: 允许时区带来的 1 天日历差，避免无意义重复全量拉取。
         result = update_us_data(force=False, max_stale_days=1)
         elapsed = time.time() - t0
-        logger.success(
-            f"✅ 美股更新完成 ({elapsed:.0f}s): "
+        budget_exhausted = bool(result.get("budget_exhausted", False))
+        log = logger.warning if budget_exhausted else logger.success
+        log(
+            f"{'⚠️' if budget_exhausted else '✅'} 美股更新完成 ({elapsed:.0f}s): "
             f"更新 {result['updated']}, 跳过 {result['skipped']}, 失败 {result['failed']}"
         )
-        return {"ok": True, "elapsed": round(elapsed), "updated": result["updated"],
-                "skipped": result["skipped"], "failed": result["failed"]}
+        return {
+            "ok": not budget_exhausted,
+            "elapsed": round(elapsed),
+            "updated": result["updated"],
+            "skipped": result["skipped"],
+            "failed": result["failed"],
+            "budget_exhausted": budget_exhausted,
+        }
     except Exception as e:
         logger.error(f"❌ 美股更新失败: {e}")
         return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e)}
@@ -224,19 +331,23 @@ def update_us_non_tech() -> dict:
 
         result = update_us_non_tech_data(force=False, max_stale_days=1)
         elapsed = time.time() - t0
-        logger.success(
-            f"✅ 美股非科技 universe 更新完成 ({elapsed:.0f}s): "
+        budget_exhausted = bool(result.get("budget_exhausted", False))
+        ok = result["failed"] == 0 and not budget_exhausted
+        log = logger.success if ok else logger.warning
+        log(
+            f"{'✅' if ok else '⚠️'} 美股非科技 universe 更新完成 ({elapsed:.0f}s): "
             f"更新 {result['updated']}, 跳过 {result['skipped']}, "
             f"失败 {result['failed']}, 总数 {result.get('total', '-')}"
         )
         return {
-            "ok": result["failed"] == 0,
+            "ok": ok,
             "blocking": False,
             "elapsed": round(elapsed),
             "updated": result["updated"],
             "skipped": result["skipped"],
             "failed": result["failed"],
             "total": result.get("total"),
+            "budget_exhausted": budget_exhausted,
             "source": "akshare_sina",
         }
     except Exception as e:
@@ -869,7 +980,10 @@ if __name__ == "__main__":
     lock_fd = _acquire_run_lock()
     if lock_fd is None:
         raise SystemExit(2)
+    watchdog_stop, watchdog_thread = _start_watchdog(lock_fd=lock_fd)
     try:
         main()
     finally:
+        watchdog_stop.set()
+        watchdog_thread.join(timeout=1)
         _release_run_lock(lock_fd)

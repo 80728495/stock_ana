@@ -246,7 +246,14 @@ python daily_update.py --us
 | 数据未更新（今日无新K线） | run_scan 仍正常运行，lookback 内若有信号仍输出 |
 | 扫描脚本崩溃 | 日志写入 `data/logs/cron_daily_scan.log` |
 | 数据更新某步失败 | `status.json` 中对应 step `ok=false`，`all_ok=false`，其余步骤继续执行 |
+| AkShare/新浪单次请求无响应 | 连接默认 10 秒、读取默认 30 秒后失败并继续下一只股票 |
+| AkShare/新浪整批耗时过长 | 默认 3600 秒停止该阶段，`budget_exhausted=true`，其余每日步骤继续 |
+| 每日更新整体卡死 | 默认 10800 秒由 watchdog 强制退出（exit 124），`status.json` 标记 `timed_out=true` |
 | 数据更新脚本崩溃 | 日志写入 `data/logs/cron_daily_update.log` |
+
+超时可通过 `STOCK_ANA_AKSHARE_CONNECT_TIMEOUT_SEC`、
+`STOCK_ANA_AKSHARE_READ_TIMEOUT_SEC`、`STOCK_ANA_AKSHARE_STAGE_TIMEOUT_SEC`
+和 `STOCK_ANA_DAILY_UPDATE_TIMEOUT_SEC` 调整；Windows 与 macOS 使用同一套核心配置。
 
 ---
 

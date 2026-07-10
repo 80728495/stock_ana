@@ -2,8 +2,10 @@
 数据获取模块 - 统一接口获取 A股/美股 数据，支持本地持久化存储与增量更新
 """
 
+import os
+import threading
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +21,79 @@ NDX100_DIR.mkdir(parents=True, exist_ok=True)
 # 美股全市场本地存储目录
 US_DIR = CACHE_DIR / "us"
 US_DIR.mkdir(parents=True, exist_ok=True)
+
+_AKSHARE_CONNECT_TIMEOUT_SEC = 10.0
+_AKSHARE_READ_TIMEOUT_SEC = 30.0
+_AKSHARE_STAGE_TIMEOUT_SEC = 60.0 * 60.0
+_AKSHARE_REQUEST_LOCK = threading.Lock()
+
+
+def _positive_env_float(name: str, default: float) -> float:
+    """Read a positive float from the environment, falling back safely."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(f"{name}={raw!r} 不是有效数字，使用默认值 {default:g}")
+        return default
+    if value <= 0:
+        logger.warning(f"{name}={raw!r} 必须大于 0，使用默认值 {default:g}")
+        return default
+    return value
+
+
+def _akshare_request_timeout() -> tuple[float, float]:
+    return (
+        _positive_env_float("STOCK_ANA_AKSHARE_CONNECT_TIMEOUT_SEC", _AKSHARE_CONNECT_TIMEOUT_SEC),
+        _positive_env_float("STOCK_ANA_AKSHARE_READ_TIMEOUT_SEC", _AKSHARE_READ_TIMEOUT_SEC),
+    )
+
+
+def _akshare_stage_timeout() -> float:
+    return _positive_env_float("STOCK_ANA_AKSHARE_STAGE_TIMEOUT_SEC", _AKSHARE_STAGE_TIMEOUT_SEC)
+
+
+class _RequestsTimeoutProxy:
+    """Add a default timeout to a module's requests.get calls."""
+
+    def __init__(self, backend: object, timeout: tuple[float, float]) -> None:
+        self._backend = backend
+        self._timeout = timeout
+
+    def get(self, *args, **kwargs):
+        kwargs.setdefault("timeout", self._timeout)
+        return self._backend.get(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._backend, name)
+
+
+def _call_akshare_us_daily_with_timeout(
+    fetch_fn,
+    *,
+    symbol: str,
+    adjust: str,
+    timeout: tuple[float, float],
+) -> pd.DataFrame:
+    """Call AkShare while forcing timeouts on its otherwise unbounded requests."""
+    global_ns = getattr(fetch_fn, "__globals__", None)
+    if not isinstance(global_ns, dict) or "requests" not in global_ns:
+        raise RuntimeError("AkShare stock_us_daily 未暴露 requests，拒绝执行无超时网络请求")
+
+    # AkShare references a module-global ``requests`` object. Rebinding only that
+    # global keeps the timeout local to this synchronous call and avoids editing
+    # site-packages or globally monkey-patching requests for the whole process.
+    with _AKSHARE_REQUEST_LOCK:
+        requests_backend = global_ns["requests"]
+        proxy = _RequestsTimeoutProxy(requests_backend, timeout)
+        global_ns["requests"] = proxy
+        try:
+            return fetch_fn(symbol=symbol, adjust=adjust)
+        finally:
+            if global_ns.get("requests") is proxy:
+                global_ns["requests"] = requests_backend
 
 
 # ─────────────────────────── 基础获取函数 ───────────────────────────
@@ -117,20 +192,31 @@ def save_us_local_data(ticker: str, df: pd.DataFrame) -> None:
     logger.debug(f"US {ticker}: 已保存 {len(df)} 行 → {path}")
 
 
-def _fetch_us_stock_akshare(symbol: str, start_date: str | None = None) -> pd.DataFrame:
+def _fetch_us_stock_akshare(
+    symbol: str,
+    start_date: str | None = None,
+    request_timeout: tuple[float, float] | None = None,
+) -> pd.DataFrame:
     """
     使用 akshare（新浪财经源）获取美股历史数据，无限流风险
 
     Args:
         symbol: 股票代码，如 "AAPL"
         start_date: 起始日期 "YYYY-MM-DD"，为 None 则取最近 1 年
+        request_timeout: requests 的 (连接超时, 读取超时)，默认读取环境配置
 
     Returns:
         DataFrame，包含 open, high, low, close, volume 列
     """
     import akshare as ak
 
-    df = ak.stock_us_daily(symbol=symbol, adjust="qfq")
+    timeout = request_timeout or _akshare_request_timeout()
+    df = _call_akshare_us_daily_with_timeout(
+        ak.stock_us_daily,
+        symbol=symbol,
+        adjust="qfq",
+        timeout=timeout,
+    )
     df["date"] = pd.to_datetime(df["date"])
     df = df.set_index("date")
     df = df[["open", "high", "low", "close", "volume"]]
@@ -141,8 +227,12 @@ def _fetch_us_stock_akshare(symbol: str, start_date: str | None = None) -> pd.Da
     return df
 
 
-def _batch_download_akshare(tickers: list[str],
-                            start_date: str | None = None) -> dict[str, pd.DataFrame]:
+def _batch_download_akshare(
+    tickers: list[str],
+    start_date: str | None = None,
+    *,
+    deadline: float | None = None,
+) -> tuple[dict[str, pd.DataFrame], bool]:
     """
     使用 akshare 逐只下载美股数据（新浪源，无限流）
 
@@ -151,13 +241,18 @@ def _batch_download_akshare(tickers: list[str],
         start_date: 起始日期 "YYYY-MM-DD"
 
     Returns:
-        {ticker: DataFrame} 字典
+        ({ticker: DataFrame} 字典, 是否耗尽阶段预算)
     """
     result: dict[str, pd.DataFrame] = {}
     total = len(tickers)
+    budget_exhausted = False
     logger.info(f"akshare 开始下载 {total} 只股票 ...")
 
     for i, ticker in enumerate(tickers, 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            budget_exhausted = True
+            logger.error(f"AkShare 阶段时间预算已耗尽，跳过剩余 {total - i + 1} 只股票")
+            break
         try:
             df = _fetch_us_stock_akshare(ticker, start_date=start_date)
             if not df.empty:
@@ -171,7 +266,7 @@ def _batch_download_akshare(tickers: list[str],
             time.sleep(0.5)
 
     logger.info(f"下载完成：成功 {len(result)}/{total} 只")
-    return result
+    return result, budget_exhausted
 
 
 def _update_bucket_data(
@@ -183,7 +278,8 @@ def _update_bucket_data(
     max_stale_days: int,
     force: bool = False,
     skip_if_in_ndx_cache: bool = False,
-) -> dict[str, int]:
+    stage_timeout_sec: float | None = None,
+) -> dict[str, int | bool]:
     """Generic incremental update routine for a local parquet bucket."""
     today = pd.Timestamp.now().normalize()
     three_years_ago = (today - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
@@ -219,9 +315,17 @@ def _update_bucket_data(
 
     updated = 0
     failed = 0
+    budget_exhausted = False
+    resolved_stage_timeout = stage_timeout_sec or _akshare_stage_timeout()
+    deadline = time.monotonic() + resolved_stage_timeout
+    logger.info(f"{market_label} AkShare 阶段时间预算：{resolved_stage_timeout:.0f}s")
 
     if need_full:
-        batch_data = _batch_download_akshare(need_full, start_date=three_years_ago)
+        batch_data, budget_exhausted = _batch_download_akshare(
+            need_full,
+            start_date=three_years_ago,
+            deadline=deadline,
+        )
         for ticker, df in batch_data.items():
             save_fn(ticker, df)
             updated += 1
@@ -230,6 +334,12 @@ def _update_bucket_data(
     if need_incr:
         logger.info(f"开始增量更新 {len(need_incr)} 只 {market_label} 股票 ...")
         for i, (ticker, last_date) in enumerate(need_incr.items(), 1):
+            if time.monotonic() >= deadline:
+                remaining = len(need_incr) - i + 1
+                failed += remaining
+                budget_exhausted = True
+                logger.error(f"AkShare 阶段时间预算已耗尽，跳过剩余 {remaining} 只股票")
+                break
             try:
                 start = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
                 new_df = _fetch_us_stock_akshare(ticker, start_date=start)
@@ -252,7 +362,12 @@ def _update_bucket_data(
                 time.sleep(0.5)
 
     logger.info(f"{market_label} 更新完成: 成功 {updated}, 跳过 {skipped}, 失败 {failed}")
-    return {"updated": updated, "skipped": skipped, "failed": failed}
+    return {
+        "updated": updated,
+        "skipped": skipped,
+        "failed": failed,
+        "budget_exhausted": budget_exhausted,
+    }
 
 
 def update_ndx100_data(max_stale_days: int = 0) -> dict[str, pd.DataFrame]:
@@ -297,7 +412,8 @@ def update_us_data(
     tickers: list[str] | None = None,
     force: bool = False,
     max_stale_days: int = 1,
-) -> dict[str, int]:
+    stage_timeout_sec: float | None = None,
+) -> dict[str, int | bool]:
     """
     增量更新 US universe 本地数据（data/cache/us）。
 
@@ -310,6 +426,7 @@ def update_us_data(
         tickers: 目标 ticker 列表；None 时读取 data/lists/us_universe_list.md
         force: 是否强制刷新
         max_stale_days: 允许最大陈旧天数
+        stage_timeout_sec: AkShare 整批更新最大秒数，默认读取环境配置
 
     Returns:
         {"updated": int, "skipped": int, "failed": int}
@@ -326,6 +443,7 @@ def update_us_data(
         max_stale_days=max_stale_days,
         force=force,
         skip_if_in_ndx_cache=False,
+        stage_timeout_sec=stage_timeout_sec,
     )
 
 
@@ -474,7 +592,8 @@ def update_us_tech_data_futu(
 def update_us_non_tech_data(
     force: bool = False,
     max_stale_days: int = 1,
-) -> dict[str, int]:
+    stage_timeout_sec: float | None = None,
+) -> dict[str, int | bool]:
     """
     使用原 AkShare/新浪路径更新美股 universe 中 tech list 之外的标的。
 
@@ -486,7 +605,12 @@ def update_us_non_tech_data(
     tech = {entry["ticker"].strip().upper() for entry in load_us_tech_list() if entry.get("ticker")}
     rest = [ticker for ticker in universe if ticker not in tech]
     logger.info(f"US 非科技 universe：{len(rest)} 只（总 universe {len(universe)}，tech {len(tech)}）")
-    result = update_us_data(tickers=rest, force=force, max_stale_days=max_stale_days)
+    result = update_us_data(
+        tickers=rest,
+        force=force,
+        max_stale_days=max_stale_days,
+        stage_timeout_sec=stage_timeout_sec,
+    )
     result["total"] = len(rest)
     return result
 
@@ -586,4 +710,3 @@ def update_qqq_data() -> "pd.DataFrame | None":
 # Compatibility alias – callers that previously imported update_us_price_data
 # from us_market_updates can now import it directly from fetcher.
 update_us_price_data = update_us_data
-
