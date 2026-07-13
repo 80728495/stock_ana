@@ -82,5 +82,9 @@ def add_research_features(
     out = add_macro_micro_features(out, symbol_data=symbol_data)
     out = add_valuation_features(out, symbol_data=symbol_data)
     out = add_growth_features(out, symbol_data=symbol_data)
+    # RS 相对强度 + 大盘方向：复用 vegas_pullback 的实现（同键 (market,sym,score_asof_date)
+    # as-of 查询、零前瞻；一份真源勿复制）。列清单见 feature_registry.RS_STRENGTH_FEATURES。
+    from stock_ana.research.vegas_pullback.rs_features import add_rs_features
+    out = add_rs_features(out)
     out = add_candle_interaction_features(out)
     return out

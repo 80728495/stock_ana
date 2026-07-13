@@ -1,24 +1,24 @@
 {
   "markets": {
     "US": {
-      "n_train": 5983,
-      "n_pos": 443,
-      "n_features": 197,
-      "trained_at": "2026-07-03T09:00:46Z"
+      "n_train": 6126,
+      "n_pos": 449,
+      "n_features": 210,
+      "trained_at": "2026-07-13T17:28:34Z"
     },
     "HK": {
-      "n_train": 1958,
-      "n_pos": 197,
-      "n_features": 194,
-      "trained_at": "2026-07-03T09:00:50Z"
+      "n_train": 3011,
+      "n_pos": 295,
+      "n_features": 206,
+      "trained_at": "2026-07-13T17:28:37Z"
     },
     "CN": {
-      "n_train": 3906,
-      "n_pos": 212,
-      "n_features": 197,
-      "trained_at": "2026-07-03T09:00:52Z"
+      "n_train": 4041,
+      "n_pos": 194,
+      "n_features": 210,
+      "trained_at": "2026-07-13T17:28:39Z"
     }
   },
   "feature_set": "DISCOVERY_FEATURE_COLS",
-  "built_at": "2026-07-03T09:00:54Z"
+  "built_at": "2026-07-13T17:28:41Z"
 }

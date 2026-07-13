@@ -365,6 +365,8 @@ def _zigzag_context_from_wave(
         "major_wave_rise_pct": float(major_wave.get("rise_pct", np.nan)) if major_wave else np.nan,
         "major_wave_number": int(major_wave.get("wave_number", 0)) if major_wave else 0,
         "major_sub_wave_count": int(major_wave.get("sub_wave_count", 0)) if major_wave else 0,
+        "major_wave_duration_days": int(major_wave.get("duration_days", 0)) if major_wave else 0,
+        "major_wave_mid_pullback_count": int(major_wave.get("mid_pullback_count", 0)) if major_wave else 0,
         "top_cluster_high_count": len(high_cluster),
     })
 

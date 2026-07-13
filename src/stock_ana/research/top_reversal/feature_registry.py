@@ -131,6 +131,25 @@ INDEX_SQUEEZE_FEATURES = (
 
 WAVE_STRUCTURE_FEATURES = (
     "major_wave_rise_pct", "major_wave_number", "major_sub_wave_count", "top_cluster_high_count",
+    # 浪龄/浪内节奏（2026-07-13 自 vegas_pullback momentum_ctx 语义引入；字段本就在
+    # analyze_wave_structure 输出里，as-of 因果由 _causal_zigzag_context 保证）：
+    # 浪走得越久/浪内 mid 回踩次数越多 → 趋势越成熟，顶部风险语义。
+    "major_wave_duration_days", "major_wave_mid_pullback_count",
+)
+
+# 相对强度 + 大盘方向（2026-07-13 自 vegas_pullback 移植，实现复用其 rs_features
+# ——as-of 读取 RS 系统单股逐日 parquet，零前瞻）。对顶部的语义：
+#   rs_line_dd_63 / rs_rank_delta_20 : RS 自身见顶回落 = 领涨股补跌前兆（vegas 实证
+#     rank>80 且 RS 仍挂峰顶时回踩胜率最差 0.400——价格弱而 RS 挂顶 = 补跌起点）；
+#   bench_ret_21d/63d, bench_dist_ma50_pct : 大盘方向（此前 top_reversal 只有截面，
+#     US 完全无指数方向）——大盘转弱时个股顶更可能是真顶；
+#   rs_benchmark_r2 : 系统性 vs 个股性行情判别器。
+# caveat：US RS 史起 2023-02、HK/CN 起 2020-01，更早样本该组 NaN（lgb 原生处理）。
+RS_STRENGTH_FEATURES = (
+    "rs_return_21d", "rs_return_63d", "rs_momentum_21d", "rs_momentum_63d",
+    "rs_rank_63d", "rs_benchmark_beta", "rs_benchmark_r2",
+    "rs_line_dd_63", "rs_rank_delta_20",
+    "bench_ret_21d", "bench_ret_63d", "bench_dist_ma50_pct",
 )
 
 SMC_LIVE_FEATURES = (
@@ -211,6 +230,8 @@ FEATURE_GROUPS = (
     FeatureGroup("macro_micro", "Sector regime, cross-sectional rank, and parabolic over-extension.", MACRO_MICRO_FEATURES),
     FeatureGroup("valuation", "Market-relative PE (US forward / HK-CN trailing); see valuation_context caveat.", VALUATION_FEATURES),
     FeatureGroup("growth", "Fundamental EPS/revenue growth (causal) + sub-sector growth heat; general replacement for industry tags.", GROWTH_FEATURES),
+    FeatureGroup("rs_strength", "Relative strength vs benchmark + benchmark regime direction (as-of).",
+                 RS_STRENGTH_FEATURES),
     FeatureGroup("resistance", "Future prior-high and resistance-zone features.", RESISTANCE_FEATURES),
 )
 
@@ -231,6 +252,8 @@ REALTIME_FEATURE_GROUPS = (
     FeatureGroup("macro_micro", "Sector regime, cross-sectional rank, and parabolic over-extension.", MACRO_MICRO_FEATURES),
     FeatureGroup("valuation", "Market-relative PE (US forward / HK-CN trailing); see valuation_context caveat.", VALUATION_FEATURES),
     FeatureGroup("growth", "Fundamental EPS/revenue growth (causal) + sub-sector growth heat; general replacement for industry tags.", GROWTH_FEATURES),
+    FeatureGroup("rs_strength", "Relative strength vs benchmark + benchmark regime direction (as-of).",
+                 RS_STRENGTH_FEATURES),
     FeatureGroup("resistance", "Future prior-high and resistance-zone features.", RESISTANCE_FEATURES),
 )
 
