@@ -18,6 +18,7 @@ from stock_ana.strategies.impl import (
     triangle_kde,
     triangle_vcp,
     vcp,
+    vegas_long,
     vegas_mid,
 )
 from stock_ana.strategies.primitives.wave import analyze_wave_structure
@@ -1142,7 +1143,7 @@ def explain_rs_trap_alert(decision: StrategyDecision) -> str:
 
 
 # =============================================================================
-# Vegas Mid Pullback  (EMA34/55/60 touchback within major upwave)
+# Vegas Mid Pullback  (EMA34/55 touchback within major upwave)
 # =============================================================================
 
 def screen_vegas_mid_pullback(
@@ -1151,7 +1152,7 @@ def screen_vegas_mid_pullback(
     market: str = "US",
     name: str = "",
 ) -> StrategyDecision:
-    """Evaluate the most recent Mid Vegas (EMA34/55/60) pullback signal for one symbol.
+    """Evaluate the most recent Mid Vegas (EMA34/55) pullback signal for one symbol.
 
     Args:
         df: OHLCV DataFrame (date index, lowercase columns).
@@ -1190,6 +1191,7 @@ def screen_vegas_mid_pullback(
 
     touch_signals = vegas_mid.detect_mid_touch_and_hold(close, low_arr, emas)
 
+    # touch_seq 按浪身份（start_pivot iloc）分桶，wave_number 会重复不能作键
     wave_touch_counter: dict[int, int] = {}
     cutoff_bar = n - lookback
     recent_signals: list[dict] = []
@@ -1199,8 +1201,9 @@ def screen_vegas_mid_pullback(
 
         wave_ctx = vegas_mid.find_wave_context(waves, sig["touch_bar"]) if waves else None
         wave_number = wave_ctx["wave_number"] if wave_ctx else 0
-        wave_touch_counter[wave_number] = wave_touch_counter.get(wave_number, 0) + 1
-        touch_seq = wave_touch_counter[wave_number]
+        wave_key = wave_ctx["start_pivot"]["iloc"] if wave_ctx else -1
+        wave_touch_counter[wave_key] = wave_touch_counter.get(wave_key, 0) + 1
+        touch_seq = wave_touch_counter[wave_key]
 
         if entry_bar < cutoff_bar:
             continue
@@ -1230,7 +1233,7 @@ def screen_vegas_mid_pullback(
                 if look_start < look_end:
                     peak_val = float(np.max(close[look_start:look_end]))
                     wave_rise_so_far = (peak_val / sp_val - 1) * 100
-            consec_count = vegas_mid.backward_consecutive_count(waves, wave_number)
+            consec_count = vegas_mid.backward_consecutive_count(waves, wave_ctx)
 
         score, score_details = vegas_mid.score_pullback(
             sub_number=sub_number,
@@ -1327,6 +1330,216 @@ def scan_vegas_mid_pullbacks(
         skipped=skipped,
         failed=failed,
         params_snapshot={"lookback": lookback},
+    )
+
+
+def screen_vegas_long_pullback(
+    df: pd.DataFrame,
+    lookback: int = 1,
+    market: str = "US",
+    name: str = "",
+) -> StrategyDecision:
+    """Evaluate the most recent Long Vegas (EMA144/169/200) wave-pullback signal.
+
+    大浪回踩策略：上涨周期中，价格从显著高于 Long Vegas 的浪顶回踩到
+    Long Vegas 通道并止跌回弹时触发。硬门槛（全过才非 AVOID）：
+      1. 触发     — 触碰 + 站稳回弹确认（状态机，零前瞻）
+      2. 周期     — check_long_wave_structure 上涨周期门控
+      3. 大浪回踩 — locate_wave_pullback 判定本次触碰确是一个大浪的终点
+                    （浪终结型回踩），过滤浪内小回踩 / 建底期触碰；
+                    并给出连续升浪链中的回踩序次（第 1/2 次最优）
+      4. 统计     — compute_lv_respect_stats：历史大浪回踩须显著
+                    以 Long Vegas 为回踩节点
+
+    Args:
+        df: OHLCV DataFrame (date index, lowercase columns).
+        lookback: How many recent trading days to consider (1 = today only).
+        market: "US" / "HK" / "CN" — informational, not used in scoring v1.
+        name: Human-readable display name (informational only).
+
+    Returns:
+        StrategyDecision with ``passed=True`` if at least one qualifying signal
+        was found within the lookback window.  ``features["signals"]`` holds
+        the full signal dicts; ``features["lv_stats"]`` holds the per-symbol
+        historical LV-respect statistics.
+    """
+    if df is None or df.empty or len(df) < 260:
+        return StrategyDecision(
+            passed=False,
+            strategy_kind=STATEFUL_SIGNAL_KIND,
+            setup_type="vegas_long_pullback",
+            reason="insufficient_data",
+        )
+
+    x = df.copy()
+    x.columns = [str(c).lower() for c in x.columns]
+    x.index = pd.to_datetime(x.index)
+    x = x.sort_index()
+
+    close = x["close"].astype(float).values
+    low_arr = x["low"].astype(float).values
+    close_s = x["close"].astype(float)
+    n = len(x)
+
+    emas = vegas_mid.compute_vegas_emas(close_s)
+    result = analyze_wave_structure(df)
+    waves = result.get("major_waves", [])
+
+    lv_stats = vegas_long.compute_lv_respect_stats(waves, close, emas)
+
+    touch_signals = vegas_long.detect_long_touch_and_hold(close, low_arr, emas)
+
+    cutoff_bar = n - lookback
+    recent_signals: list[dict] = []
+
+    for sig in touch_signals:
+        entry_bar = sig["entry_bar"]
+        if entry_bar < cutoff_bar:
+            continue
+
+        check_bar = sig["confirm_bar"] if entry_bar >= n else entry_bar
+        entry_price = float(close[check_bar])
+
+        struct = vegas_long.check_long_wave_structure(check_bar, close, low_arr, emas)
+
+        # 浪序上下文：把本次触碰映射到它「终结」的大浪（修好的浪结构下，
+        # wave_number 即连续升浪链中的回踩序次）。locate_wave_pullback 同时
+        # 判定这个触碰是否真是一次大浪回踩（浪终点），过滤浪内小回踩 /
+        # 建底期触碰。
+        pb = vegas_long.locate_wave_pullback(waves, sig["touch_bar"])
+        pullback_seq = pb["seq"]
+        is_wave_end = pb["is_wave_end"]
+        wave_rise_pct = pb["wave_rise_pct"]
+        consec_count = (
+            vegas_mid.backward_consecutive_count(waves, pb["wave"]) if pb["wave"] else 0
+        )
+
+        score, score_details = vegas_long.score_long_pullback(
+            pullback_seq=pullback_seq,
+            respect_rate=lv_stats["respect_rate"],
+            respect_n=lv_stats["n_events"],
+            long_slope_strong=struct["long_slope_strong"],
+            wave_rise_pct=wave_rise_pct,
+        )
+        # 三层硬门槛：上涨周期结构 + 历史尊重率 + 本次确是大浪回踩
+        gate_passed = struct["passed"] and lv_stats["qualified"] and is_wave_end
+        signal_label = (
+            vegas_long.classify_long_signal(score) if gate_passed else "AVOID"
+        )
+
+        recent_signals.append({
+            "entry_bar": entry_bar,
+            "entry_price": round(entry_price, 3),
+            "support_band": sig["support_band"],
+            "signal": signal_label,
+            "score": score,
+            "structure_passed": struct["passed"],
+            "stats_qualified": lv_stats["qualified"],
+            "is_wave_end": is_wave_end,
+            "pullback_seq": pullback_seq,
+            "consec_waves": consec_count,
+            "wave_rise_pct": round(wave_rise_pct, 2),
+            "long_slope_pct": struct["long_slope_pct"],
+            "above_ratio": struct["above_ratio"],
+            "peak_gap_pct": struct["peak_gap_pct"],
+            "rise_from_1y_low_pct": struct["rise_from_1y_low_pct"],
+            "lv_respect_rate": lv_stats["respect_rate"],
+            "lv_events": lv_stats["n_events"],
+            **{f"factor_{k}": v for k, v in score_details.items()},
+        })
+
+    if not recent_signals:
+        return StrategyDecision(
+            passed=False,
+            strategy_kind=STATEFUL_SIGNAL_KIND,
+            setup_type="vegas_long_pullback",
+            reason="not_triggered",
+            features={"lv_stats": lv_stats},
+        )
+
+    # 优先选真正可操作（非 AVOID）的信号做展示；同档再比分数。
+    # 避免用一个被硬门槛否掉但原始分较高的触碰盖过真实回踩买点。
+    best = max(recent_signals, key=lambda s: (s["signal"] != "AVOID", s["score"]))
+    norm_score = max(0.0, min(100.0, 50.0 + best["score"] * 10.0))
+
+    return StrategyDecision(
+        passed=True,
+        strategy_kind=STATEFUL_SIGNAL_KIND,
+        score=norm_score,
+        setup_type="vegas_long_pullback",
+        trigger_date=x.index[-1],
+        features={
+            "signals": recent_signals,
+            "best_signal": best["signal"],
+            "best_score": best["score"],
+            "support_band": best["support_band"],
+            "pullback_seq": best["pullback_seq"],
+            "is_wave_end": best["is_wave_end"],
+            "lv_stats": lv_stats,
+        },
+    )
+
+
+def scan_vegas_long_pullbacks(
+    market: str = "us",
+    lookback: int = 1,
+    stock_data: dict[str, pd.DataFrame] | None = None,
+) -> ScanResult:
+    """Scan a market universe for recent Long Vegas wave-pullback signals.
+
+    Args:
+        market: "us", "ndx100", or "hk" — used for data loading.
+        lookback: Recent trading days window passed to detection engine.
+        stock_data: Optional pre-loaded {symbol: DataFrame} map.
+    """
+    data_map, resolved_market = _resolve_stock_data(market, stock_data)
+    if not data_map:
+        return ScanResult(
+            strategy="vegas_long",
+            market=resolved_market,
+            strategy_kind=STATEFUL_SIGNAL_KIND,
+            params_snapshot={"lookback": lookback},
+        )
+
+    mkt_tag = "HK" if resolved_market == "hk" else "US"
+
+    hits, processed, skipped, failed = _scan_data_map(
+        data_map,
+        lambda _symbol, df: screen_vegas_long_pullback(
+            df,
+            lookback=lookback,
+            market=mkt_tag,
+        ),
+        min_history=260,
+    )
+
+    return ScanResult(
+        strategy="vegas_long",
+        market=resolved_market,
+        strategy_kind=STATEFUL_SIGNAL_KIND,
+        hits=hits,
+        total=len(data_map),
+        processed=processed,
+        skipped=skipped,
+        failed=failed,
+        params_snapshot={"lookback": lookback},
+    )
+
+
+def explain_vegas_long_pullback(decision: StrategyDecision) -> str:
+    """Render a concise explanation for a Long Vegas wave-pullback decision."""
+    if not decision.passed:
+        return "Long Vegas 大浪回踩未触发。"
+    best = decision.features.get("best_signal", "—")
+    score = decision.features.get("best_score", 0)
+    band = decision.features.get("support_band", "—")
+    seq = decision.features.get("pullback_seq", 0)
+    stats = decision.features.get("lv_stats", {})
+    return (
+        f"Long Vegas 大浪回踩触发：第 {seq} 次回踩，最优 {best}"
+        f"（score={score:+d}），支撑线 {band}，"
+        f"历史尊重率 {stats.get('respect_rate', 0):.0%}"
+        f"（{stats.get('n_held', 0)}/{stats.get('n_events', 0)}）。"
     )
 
 

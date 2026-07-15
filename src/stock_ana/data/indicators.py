@@ -3,9 +3,10 @@
 使用 ta 库（纯 Python），确保 Windows/macOS 跨平台无障碍运行
 """
 
+import numpy as np
 import pandas as pd
-from ta.momentum import RSIIndicator, StochRSIIndicator
-from ta.trend import MACD, SMAIndicator, EMAIndicator
+from ta.momentum import RSIIndicator
+from ta.trend import MACD, EMAIndicator, SMAIndicator
 from ta.volatility import BollingerBands
 from ta.volume import OnBalanceVolumeIndicator
 
@@ -16,7 +17,7 @@ _EMA_EXTENDED_WINDOWS = [8, 21, 34, 55, 60, 144, 169, 200, 250]
 _VOL_MA_WINDOWS = [5, 10, 20, 50]
 
 # 前高回望窗口（交易日）
-PREV_HIGH_WINDOW = 252   # ≈1 年
+PREV_HIGH_WINDOW = 252  # ≈1 年
 
 
 def add_ma(df: pd.DataFrame, windows: list[int] | None = None) -> pd.DataFrame:
@@ -101,6 +102,105 @@ def add_obv(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _rolling_linreg_endpoint(series: pd.Series, window: int) -> pd.Series:
+    """Return the offset-zero endpoint of each rolling least-squares line."""
+    x = np.arange(window, dtype=float)
+    x_mean = x.mean()
+    denominator = float(np.square(x - x_mean).sum())
+
+    def endpoint(values: np.ndarray) -> float:
+        y_mean = float(values.mean())
+        slope = float(np.dot(x - x_mean, values - y_mean) / denominator)
+        return y_mean + slope * (window - 1 - x_mean)
+
+    return series.rolling(window=window, min_periods=window).apply(endpoint, raw=True)
+
+
+def add_squeeze_momentum_lazybear(
+    df: pd.DataFrame,
+    *,
+    bb_length: int = 20,
+    bb_mult: float = 2.0,
+    kc_length: int = 20,
+    kc_mult: float = 1.5,
+    use_true_range: bool = True,
+) -> pd.DataFrame:
+    """Add the causal Squeeze Momentum Indicator popularized by LazyBear.
+
+    The implementation follows SQZMOM_LB: Bollinger Bands determine whether
+    volatility is inside/outside the Keltner Channel, while momentum is the
+    rolling linear-regression endpoint of detrended closing price.
+
+    ``sqzmom_bar_state`` preserves the original four histogram states:
+      2 = positive and rising, 1 = positive and falling,
+     -2 = negative and falling, -1 = negative and rising.
+
+    ``sqzmom_squeeze_state`` is 1 for squeeze-on, -1 for squeeze-off, and 0
+    for the transition/neutral state.
+    """
+    required = {"high", "low", "close"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"SQZMOM_LB 缺少必要列: {sorted(missing)}")
+    if min(bb_length, kc_length) <= 1:
+        raise ValueError("SQZMOM_LB 窗口必须大于 1")
+    if bb_mult <= 0 or kc_mult <= 0:
+        raise ValueError("SQZMOM_LB 倍数必须大于 0")
+
+    high = pd.to_numeric(df["high"], errors="coerce")
+    low = pd.to_numeric(df["low"], errors="coerce")
+    close = pd.to_numeric(df["close"], errors="coerce")
+
+    bb_basis = close.rolling(bb_length, min_periods=bb_length).mean()
+    bb_dev = close.rolling(bb_length, min_periods=bb_length).std(ddof=0) * bb_mult
+    upper_bb = bb_basis + bb_dev
+    lower_bb = bb_basis - bb_dev
+
+    kc_basis = close.rolling(kc_length, min_periods=kc_length).mean()
+    if use_true_range:
+        previous_close = close.shift(1)
+        price_range = pd.concat(
+            [high - low, (high - previous_close).abs(), (low - previous_close).abs()],
+            axis=1,
+        ).max(axis=1)
+    else:
+        price_range = high - low
+    range_mean = price_range.rolling(kc_length, min_periods=kc_length).mean()
+    upper_kc = kc_basis + range_mean * kc_mult
+    lower_kc = kc_basis - range_mean * kc_mult
+
+    valid_bands = upper_bb.notna() & lower_bb.notna() & upper_kc.notna() & lower_kc.notna()
+    squeeze_on = valid_bands & (lower_bb > lower_kc) & (upper_bb < upper_kc)
+    squeeze_off = valid_bands & (lower_bb < lower_kc) & (upper_bb > upper_kc)
+    no_squeeze = valid_bands & ~squeeze_on & ~squeeze_off
+
+    highest_high = high.rolling(kc_length, min_periods=kc_length).max()
+    lowest_low = low.rolling(kc_length, min_periods=kc_length).min()
+    detrended = close - (0.25 * (highest_high + lowest_low) + 0.5 * kc_basis)
+    momentum = _rolling_linreg_endpoint(detrended, kc_length)
+    previous_momentum = momentum.shift(1).fillna(0.0)
+
+    bar_state = pd.Series(pd.NA, index=df.index, dtype="Int8")
+    valid_momentum = momentum.notna()
+    bar_state.loc[valid_momentum & (momentum > 0) & (momentum > previous_momentum)] = 2
+    bar_state.loc[valid_momentum & (momentum > 0) & (momentum <= previous_momentum)] = 1
+    bar_state.loc[valid_momentum & (momentum <= 0) & (momentum < previous_momentum)] = -2
+    bar_state.loc[valid_momentum & (momentum <= 0) & (momentum >= previous_momentum)] = -1
+
+    squeeze_state = pd.Series(pd.NA, index=df.index, dtype="Int8")
+    squeeze_state.loc[squeeze_on] = 1
+    squeeze_state.loc[squeeze_off] = -1
+    squeeze_state.loc[no_squeeze] = 0
+
+    df["sqzmom_value"] = momentum
+    df["sqzmom_squeeze_on"] = squeeze_on
+    df["sqzmom_squeeze_off"] = squeeze_off
+    df["sqzmom_no_squeeze"] = no_squeeze
+    df["sqzmom_squeeze_state"] = squeeze_state
+    df["sqzmom_bar_state"] = bar_state
+    return df
+
+
 def add_vegas_channel(df: pd.DataFrame) -> pd.DataFrame:
     """添加 Vegas 长期通道（EMA144 + EMA169）"""
     df["ema_144"] = EMAIndicator(close=df["close"], window=144).ema_indicator()
@@ -115,6 +215,7 @@ def add_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = add_rsi(df)
     df = add_bollinger(df)
     df = add_obv(df)
+    df = add_squeeze_momentum_lazybear(df)
     return df
 
 
@@ -124,19 +225,21 @@ def add_daily_indicators(df: pd.DataFrame) -> pd.DataFrame:
       - 扩展 EMA（8/21/34/55/60/144/169/200/250）
       - 成交量均线（vol_ma_5/10/20/50）
       - 前高价格（prev_high_252d）
+      - LazyBear Squeeze Momentum（SQZMOM_LB）
 
     这是 indicators_store 每日批量计算时调用的主入口。
     """
     df = add_ema_extended(df)
     df = add_volume_ma(df)
     df = add_prev_high(df)
+    df = add_squeeze_momentum_lazybear(df)
     return df
 
 
 # ─────────────────────── 周线层 ───────────────────────
 
 # 周线前高回望窗口（交易周）
-PREV_HIGH_WINDOW_WEEKLY = 52   # ≈1 年
+PREV_HIGH_WINDOW_WEEKLY = 52  # ≈1 年
 
 
 def resample_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
@@ -193,6 +296,6 @@ def add_weekly_indicators(df_weekly: pd.DataFrame) -> pd.DataFrame:
             df[f"w_vol_ma_{w}"] = vol.rolling(window=w, min_periods=1).mean()
 
     # 周线前高
-    df[f"w_prev_high_52w"] = close.rolling(window=PREV_HIGH_WINDOW_WEEKLY, min_periods=1).max()
+    df["w_prev_high_52w"] = close.rolling(window=PREV_HIGH_WINDOW_WEEKLY, min_periods=1).max()
 
     return df

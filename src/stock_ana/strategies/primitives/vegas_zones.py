@@ -39,14 +39,14 @@ def compute_vegas_emas(close_s: pd.Series) -> dict[int, np.ndarray]:
     """
     计算所有 Vegas EMA，返回 {span: ndarray}。
 
-    涵盖 Mid Vegas（EMA34/55/60）和 Long Vegas（EMA144/169/200）。
+    涵盖 Mid Vegas（EMA34/55）和 Long Vegas（EMA144/169/200）。
     结果为 numpy ndarray，可直接用下标索引，适合逐 bar 扫描型算法。
 
     Args:
         close_s: 收盘价 Series（已按时间升序排列）
 
     Returns:
-        {34: ndarray, 55: ndarray, 60: ndarray, 144: ndarray, 169: ndarray, 200: ndarray}
+        {34: ndarray, 55: ndarray, 144: ndarray, 169: ndarray, 200: ndarray}
     """
     return {
         s: close_s.ewm(span=s, adjust=False).mean().values
@@ -65,7 +65,7 @@ def vegas_ema_series(close_s: pd.Series) -> dict[int, pd.Series]:
         close_s: 收盘价 Series（已按时间升序排列）
 
     Returns:
-        {34: Series, 55: Series, 60: Series, 144: Series, 169: Series, 200: Series}
+        {34: Series, 55: Series, 144: Series, 169: Series, 200: Series}
     """
     return {
         s: close_s.ewm(span=s, adjust=False).mean()

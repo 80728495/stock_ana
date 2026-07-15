@@ -15,6 +15,7 @@ from stock_ana.strategies.api import (
     scan_triangle_parallel_channel,
     scan_triangle_rising_wedge,
     scan_triangle_vcp_setups,
+    scan_vegas_long_pullbacks,
     scan_vegas_mid_pullbacks,
     scan_vegas_touches,
     scan_vcp_setups,
@@ -25,6 +26,7 @@ from stock_ana.strategies.contracts import StrategyKind
 STRATEGY_SCAN_REGISTRY: dict[str, Callable[..., object]] = {
     "vegas": scan_vegas_touches,
     "vegas_mid": scan_vegas_mid_pullbacks,
+    "vegas_long": scan_vegas_long_pullbacks,
     "ma_squeeze": scan_ma_squeeze,
     "momentum": scan_momentum,
     "main_rally_pullback": scan_main_rally_pullback_setups,
@@ -41,6 +43,7 @@ STRATEGY_SCAN_REGISTRY: dict[str, Callable[..., object]] = {
 STRATEGY_KIND_REGISTRY: dict[str, StrategyKind] = {
     "vegas": "pattern",
     "vegas_mid": "stateful_signal",
+    "vegas_long": "stateful_signal",
     "ma_squeeze": "stateful_signal",
     "momentum": "stateful_signal",
     "main_rally_pullback": "pattern",

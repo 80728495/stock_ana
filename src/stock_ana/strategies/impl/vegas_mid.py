@@ -1,4 +1,4 @@
-"""Mid Vegas (EMA34/55/60) pullback detection, scoring, and structure checking.
+"""Mid Vegas (EMA34/55) pullback detection, scoring, and structure checking.
 
 Core strategy logic for detecting Mid Vegas channel touchbacks within major
 upwaves.  Extracted from the backtest module so scan, api, and workflow layers
@@ -27,7 +27,7 @@ Structure validation (legacy, no high/low required):
 
 Wave context:
     find_wave_context(waves, bar_idx) -> dict | None
-    backward_consecutive_count(waves, wave_number, min_rise) -> int
+    backward_consecutive_count(waves, wave, min_rise) -> int
 
 Scoring / classification:
     score_pullback(sub_number, wave_rise_pct, wave_number,
@@ -58,26 +58,44 @@ from stock_ana.strategies.primitives.vegas_pullback import (
 # Signal Detection  (zero look-ahead)
 # ─────────────────────────────────────────────────────────────
 
+def mid_above_long_mask(emas: dict[int, np.ndarray]) -> np.ndarray:
+    """逐 bar 判定中期均线整体运行在长期均线之上（多头排列 regime）。
+
+    min(EMA34, EMA55) > max(EMA144, EMA169, EMA200)。
+    Mid Vegas 回踩只在此 regime 内有意义——mid/long 缠绕的震荡段里
+    触碰 mid 不是「上升趋势中的中继回踩」。
+    """
+    mid_lower = np.minimum(emas[34], emas[55])
+    long_upper = np.maximum(np.maximum(emas[144], emas[169]), emas[200])
+    return mid_lower > long_upper
+
+
 def detect_mid_touch_and_hold(
     close: np.ndarray,
     low: np.ndarray,
     emas: dict[int, np.ndarray],
     touch_margin: float = 0.02,
-    cooldown: int = 10,
+    depart_pct: float = 0.05,
 ) -> list[dict]:
-    """Mid Vegas (EMA34/55/60) 触碰 + 站稳信号扫描（Mid-only 包装）。
+    """Mid Vegas (EMA34/55) 触碰 + 站稳信号扫描（Mid-only 包装）。
 
     委托给 primitives.vegas_pullback.detect_vegas_pullback(spans=MID_EMAS)。
     默认 touch_margin=0.02（2% 容差，捕获 low 接近但未实际触碰的近距回踩）。
-    启用 above_lookback=10，排除从下方长期恢复后才碰到 mid 的假信号。
-    返回字段与原版完全兼容，新增 support_type="mid_vegas" 字段。
+
+    「回踩」语义门（pullback_precondition，above_lookback=10）：
+      - regime：mid 整体在 long 之上（mid_above_long_mask）——多头排列内
+        的中继回踩才算数；
+      - 方向：触碰前一根收盘在 EMA 上方 + 近 10 根 80% 在上方 + 窗口内
+        最高收盘 ≥ EMA×1.02——从上方跌下来，拒绝跌穿后涨回的上穿触碰。
+    去重用"离开-再回踩/越踩越深"规则（depart_pct=5%）。
     """
     return detect_vegas_pullback(
         close, low, emas,
         spans=MID_EMAS,
         touch_margin=touch_margin,
-        cooldown=cooldown,
+        depart_pct=depart_pct,
         above_lookback=10,
+        regime_mask=mid_above_long_mask(emas),
     )
 
 
@@ -90,15 +108,18 @@ def detect_mid_touch_immediate(
 ) -> list[dict]:
     """Mid Vegas 触碰信号扫描——触碰即发出信号，无需站稳确认。
 
-    前置条件与 detect_mid_touch_and_hold 完全相同（above_lookback=10），
-    但跳过 1-2 日站稳确认，在触碰当日直接发出信号：
-        entry_bar == confirm_bar == touch_bar
+    「回踩」语义门与 detect_mid_touch_and_hold 完全相同
+    （pullback_precondition + mid>long regime），但跳过 1-2 日站稳确认，
+    在触碰当日直接发出信号：entry_bar == confirm_bar == touch_bar
 
     用于"触碰策略"：只要 low 接近 Mid Vegas，即输出信号供人工研判，
     不依赖后续收盘站稳，因此会产生更多信号（含部分假信号）。
     """
+    from stock_ana.strategies.primitives.vegas_pullback import pullback_precondition
+
     n = len(close)
     raw_signals: list[dict] = []
+    regime = mid_above_long_mask(emas)
 
     for span in MID_EMAS:
         ema = emas[span]
@@ -113,10 +134,10 @@ def detect_mid_touch_immediate(
             lo = low[i]
 
             if lo <= ev * (1 + touch_margin):
-                # 与 detect_mid_touch_and_hold 相同的前置检查
-                lb_start = max(0, i - 10)
-                above_cnt = int(np.sum(close[lb_start:i] >= ema[lb_start:i]))
-                if above_cnt < (i - lb_start) * 0.6:
+                # 与 detect_mid_touch_and_hold 相同的「回踩」语义门
+                if not pullback_precondition(
+                    i, close, ema, above_lookback=10, regime_mask=regime,
+                ):
                     continue
 
                 raw_signals.append(dict(
@@ -242,35 +263,41 @@ def find_wave_context(waves: list[dict], bar_idx: int) -> dict | None:
 
 def backward_consecutive_count(
     waves: list[dict],
-    wave_number: int,
+    wave: dict,
     min_rise: float = 20.0,
 ) -> int:
-    """从 wave_number 往前数有多少连续且有效（rise≥min_rise）的浪（含自身）。
+    """从 wave 往前数有多少连续且有效（rise≥min_rise）的浪（含自身）。
 
-    只使用已完成浪的信息（end_pivot 已确定、rise_pct 已知），无未来信息泄露。
-    当前浪（最后一个）不要求 rise≥min_rise（因为还在进行中），但前驱浪必须满足。
+    连续性用 analyze_wave_structure 预置的 ``connected_prev`` 标志回溯：
+    该标志为 True 表示本浪与前一个合规浪之间价格未深破 Long Vegas
+    （一段不间断的上升结构）。基于「浪间是否深破」而非 boundary id 相等，
+    中间被过滤掉的弱回踩不会打断连续链，真实断裂处才会重置。
+
+    只使用已完成浪的信息（rise_pct 已知），无未来信息泄露。
+    当前浪不要求 rise≥min_rise（因为可能还在进行中），但前驱浪必须满足。
+
+    Args:
+        wave: 当前浪的 wave dict（find_wave_context 的返回值）。
     """
-    wave_map = {w["wave_number"]: w for w in waves}
-    count = 0
-    wn = wave_number
+    idx = None
+    for i, w in enumerate(waves):
+        if w is wave or w["start_pivot"]["iloc"] == wave["start_pivot"]["iloc"]:
+            idx = i
+            break
+    if idx is None:
+        return 0
 
-    while wn in wave_map:
-        w = wave_map[wn]
-        if count == 0:
-            count = 1
-            wn -= 1
-            continue
-        if w["end_pivot"] is None:
+    count = 1
+    i = idx
+    while i > 0:
+        curr = waves[i]
+        prev = waves[i - 1]
+        if not curr.get("connected_prev"):
             break
-        if w["rise_pct"] < min_rise:
-            break
-        next_w = wave_map.get(wn + 1)
-        if next_w is None:
-            break
-        if w["end_pivot"]["iloc"] != next_w["start_pivot"]["iloc"]:
+        if prev["rise_pct"] < min_rise:
             break
         count += 1
-        wn -= 1
+        i -= 1
 
     return count
 

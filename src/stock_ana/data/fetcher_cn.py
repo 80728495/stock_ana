@@ -1,26 +1,25 @@
 """
 大A股票数据获取模块
 
-使用 akshare（东方财富源 stock_zh_a_hist）获取前复权日线数据，
+使用 Futu OpenD 获取前复权日线数据，
 支持本地 parquet 持久化存储与增量更新。
 
 架构与 fetcher_hk.py 保持一致：
   - A 股缓存目录：data/cache/cn/
   - 每只个股一个 parquet 文件，文件名 = 6位代码（如 600519.parquet）
   - 增量更新：仅拉取上次缓存日期之后的新数据并追加
-  - 复用 fetcher.py 中已有的 fetch_cn_stock 和 _bypass_proxy 工具
+  - 全批次复用一个 OpenD quote context，并统一执行历史K线限频
 """
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 from loguru import logger
 
-from stock_ana.config import CACHE_DIR, DATA_DIR
+from stock_ana.config import CACHE_DIR
 from stock_ana.data.fetcher_hk import _bypass_proxy  # 复用代理绕过工具
 
 # ── 大A缓存目录 ──────────────────────────────────────────────────────────────
@@ -29,6 +28,7 @@ CN_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── 历史回看起点（全量拉取时） ────────────────────────────────────────────────
 _DEFAULT_START = "20200101"
+_BENCHMARK_ONLY_CODES = {"000680", "000688", "399006"}
 
 
 # ─────────────────────── 单只股票获取 ───────────────────────────────────────
@@ -186,54 +186,79 @@ def update_cn_data(
         from stock_ana.data.list_manager import load_cn_list
         codes = load_cn_list()
 
+    codes = [str(code).strip() for code in codes if str(code).strip()]
+    benchmark_codes = [code for code in codes if code in _BENCHMARK_ONLY_CODES]
+    if benchmark_codes:
+        logger.info(f"CN 股票更新跳过独立 benchmark 代码: {benchmark_codes}")
+        codes = [code for code in codes if code not in _BENCHMARK_ONLY_CODES]
+
     if not codes:
         logger.info("CN: 无需更新（列表为空）")
         return {}
 
     today = pd.Timestamp.now().normalize()
     updated: dict[str, pd.DataFrame] = {}
+    need_full: list[str] = []
+    need_incr: dict[str, pd.Timestamp] = {}
 
-    for i, code in enumerate(codes, 1):
+    for code in codes:
         local = load_cn_local(code)
-
-        if not force and local is not None and not local.empty:
+        if force or local is None or local.empty:
+            need_full.append(code)
+        else:
             last_date = pd.Timestamp(local.index.max()).normalize()
             stale_days = (today - last_date).days
             if stale_days <= max_stale_days:
                 logger.debug(f"CN {code}: 数据已是最新（最新 {last_date.date()}，跳过）")
+                updated[code] = local
                 continue
-            start_date = (last_date + timedelta(days=1)).strftime("%Y%m%d")
-        else:
-            start_date = _DEFAULT_START
+            need_incr[code] = last_date
 
-        try:
-            df_new = fetch_cn_stock_hist(code, start_date=start_date)
-            if df_new.empty:
-                logger.debug(f"CN {code}: 无新数据")
-                if local is not None:
-                    updated[code] = local
-                continue
+    logger.info(
+        f"CN(Futu) 数据状态：全量下载 {len(need_full)} 只 | "
+        f"增量更新 {len(need_incr)} 只 | 已最新 {len(updated)} 只"
+    )
 
-            if local is not None and not local.empty and not force:
-                df_merged = pd.concat([local, df_new])
-                df_merged = df_merged[~df_merged.index.duplicated(keep="last")]
-                df_merged = df_merged.sort_index()
-            else:
-                df_merged = df_new.sort_index()
+    if need_full or need_incr:
+        from stock_ana.data.fetcher_futu import (
+            fetch_cn_stock_with_ctx,
+            quote_context,
+        )
 
-            save_cn_local(code, df_merged)
-            updated[code] = df_merged
-            logger.info(
-                f"[{i}/{len(codes)}] CN {code}: "
-                f"更新至 {df_merged.index.max().date()}（共 {len(df_merged)} 行）"
+        end_date = today.strftime("%Y-%m-%d")
+        full_start = pd.to_datetime(_DEFAULT_START, format="%Y%m%d").strftime("%Y-%m-%d")
+
+        with quote_context() as ctx:
+            jobs = [(code, full_start, True) for code in need_full]
+            jobs.extend(
+                (code, (last_date + timedelta(days=1)).strftime("%Y-%m-%d"), False)
+                for code, last_date in need_incr.items()
             )
 
-        except Exception as e:
-            logger.warning(f"CN {code}: 获取失败 — {e}")
+            for i, (code, start_date, is_full) in enumerate(jobs, 1):
+                local = load_cn_local(code)
+                try:
+                    fresh = fetch_cn_stock_with_ctx(ctx, code, start_date, end_date)
+                    if fresh.empty:
+                        logger.debug(f"[{i}/{len(jobs)}] CN {code}: OpenD 无新数据")
+                        if local is not None:
+                            updated[code] = local
+                        continue
 
-        # 轻微延时，避免对东方财富 API 施压
-        if i % 10 == 0:
-            time.sleep(0.5)
+                    if not is_full and local is not None and not local.empty:
+                        merged = pd.concat([local, fresh])
+                        merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+                    else:
+                        merged = fresh.sort_index()
+
+                    save_cn_local(code, merged)
+                    updated[code] = merged
+                    logger.info(
+                        f"[{i}/{len(jobs)}] CN {code}: OpenD 更新至 "
+                        f"{merged.index.max().date()}（共 {len(merged)} 行）"
+                    )
+                except Exception as exc:
+                    logger.warning(f"[{i}/{len(jobs)}] CN {code}: OpenD 获取失败 — {exc}")
 
     logger.info(f"CN 更新完成：{len(updated)}/{len(codes)} 只成功")
     return updated

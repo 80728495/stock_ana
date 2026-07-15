@@ -126,7 +126,7 @@ def parse_watchlist(path: Path | None = None) -> dict[str, list[dict[str, str]]]
         if re.search(r"##.*大A", stripped):
             section = "cn"
             continue
-        if re.search(r"##.*持仓", stripped):
+        if re.search(r"##.*持[仓有]", stripped):  # 兼容旧「持仓」与新「持有」段名
             section = "holdings"
             continue
         if stripped.startswith("##"):

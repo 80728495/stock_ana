@@ -297,6 +297,8 @@ def _process_touch_signals(
     touch策略：entry_bar == touch_bar，当日即出。
     long_touch策略：skip_scoring=True，跳过 mid 结构检查和打分，信号标 OBSERVE。
     """
+    # touch_seq 计数器按浪身份（start_pivot iloc）分桶：wave_number 会跨
+    # 浪段重复（每轮连续浪都从 1 重新编号），不能作为计数键。
     wave_touch_counter: dict[int, int] = {}
     prev_touch_bar: int = -1
     results: list[dict] = []
@@ -311,9 +313,10 @@ def _process_touch_signals(
 
         wave_ctx = _find_wave_context(waves, curr_touch_bar) if waves else None
         wave_number = wave_ctx["wave_number"] if wave_ctx else 0
+        wave_key = wave_ctx["start_pivot"]["iloc"] if wave_ctx else -1
 
-        wave_touch_counter[wave_number] = wave_touch_counter.get(wave_number, 0) + 1
-        touch_seq = wave_touch_counter[wave_number]
+        wave_touch_counter[wave_key] = wave_touch_counter.get(wave_key, 0) + 1
+        touch_seq = wave_touch_counter[wave_key]
 
         orderly = check_orderly_pullback(close, emas, prev_touch_bar, curr_touch_bar)
         prev_touch_bar = curr_touch_bar
@@ -371,7 +374,7 @@ def _process_touch_signals(
                     peak_val = float(max(close[look_start:look_end]))
                     wave_rise_so_far = (peak_val / sp_val - 1) * 100
 
-            consec_count = backward_consecutive_count(waves, wave_number)
+            consec_count = backward_consecutive_count(waves, wave_ctx)
 
         touch_seq_ok = touch_seq <= 3
 

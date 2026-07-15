@@ -4,7 +4,7 @@
 实现机制：
   门控：check_vegas_gate（统一，与 vegas_mid 共用同一套条件）
   检测：detect_vegas_pullback（状态机，touch -> 两日站稳，与 vegas_mid 共用同一逻辑）
-  范围：MID（EMA34/55/60）+ LONG（EMA144/169/200）均可触发
+  范围：MID（EMA34/55）+ LONG（EMA144/169/200）均可触发
         mid_only=True 时退化为仅检测中期线，与 vegas_mid 等价
 
 与 vegas_mid 的关系：
@@ -54,7 +54,7 @@ def screen_main_rally_pullback(
 
     Parameters
     ----------
-    mid_only : 仅检测踩中期 Vegas（EMA34/55/60），等价于 vegas_mid 策略。
+    mid_only : 仅检测踩中期 Vegas（EMA34/55），等价于 vegas_mid 策略。
                默认 False，中期 + 长期（EMA144/169/200）均可触发。
 
     Returns
@@ -93,13 +93,14 @@ def screen_main_rally_pullback(
     if not gate["passed"]:
         return None
 
-    # 状态机扫描（全历史，取今日信号）
+    # 状态机扫描（全历史，取今日信号）。检测器去重已从固定 cooldown 改为
+    # "离开-再回踩/越踩越深"规则，原 cooldown 参数映射为最小间隔地板。
     spans = MID_EMAS if mid_only else ALL_VEGAS_EMAS
     signals = detect_vegas_pullback(
         close_arr, low_arr, emas,
         spans=spans,
         touch_margin=touch_margin,
-        cooldown=cooldown,
+        min_gap_bars=max(3, int(cooldown)),
     )
 
     # entry_bar == n 表示今日确认、次日入场

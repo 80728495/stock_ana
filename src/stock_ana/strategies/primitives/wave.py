@@ -11,7 +11,6 @@ from stock_ana.strategies.primitives.vegas_zones import vegas_ema_series
 
 def detect_ema8_swings(
 	df: pd.DataFrame,
-	window: int = 3,
 	min_swing_pct: float = 3.0,
 ) -> list[dict]:
 	"""Detect alternating swing pivots from EMA8-driven zigzag structure."""
@@ -98,8 +97,20 @@ def analyze_wave_structure(
 	swing_min_pct: float = 3.0,
 	long_vegas_margin_pct: float = 3.0,
 	mid_vegas_margin_pct: float = 2.0,
+	ema_warmup_bars: int = 200,
 ) -> dict:
-	"""Build multi-wave structure from EMA8 swings and Vegas support zones."""
+	"""Build multi-wave structure from EMA8 swings and Vegas support zones.
+
+	Args:
+		swing_window: 保留参数（历史兼容），当前 ZigZag 实现不使用。
+		ema_warmup_bars: EMA200 暖机期长度。此前的低点不参与 Long Vegas
+			触碰判定——ewm(adjust=False) 早期 EMA 贴着价格走，"触碰"无意义。
+
+	浪连续性（wave_number 递增）判定基于 boundary id：相邻两浪在
+	refinement 之前共享同一个 Long Vegas 触点，wave["end_boundary_id"] ==
+	next_wave["start_boundary_id"] 即为连续交接。synthetic 截断（深破 LV）
+	会清空 end_boundary_id，天然打断连续性。
+	"""
 	x = df.copy()
 	x.columns = [c.lower() for c in x.columns]
 	if len(x) < 50:
@@ -112,14 +123,19 @@ def analyze_wave_structure(
 		}
 
 	close = x["close"].astype(float)
+	# 真实 low：LV 触碰判定需要（EMA8 枢轴值平滑滞后，深下影触碰会漏检）
+	low_s = x["low"].astype(float) if "low" in x.columns else close
 	_emas = vegas_ema_series(close)
 	ema34 = _emas[34]
 	ema55 = _emas[55]
 	ema144 = _emas[144]
 	ema169 = _emas[169]
 	ema200 = _emas[200]
+	# LV 上沿逐 bar 序列（触碰判定 / 刺破检查共用）
+	_lv_upper_arr = np.maximum(np.maximum(ema144.values, ema169.values), ema200.values)
+	_low_arr = low_s.values.astype(float)
 
-	pivots = detect_ema8_swings(df, window=swing_window, min_swing_pct=swing_min_pct)
+	pivots = detect_ema8_swings(df, min_swing_pct=swing_min_pct)
 	if len(pivots) < 4:
 		return {
 			"major_waves": [],
@@ -130,15 +146,36 @@ def analyze_wave_structure(
 		}
 
 	def _touches_long_vegas(pivot: dict) -> bool:
-		e144 = float(ema144.iloc[pivot["iloc"]])
-		e169 = float(ema169.iloc[pivot["iloc"]])
-		e200 = float(ema200.iloc[pivot["iloc"]])
-		upper = max(e144, e169, e200)
-		return upper > 0 and pivot["value"] <= upper * (1 + long_vegas_margin_pct / 100)
+		"""L 枢轴是否触及 Long Vegas 上沿（margin 容差内）。
+
+		两个判据取并集：
+		  1. EMA8 枢轴值 ≤ LV×(1+margin) —— 原判据，收盘级别的回踩；
+		  2. 枢轴附近窗口 [i-7, i+2] 内任一 bar 的真实 low ≤ 当日
+		     LV×(1+margin) —— 捕获深下影线触碰。EMA8 在 V 型底处比
+		     真实低点高 4~10%，仅用判据 1 会漏掉大量真实触碰
+		     （实测华虹 2025-06/2026-04、心动 2024-09/2025-04 均属此类）。
+		"""
+		i = pivot["iloc"]
+		margin = 1 + long_vegas_margin_pct / 100
+		upper_at_pivot = float(_lv_upper_arr[i])
+		if upper_at_pivot > 0 and pivot["value"] <= upper_at_pivot * margin:
+			return True
+		w_start = max(0, i - 7)
+		w_end = min(len(_low_arr), i + 3)
+		lv_win = _lv_upper_arr[w_start:w_end]
+		lo_win = _low_arr[w_start:w_end]
+		mask = lv_win > 0
+		return bool(np.any(lo_win[mask] <= lv_win[mask] * margin))
 
 	all_highs = [pivot for pivot in pivots if pivot["type"] == "H"]
 	all_lows = [pivot for pivot in pivots if pivot["type"] == "L"]
-	long_touch_lows = [pivot for pivot in pivots if pivot["type"] == "L" and _touches_long_vegas(pivot)]
+	# EMA 暖机期内的"LV 触碰"是伪触碰（早期 EMA200 贴着价格走），不作浪边界
+	long_touch_lows = [
+		pivot for pivot in pivots
+		if pivot["type"] == "L"
+		and pivot["iloc"] >= ema_warmup_bars
+		and _touches_long_vegas(pivot)
+	]
 
 	if not long_touch_lows:
 		return {
@@ -198,6 +235,13 @@ def analyze_wave_structure(
 		end_touch = merged_touches[i + 1] if i + 1 < len(merged_touches) else None
 		end_iloc = end_touch["iloc"] if end_touch else (len(x) - 1)
 
+		# Boundary id = refinement 之前的原始共享触点 iloc。相邻两浪由
+		# 同一个 merged touch 交接：本浪 end_boundary_id == 下一浪
+		# start_boundary_id。refinement 会把两侧 pivot 的 iloc 推开，
+		# 但 boundary id 保持同源，是浪连续性的唯一判据。
+		start_boundary_id = start_touch["iloc"]
+		end_boundary_id = end_touch["iloc"] if end_touch else None
+
 		# Refine start: advance to the LAST bar where close <= LV * 1.03
 		# before price departs upward.  This gives the true wave launch point.
 		_refined_iloc = start_touch["iloc"]
@@ -250,22 +294,23 @@ def analyze_wave_structure(
 		_lv_peak = max(float(ema144.iloc[peak["iloc"]]), float(ema169.iloc[peak["iloc"]]), float(ema200.iloc[peak["iloc"]]))
 		if _lv_peak <= _lv_start:
 			continue
-		major_waves.append(
-			_build_major_wave_v2(
-				len(major_waves) + 1,
-				start_touch,
-				end_touch,
-				peak,
-				seg_lows,
-				seg_highs,
-				ema34,
-				ema55,
-				ema144,
-				ema169,
-				ema200,
-				mid_vegas_margin_pct,
-			)
+		_wave = _build_major_wave_v2(
+			len(major_waves) + 1,
+			start_touch,
+			end_touch,
+			peak,
+			seg_lows,
+			seg_highs,
+			ema34,
+			ema55,
+			ema144,
+			ema169,
+			ema200,
+			mid_vegas_margin_pct,
 		)
+		_wave["start_boundary_id"] = start_boundary_id
+		_wave["end_boundary_id"] = end_boundary_id
+		major_waves.append(_wave)
 
 	# ── Post-peak sustained LV breach → truncate wave end ────────────────────
 	# If after the peak the price stays below Long Vegas for >= N consecutive
@@ -290,6 +335,7 @@ def analyze_wave_structure(
 						"date": _bd,
 						"synthetic": True,
 					}
+					w["end_boundary_id"] = None  # 深破截断，浪不再终于共享触点
 					w["sub_waves"] = [
 						s for s in w["sub_waves"]
 						if s["end_pivot"] is not None and s["end_pivot"]["iloc"] <= _breach_start
@@ -299,19 +345,17 @@ def analyze_wave_structure(
 			else:
 				consec = 0
 
-	# ── Wave filtering and renumbering ────────────────────────────────────────
+	# ── Wave filtering & numbering ───────────────────────────────────────────
 	# Requirements:
 	# 1. Wave boundaries = Long Vegas touches; price must not break below LV
 	#    during the wave.
 	# 2. Each wave lasts at least ~2 months (min_wave_bars).
 	# 3. Each wave has at least min_wave_rise_pct% rise from start to peak.
-	# 4. Consecutive waves: wave N ends at LV touch, wave N+1 starts from that
-	#    same LV touch (or very close — within max_gap_bars).
-	#    Wave start must be higher than previous wave start (trend intact).
+	# 4. Consecutive waves: 相邻两个「合规浪」之间价格未深破 Long Vegas
+	#    （是一段不间断的上升结构），且本浪起点价 >= 前浪起点价。
 
 	min_wave_bars = 40          # ~2 months of trading days
 	min_wave_rise_pct = 15.0    # 15% minimum rise from start to peak
-	max_gap_bars = 15           # max bars between consecutive wave end→next start
 
 	# Step 1: filter out waves that don't qualify
 	qualified: list[dict] = []
@@ -330,7 +374,6 @@ def analyze_wave_structure(
 		# price must not close below LV*0.97 for 3 consecutive days.
 		start_bar = w["start_pivot"]["iloc"]
 		peak_bar  = w["peak_pivot"]["iloc"]
-		end_bar   = w["end_pivot"]["iloc"] if w["end_pivot"] else (len(close) - 1)
 		duration = peak_bar - start_bar
 		warmup = min(20, duration // 4)
 		check_start = start_bar + warmup
@@ -350,25 +393,29 @@ def analyze_wave_structure(
 				continue
 		qualified.append(w)
 
-	# Step 2: renumber — reset when consecutive condition breaks
+	# Step 2: renumber the surviving (qualified) waves by real continuity.
+	# 连续 = 相邻两个合规浪之间价格未深破 Long Vegas（≥3 日收盘 < LV*0.97
+	# 即断裂）且趋势未破坏（本浪起点价 >= 前浪起点价）。基于「浪间是否深破」
+	# 而非 boundary id 相等：中间被过滤掉的弱回踩不会打断编号（不跳号），
+	# 而真实断裂处（大缺口 + 深破，如两段独立行情）会正确重置为 W1。
+	# 每个浪记录 connected_prev 布尔，供 backward_consecutive_count 等下游
+	# 无需再访问 EMA 序列即可回溯连续链。
 	for idx, w in enumerate(qualified):
 		if idx == 0:
+			w["connected_prev"] = False
 			w["wave_number"] = 1
-		else:
-			prev = qualified[idx - 1]
-			# Condition A: prev must have ended (has end_pivot)
-			has_end = prev["end_pivot"] is not None
-			# Condition B: start of current ≈ end of previous (close in bars)
-			if has_end:
-				gap = w["start_pivot"]["iloc"] - prev["end_pivot"]["iloc"]
-			else:
-				gap = 999
-			# Condition C: current start price >= previous start price
-			rising = w["start_pivot"]["value"] >= prev["start_pivot"]["value"]
-			if has_end and gap <= max_gap_bars and rising:
-				w["wave_number"] = prev["wave_number"] + 1
-			else:
-				w["wave_number"] = 1
+			continue
+		prev = qualified[idx - 1]
+		prev_end = prev["end_pivot"]
+		gap_breach = (
+			prev_end is None
+			or bool(prev_end.get("synthetic"))
+			or _has_lv_breach(prev_end["iloc"], w["start_pivot"]["iloc"])
+		)
+		rising = w["start_pivot"]["value"] >= prev["start_pivot"]["value"]
+		connected = (not gap_breach) and rising
+		w["connected_prev"] = connected
+		w["wave_number"] = prev["wave_number"] + 1 if connected else 1
 
 	major_waves = qualified
 	curr_wave_num = major_waves[-1]["wave_number"] if major_waves else 0
@@ -412,6 +459,7 @@ def analyze_wave_structure(
 						"date": _bd,
 						"synthetic": True,
 					}
+					last_wave["end_boundary_id"] = None  # 深破截断
 					break
 		elif long_upper > 0 and last_close <= long_upper * (1 + long_vegas_margin_pct / 100):
 			curr_status = "long_pullback"

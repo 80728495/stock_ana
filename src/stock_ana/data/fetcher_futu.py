@@ -13,6 +13,7 @@ OpenD 必须在本机已启动（默认 127.0.0.1:11111）。
 from __future__ import annotations
 
 import os
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Generator
@@ -24,6 +25,36 @@ from loguru import logger
 
 OPEND_HOST: str = os.environ.get("FUTU_OPEND_HOST", "127.0.0.1")
 OPEND_PORT: int = int(os.environ.get("FUTU_OPEND_PORT", "11111"))
+
+
+class HistoryRequestLimiter:
+    """Conservative limiter for OpenD's 60 history requests per 30 seconds."""
+
+    def __init__(self, max_requests: int = 58, window_seconds: float = 31.0) -> None:
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.window_start = time.monotonic()
+        self.count = 0
+
+    def wait(self) -> None:
+        elapsed = time.monotonic() - self.window_start
+        if elapsed >= self.window_seconds:
+            self.window_start = time.monotonic()
+            self.count = 0
+        elif self.count >= self.max_requests:
+            sleep_seconds = max(0.0, self.window_seconds - elapsed)
+            logger.info(f"Futu 历史K线限频保护：等待 {sleep_seconds:.1f}s")
+            time.sleep(sleep_seconds)
+            self.window_start = time.monotonic()
+            self.count = 0
+        self.count += 1
+
+    def reset(self) -> None:
+        self.window_start = time.monotonic()
+        self.count = 0
+
+
+_HISTORY_LIMITER = HistoryRequestLimiter()
 
 
 # ─────────────────────── 连接管理 ───────────────────────
@@ -75,7 +106,7 @@ def to_futu_code(symbol: str, market: str | None = None) -> str:
     if symbol.isdigit():
         if len(symbol) <= 5:
             return f"HK.{symbol.zfill(5)}"
-        if symbol.startswith(("6", "9")):
+        if symbol.startswith(("5", "6", "9")):
             return f"SH.{symbol}"
         return f"SZ.{symbol}"
 
@@ -90,6 +121,8 @@ def _request_all_kline(
     futu_code: str,
     start: str,
     end: str,
+    *,
+    adjusted: bool = True,
 ) -> pd.DataFrame:
     """
     处理分页，完整拉取指定股票的历史日 K 线（前复权）。
@@ -104,19 +137,25 @@ def _request_all_kline(
     page = 0
 
     while True:
-        ret, data, page_req_key = ctx.request_history_kline(
-            futu_code,
-            start=start,
-            end=end,
-            ktype=KLType.K_DAY,
-            autype=AuType.QFQ,
-            max_count=1000,
-            page_req_key=page_req_key,
-        )
-        if ret != RET_OK:
-            raise RuntimeError(
-                f"request_history_kline failed [{futu_code}]: {data}"
+        for attempt in range(3):
+            _HISTORY_LIMITER.wait()
+            ret, data, next_page_req_key = ctx.request_history_kline(
+                futu_code,
+                start=start,
+                end=end,
+                ktype=KLType.K_DAY,
+                autype=AuType.QFQ if adjusted else AuType.NONE,
+                max_count=1000,
+                page_req_key=page_req_key,
             )
+            if ret == RET_OK:
+                page_req_key = next_page_req_key
+                break
+            if "频率" not in str(data) or attempt == 2:
+                raise RuntimeError(f"request_history_kline failed [{futu_code}]: {data}")
+            logger.warning(f"{futu_code}: OpenD 历史K线限频，31秒后重试")
+            time.sleep(31.0)
+            _HISTORY_LIMITER.reset()
 
         all_dfs.append(data)
         page += 1
@@ -126,6 +165,27 @@ def _request_all_kline(
             break
 
     return pd.concat(all_dfs, ignore_index=True)
+
+
+def fetch_futu_kline_with_ctx(
+    ctx,
+    futu_code: str,
+    start_date: str,
+    end_date: str,
+    *,
+    adjusted: bool = True,
+) -> pd.DataFrame:
+    """Fetch a stock, ETF, or index with an existing OpenD quote context."""
+    raw = _request_all_kline(
+        ctx,
+        to_futu_code(futu_code),
+        start_date,
+        end_date,
+        adjusted=adjusted,
+    )
+    if raw.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    return _normalize_kline(raw)
 
 
 def _normalize_kline(raw: pd.DataFrame) -> pd.DataFrame:
@@ -169,10 +229,6 @@ def fetch_hk_stock_with_ctx(
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
     return _normalize_kline(raw)
 
-    df = df.sort_index()
-    return df
-
-
 def fetch_us_stock_with_ctx(
     ctx,
     symbol: str,
@@ -199,6 +255,26 @@ def fetch_us_stock_with_ctx(
     if raw.empty:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
     return _normalize_kline(raw)
+
+
+def fetch_cn_stock_with_ctx(
+    ctx,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """Use an existing OpenD quote context to fetch an A-share daily series."""
+    clean_symbol = str(symbol).strip()
+    futu_code = "SH.000300" if clean_symbol == "000300" else to_futu_code(clean_symbol)
+    if not futu_code.startswith(("SH.", "SZ.")):
+        raise ValueError(f"A股代码必须属于 SH/SZ 市场: {symbol!r} -> {futu_code!r}")
+    return fetch_futu_kline_with_ctx(
+        ctx,
+        futu_code,
+        start_date,
+        end_date,
+        adjusted=True,
+    )
 
 
 # ─────────────────────── 公共接口 ───────────────────────

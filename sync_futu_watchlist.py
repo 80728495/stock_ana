@@ -717,8 +717,16 @@ def write_holding_subset_md(dry_run: bool = False) -> dict:
     try:
         import sync_holding as sh
         holdings = sh.fetch_holdings(use_sim=False)
-        focus_stocks = sh.fetch_group_stocks(sh.FOCUS_GROUP)
-        watch_stocks = sh.fetch_group_stocks(sh.WATCH_GROUP)
+        ctx = sh.open_quote_ctx()
+        try:
+            ok_focus, focus_stocks = sh.fetch_group_stocks(ctx, sh.FOCUS_GROUP)
+            ok_watch, watch_stocks = sh.fetch_group_stocks(ctx, sh.WATCH_GROUP)
+        finally:
+            ctx.close()
+        if not ok_focus:
+            focus_stocks = sh.parse_existing_group_section("关注")
+        if not ok_watch:
+            watch_stocks = sh.parse_existing_group_section("观察")
         content = sh.build_holding_md(
             holdings=holdings,
             focus_stocks=focus_stocks,

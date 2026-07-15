@@ -21,6 +21,8 @@
     python daily_update.py --ndx        # 仅更新纳指100 OHLCV
     python daily_update.py --hk         # 仅更新港股 OHLCV
     python daily_update.py --cn         # 仅更新A股 OHLCV
+    python daily_update.py --benchmarks # 仅更新 RS beta 基准指数
+    python daily_update.py --rs         # 仅计算多市场 RS 与 beta 映射
     python daily_update.py --indicators # 仅更新技术指标
     python daily_update.py --waves      # 仅更新 wave 结构（全量 US+HK）
     python daily_update.py --lists      # 仅同步 MD 列表文件
@@ -285,6 +287,34 @@ def update_us() -> dict:
         return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e)}
 
 
+def update_benchmarks() -> dict:
+    """使用 Futu OpenD 更新 US/CN/HK 的 RS beta 基准。"""
+    logger.info("=" * 60)
+    logger.info("【0b/5】更新 RS benchmark（Futu OpenD）...")
+    logger.info("=" * 60)
+    t0 = time.time()
+    try:
+        from stock_ana.data.benchmark_store import update_benchmarks_futu
+
+        result = update_benchmarks_futu(force=False, max_stale_days=1)
+        elapsed = time.time() - t0
+        ok = int(result["failed"]) == 0
+        log = logger.success if ok else logger.warning
+        log(
+            f"RS benchmark 更新完成 ({elapsed:.0f}s): "
+            f"更新 {result['updated']}, 跳过 {result['skipped']}, 失败 {result['failed']}"
+        )
+        return {"ok": ok, "blocking": False, "elapsed": round(elapsed), **result}
+    except Exception as exc:
+        logger.error(f"RS benchmark 更新失败: {exc}")
+        return {
+            "ok": False,
+            "blocking": False,
+            "elapsed": round(time.time() - t0),
+            "error": str(exc),
+        }
+
+
 def update_us_tech() -> dict:
     """使用富途 OpenD 更新每日 Vegas Mid 依赖的美股科技池 OHLCV。"""
     logger.info("=" * 60)
@@ -431,19 +461,45 @@ def update_cn_hightech() -> dict:
         return {"ok": False, "elapsed": round(time.time() - t0), "error": str(e)}
 
 
+def update_relative_strength() -> dict:
+    """计算 US/CN/HK 全量历史 RS，并保存当前 benchmark 映射。"""
+    logger.info("=" * 60)
+    logger.info("【3d/5】更新多市场 RS 历史与 beta 映射 ...")
+    logger.info("=" * 60)
+    t0 = time.time()
+    try:
+        from stock_ana.data.relative_strength_store import update_all_relative_strength
+
+        result = update_all_relative_strength()
+        elapsed = time.time() - t0
+        ok = int(result.get("latest_count", 0)) > 0
+        log = logger.success if ok else logger.warning
+        log(f"RS 更新完成 ({elapsed:.0f}s): {result.get('markets', {})}")
+        return {"ok": ok, "blocking": False, "elapsed": round(elapsed), **result}
+    except Exception as exc:
+        logger.error(f"RS 更新失败: {exc}")
+        return {
+            "ok": False,
+            "blocking": False,
+            "elapsed": round(time.time() - t0),
+            "error": str(exc),
+        }
+
+
 def update_indicators() -> dict:
     """
-    更新全部市场的技术指标（US + NDX100 + HK）。
+    更新全部市场的技术指标（US + NDX100 + HK + CN）。
 
     计算项目：
       - 扩展 EMA：8, 21, 34, 55, 60, 144, 169, 200, 250
       - 成交量均线：vol_ma_5, vol_ma_10, vol_ma_50
       - 前高价格：prev_high_252d（252 日滚动最高收盘价）
+      - LazyBear Squeeze Momentum：动量值、挤压状态、柱体状态
 
     结果存储于：data/cache/indicators/{market}/{symbol}.parquet
     """
     logger.info("=" * 60)
-    logger.info("【4/5】更新技术指标（EMA / 成交量均线 / 前高）...")
+    logger.info("【4/5】更新技术指标（EMA / 成交量均线 / 前高 / SQZMOM_LB）...")
     logger.info("=" * 60)
     t0 = time.time()
     try:
@@ -822,6 +878,8 @@ def main():
     parser.add_argument("--hk",         action="store_true", help="仅更新港股 OHLCV")
     parser.add_argument("--cn",         action="store_true", help="仅更新A股 OHLCV")
     parser.add_argument("--cn-hightech", action="store_true", help="仅更新A股高新技术列表 OHLCV")
+    parser.add_argument("--benchmarks", action="store_true", help="仅更新 RS beta 基准指数")
+    parser.add_argument("--rs",         action="store_true", help="仅计算多市场 RS 与 beta 映射")
     parser.add_argument("--indicators", action="store_true", help="仅更新技术指标")
     parser.add_argument("--waves",      action="store_true", help="仅更新 Wave 结构（全量 US+HK）")
     parser.add_argument("--smc",        action="store_true", help="仅更新 SMC OB 增量状态（富途自选股）")
@@ -832,6 +890,7 @@ def main():
     # 若无任何参数，执行全流程（含 Futu 同步）
     run_all = not any([args.futu, args.us, args.ndx, args.hk, args.cn,
                        getattr(args, "cn_hightech", False),
+                       args.benchmarks, args.rs,
                        args.indicators, args.waves, args.smc,
                        getattr(args, "top_escape", False), args.lists])
 
@@ -849,6 +908,10 @@ def main():
     # ── Step 0：Futu 自选股同步（第一步，失败不阻断后续）──
     if run_all or args.futu:
         results["Futu同步"] = sync_futu()
+
+    # RS 基准必须早于个股 RS 计算刷新；失败不阻断行情主流程。
+    if run_all or args.benchmarks:
+        results["RS benchmark"] = update_benchmarks()
 
     # ── Step 1-3：扫描关键 OHLCV 数据更新 ──
     # 美股拆分为：
@@ -885,6 +948,10 @@ def main():
     # 先写出 scan_ready 状态；后续非关键任务继续跑，不再挡住每日 Vegas 扫描。
     if run_all or args.us or args.hk or args.cn or getattr(args, "cn_hightech", False):
         _save_status(results, round(time.time() - t_total), in_progress=True)
+
+    # RS 依赖三地个股和 benchmark 的最新收盘价。
+    if run_all or args.rs:
+        results["多市场RS"] = update_relative_strength()
 
     # ── 非关键 OHLCV 补充：美股 universe 中 tech list 之外的标的 ──
     if run_all or args.us:

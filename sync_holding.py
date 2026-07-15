@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""sync_holding.py — 从 Futu OpenD 同步持仓、关注、观察到 holding.md
+"""sync_holding.py — 从 Futu OpenD 同步持有、观察到 holding.md
 
-生成 data/lists/holding.md，包含三个区段：
-  ## 持仓 (Holdings)  — 真实账户当前持仓（HK + US + CN）
-  ## 关注 (Focus)     — Futu 自选股分组「关注」
+生成 data/lists/holding.md，只含两个区段：
+  ## 持有 (Holdings)  — 真实账户持仓 + Futu 自选分组「关注」合并去重
+                        （关注视同持有；同一标的以真实持仓为准）
   ## 观察 (Watch)     — Futu 自选股分组「观察」
+
+历史上「持仓」「关注」是分开的两块，现按需求硬编码合并为「持有」一块，
+不再单独保留「关注」区段。
 
 运行方式：
     python sync_holding.py
@@ -178,30 +181,71 @@ def parse_existing_group_section(title_key: str) -> list[dict]:
     return stocks
 
 
+def parse_existing_hold_section() -> list[dict]:
+    """解析现有「持有」区段的行，带「来源」列（持仓/关注）用于失败回退。"""
+    if not HOLDING_PATH.exists():
+        return []
+    stocks: list[dict] = []
+    in_section = False
+    for line in HOLDING_PATH.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            in_section = ("持有" in line) or ("持仓" in line)  # 兼容旧段名
+            continue
+        if in_section and line.strip().startswith("|"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) < 3 or cells[0] in ("代码", "") or set(cells[0]) <= {"-"}:
+                continue
+            src = cells[6] if len(cells) >= 7 else "持仓"
+            stocks.append({"symbol": cells[0], "market": cells[1], "name": cells[2], "source": src})
+    return stocks
+
+
 def parse_existing_holdings_count() -> int:
-    """现有 holding.md 持仓区段的标的数（用于持仓拉空时的防呆校验）。"""
-    return len(parse_existing_group_section("持仓"))
+    """现有「持有」区段中真实持仓（来源=持仓）的标的数（用于持仓拉空时的防呆校验）。"""
+    return sum(1 for e in parse_existing_hold_section() if e.get("source") == "持仓")
 
 
 # ═══════════════════════════════════════════════════════
 #  Markdown 生成
 # ═══════════════════════════════════════════════════════
 
-def _build_holdings_section(holdings: list[dict]) -> str:
+def _merge_hold(holdings: list[dict], focus_stocks: list[dict]) -> list[dict]:
+    """持仓 + 关注 合并去重为「持有」列表。
+
+    同一标的（market:symbol）以真实持仓为准；只在关注里的标的补入，
+    其数量/成本/盈亏为 None（渲染为「-」），来源标 focus。
+    """
+    merged: dict[str, dict] = {}
+    for h in holdings:
+        merged[f"{h['market']}:{h['symbol']}"] = {**h, "source": "hold"}
+    for s in focus_stocks:
+        key = f"{s['market']}:{s['symbol']}"
+        if key not in merged:
+            merged[key] = {
+                "symbol": s["symbol"], "market": s["market"], "name": s.get("name", ""),
+                "qty": None, "cost_price": None, "pl_ratio": None, "source": "focus",
+            }
+    return list(merged.values())
+
+
+def _build_holdings_section(hold_entries: list[dict]) -> str:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [
-        "## 持仓 (Holdings)",
+        "## 持有 (Holdings)",
         "",
-        f"> 自动更新：{now_str} | 来源：Futu OpenD 真实账户",
+        f"> 自动更新：{now_str} | 来源：Futu 真实账户持仓 + 自选分组「关注」合并",
         "",
-        "| 代码 | 市场 | 名称 | 数量 | 成本价 | 盈亏% |",
-        "|------|------|------|------|--------|-------|",
+        "| 代码 | 市场 | 名称 | 数量 | 成本价 | 盈亏% | 来源 |",
+        "|------|------|------|------|--------|-------|------|",
     ]
-    for h in sorted(holdings, key=lambda x: (x["market"], x["symbol"])):
-        pl_str = f"{h['pl_ratio']:+.2f}%" if h["pl_ratio"] is not None else "-"
+    for h in sorted(hold_entries, key=lambda x: (x["market"], x["symbol"])):
+        qty_str  = f"{h['qty']:.0f}" if h.get("qty") is not None else "-"
+        cost_str = f"{h['cost_price']:.3f}" if h.get("cost_price") is not None else "-"
+        pl_str   = f"{h['pl_ratio']:+.2f}%" if h.get("pl_ratio") is not None else "-"
+        src      = "持仓" if h.get("source") == "hold" else "关注"
         lines.append(
             f"| {h['symbol']} | {h['market']} | {h['name']} "
-            f"| {h['qty']:.0f} | {h['cost_price']:.3f} | {pl_str} |"
+            f"| {qty_str} | {cost_str} | {pl_str} | {src} |"
         )
     return "\n".join(lines)
 
@@ -230,14 +274,13 @@ def build_holding_md(
 ) -> str:
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     env_tag = "模拟账户" if use_sim else "真实账户"
+    hold_entries = _merge_hold(holdings, focus_stocks)  # 持仓 + 关注 合并为「持有」
     parts = [
         f"# 核心跟踪列表",
         "",
         f"> 自动生成 {now_str} | Futu OpenD（{env_tag}）",
         "",
-        _build_holdings_section(holdings),
-        "",
-        _build_watchgroup_section("关注 (Focus)", FOCUS_GROUP, focus_stocks),
+        _build_holdings_section(hold_entries),
     ]
     if include_watch:
         parts += [
@@ -253,7 +296,7 @@ def build_holding_md(
 # ═══════════════════════════════════════════════════════
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="同步 Futu OpenD 持仓/关注/观察到 holding.md")
+    parser = argparse.ArgumentParser(description="同步 Futu OpenD 持有（持仓+关注）/观察到 holding.md")
     parser.add_argument("--sim",     action="store_true", help="持仓使用模拟账户")
     parser.add_argument("--dry-run", action="store_true", help="只打印预览，不写文件")
     parser.add_argument("--include-watch", action="store_true",
@@ -278,10 +321,11 @@ def main() -> None:
 
     # 拉取失败 → 保留旧数据，绝不用空段覆盖（防数据丢失）
     if not ok_focus:
-        focus_stocks = parse_existing_group_section("关注")
+        # 关注已并入「持有」段，从旧文件按来源=关注回捞
+        focus_stocks = [e for e in parse_existing_hold_section() if e.get("source") == "关注"]
         print(f"   ⚠️ 关注拉取失败，保留 holding.md 旧数据 {len(focus_stocks)} 只")
     else:
-        print(f"   关注 {len(focus_stocks)} 只")
+        print(f"   关注 {len(focus_stocks)} 只（并入持有）")
     if not ok_watch:
         watch_stocks = parse_existing_group_section("观察")
         print(f"   ⚠️ 观察拉取失败，保留 holding.md 旧数据 {len(watch_stocks)} 只")
@@ -315,8 +359,10 @@ def main() -> None:
     else:
         HOLDING_PATH.parent.mkdir(parents=True, exist_ok=True)
         HOLDING_PATH.write_text(content, encoding="utf-8")
+        n_hold = len(_merge_hold(holdings, focus_stocks))
         print(f"\n✅ holding.md 已写入 → {HOLDING_PATH}")
-        print(f"   持仓 {len(holdings)} 只 | 关注 {len(focus_stocks)} 只 | 观察 {len(watch_stocks)} 只")
+        print(f"   持有 {n_hold} 只（持仓 {len(holdings)} + 关注 {len(focus_stocks)} 合并去重）"
+              f" | 观察 {len(watch_stocks)} 只")
 
 
 if __name__ == "__main__":

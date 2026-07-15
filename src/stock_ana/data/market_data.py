@@ -261,7 +261,6 @@ def _tech_pool_symbols(include_holding: bool = True) -> list[tuple[str, str, str
     from stock_ana.config import DATA_DIR
     from stock_ana.data.list_manager import (
         _read_md_table,
-        load_cn_hightech_list,
         load_us_tech_list,
     )
 
@@ -276,8 +275,13 @@ def _tech_pool_symbols(include_holding: bool = True) -> list[tuple[str, str, str
 
     for e in load_us_tech_list():
         _add("US", str(e.get("ticker", "")).strip().upper(), str(e.get("company", "")).strip())
-    for code in load_cn_hightech_list():
-        _add("CN", str(code).strip().zfill(6), str(code).strip())
+    # CN 从 md 表读名称列（表格 | # | 代码 | 名称 | 来源 |），与 HK 同理；
+    # 不用 load_cn_hightech_list()——它只返回代码，会让 CN 名字丢失（显示代码）。
+    cn_path = DATA_DIR / "lists" / "cn_hightech_list.md"
+    if cn_path.exists():
+        for row in _read_md_table(cn_path):
+            if len(row) >= 3 and row[1].strip().isdigit() and len(row[1].strip()) == 6:
+                _add("CN", row[1].strip().zfill(6), row[2].strip())
     hk_path = DATA_DIR / "lists" / "hk_techman.md"
     if hk_path.exists():
         for row in _read_md_table(hk_path):

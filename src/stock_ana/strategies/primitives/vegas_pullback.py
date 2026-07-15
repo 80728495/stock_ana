@@ -92,6 +92,49 @@ def check_vegas_gate(
 
 
 # ─────────────────────────────────────────────────────────────
+# Pullback Precondition  (「回踩」语义门：从上方跌下来 + regime)
+# ─────────────────────────────────────────────────────────────
+
+def pullback_precondition(
+    i: int,
+    close: np.ndarray,
+    ema: np.ndarray,
+    above_lookback: int,
+    above_min_ratio: float = 0.8,
+    from_above_pct: float = 0.02,
+    regime_mask: np.ndarray | None = None,
+) -> bool:
+    """触碰 bar i 是否满足「回踩」语义（零前瞻，供各检测器共用）。
+
+    「回踩」= 价格从高于当前的位置跌下来触碰均线。跌穿后重新涨回的
+    上穿触碰不是回踩。四个条件全过才 True：
+
+      1. regime_mask[i] 为 True（None = 不检查）。mid 触碰用它要求
+         中期均线运行在长期均线之上（min(EMA34,55) > max(EMA144,169,200)）。
+      2. 触碰前一根收盘 ≥ 前一根 EMA —— 价格自上而下接近均线；
+         跌穿后涨回的上穿触碰，前一根收盘必在均线之下，被此条拒绝。
+      3. 过去 above_lookback 根收盘 ≥ EMA 的占比 ≥ above_min_ratio
+         （0.8，旧值 0.6 太松：10 根里 4 根在下方也能过）。
+      4. 过去 above_lookback 根内最高收盘 ≥ EMA×(1+from_above_pct)
+         —— 确实从更高处跌下来，而非一直贴线横爬。
+    """
+    if regime_mask is not None and not bool(regime_mask[i]):
+        return False
+    if i < 1 or close[i - 1] < ema[i - 1]:
+        return False
+    lb_start = max(0, i - above_lookback)
+    if lb_start >= i:
+        return False
+    win_close = close[lb_start:i]
+    win_ema = ema[lb_start:i]
+    if float(np.mean(win_close >= win_ema)) < above_min_ratio:
+        return False
+    if float(np.max(win_close)) < float(ema[i]) * (1 + from_above_pct):
+        return False
+    return True
+
+
+# ─────────────────────────────────────────────────────────────
 # Unified State-Machine Detection  (zero look-ahead)
 # ─────────────────────────────────────────────────────────────
 
@@ -101,8 +144,13 @@ def detect_vegas_pullback(
     emas: dict[int, np.ndarray],
     spans: list[int] | None = None,
     touch_margin: float = 0.01,
-    cooldown: int = 10,
+    depart_pct: float = 0.05,
+    deepen_pct: float = 0.03,
+    min_gap_bars: int = 3,
     above_lookback: int = 0,
+    above_min_ratio: float = 0.8,
+    from_above_pct: float = 0.02,
+    regime_mask: np.ndarray | None = None,
 ) -> list[dict]:
     """逐日扫描 Vegas 均线触碰 + 站稳确认信号（零前瞻）。
 
@@ -110,21 +158,32 @@ def detect_vegas_pullback(
       - 单日触碰收回（low 靠近线，close ≥ EMA）→ 当日即确认
       - 短暂刺破（≤ 2 交易日 close < EMA）→ 两日站稳确认
 
-    above_lookback > 0 时启用"上方运行"前置检查：
-      触发前的 above_lookback 个交易日中，至少 60% 的日子 close ≥ EMA，
-      确保信号来自"上方回踩"而非"下方修复"。
-      典型用于 Mid Vegas 中继（above_lookback=10），排除从下方长期恢复
-      后才碰到 mid 的假信号。
+    above_lookback > 0 时启用「回踩」语义门（pullback_precondition）：
+      ① regime_mask（如 mid>long 多头排列）② 触碰前一根收盘在 EMA 上方
+      （自上而下接近，拒绝跌穿后涨回的上穿触碰）③ 上方占比 ≥
+      above_min_ratio（0.8）④ 窗口内最高收盘 ≥ EMA×(1+from_above_pct)
+      （确实从更高处跌下来）。regime_mask 单独传入时即使
+      above_lookback=0 也生效。
 
-    同一次回调多条 EMA 同时触发 → 冷却去重，只保留最新一条。
+    去重（"离开-再回踩 / 越踩越深"规则，取代固定冷却期）：
+      一次回踩常在均线附近磨几天，属同一事件。仅当满足以下之一才认第二次
+      为新回踩，否则合并：
+        1. 价格在两次触碰之间**明显离开过通道**（某根收盘 ≥ 通道上沿 ×
+           (1+depart_pct)）——回踩已结束、价格重新走高又跌回；
+        2. 本次触碰**创了明显更低的低点**（touch_low < 上次 ×(1-deepen_pct)）
+           ——同一轮下跌里逐步加深的支撑测试（先擦 ema34 再深探 ema55），
+           越深的那次才是真正的抄底点，应单列。
+      这比"数 N 根 K 线"精确：锚定"回踩是否结束/是否加深"的经济事实，行情
+      快速运行时不会把两次不同的回踩误并（旧固定冷却期的缺陷）。
+      min_gap_bars 作最小间隔地板，防相邻 1-2 日重复。
 
     Parameters
     ----------
-    spans : 待检测的 EMA 周期列表，默认为 MID_EMAS (34/55/60)。
-            传入 ALL_VEGAS_EMAS 则同时检测长期 Vegas (144/169/200)。
+    spans : 待检测的 EMA 周期列表，默认为 MID_EMAS (34/55)。
     touch_margin : low ≤ EMA × (1 + touch_margin) 即视为"靠近"。
-                   0.01 → 1% 容差；0.02 → 2% 容差（捕获近距未触）。
-    above_lookback : 前置检查回看天数，0 = 不检查（兼容旧行为）。
+    depart_pct : 判定"离开通道"的阈值（收盘高出通道上沿的比例）。0.05 = 5%。
+    min_gap_bars : 两次保留信号的最小 bar 间隔地板。
+    above_lookback : 前置检查回看天数，0 = 不检查。
 
     Returns
     -------
@@ -147,26 +206,25 @@ def detect_vegas_pullback(
         state = None
         touch_bar = -1
         broke_below = 0
-        last_confirmed = -999
 
         for i in range(1, n):
-            if i - last_confirmed < cooldown:
-                state = None
-                continue
-
             ev = ema[i]
             c = close[i]
             lo = low[i]
 
             if state is None:
                 if lo <= ev * (1 + touch_margin):
-                    # ── 前置检查：最近是否在 EMA 上方运行 ──
+                    # ── 「回踩」语义门：从上方跌下来 + regime ──
                     if above_lookback > 0:
-                        lb_start = max(0, i - above_lookback)
-                        above_cnt = int(np.sum(close[lb_start:i] >= ema[lb_start:i]))
-                        if above_cnt < (i - lb_start) * 0.6:
-                            # 大部分时间在下方 → 不是上方回踩，跳过
+                        if not pullback_precondition(
+                            i, close, ema, above_lookback,
+                            above_min_ratio=above_min_ratio,
+                            from_above_pct=from_above_pct,
+                            regime_mask=regime_mask,
+                        ):
                             continue
+                    elif regime_mask is not None and not bool(regime_mask[i]):
+                        continue
 
                     if c >= ev:
                         # 单日触碰收回 — 强势止跌，直接确认
@@ -178,7 +236,6 @@ def detect_vegas_pullback(
                                 ema_span=span,
                                 touch_low=float(lo), ema_at_touch=float(ev),
                             ))
-                        last_confirmed = i
                     else:
                         state = "touched"
                         touch_bar = i
@@ -204,19 +261,35 @@ def detect_vegas_pullback(
                             touch_low=float(low[touch_bar]),
                             ema_at_touch=float(ema[touch_bar]),
                         ))
-                    last_confirmed = i
                     state = None
                 else:
                     state = None
 
-    # 全跨度去重：同一次回调只保留最新一条
+    # ── 去重：同一次回踩合并，价格离开通道后再回踩才算新事件 ──
+    channel_top = emas[spans[0]].astype(float).copy()
+    for s in spans[1:]:
+        channel_top = np.maximum(channel_top, emas[s].astype(float))
+
     raw_signals.sort(key=lambda s: s["entry_bar"])
     signals: list[dict] = []
-    last_entry = -999
+    last_kept: dict | None = None
     for sig in raw_signals:
-        if sig["entry_bar"] - last_entry < cooldown:
+        if last_kept is None:
+            signals.append(sig)
+            last_kept = sig
             continue
-        last_entry = sig["entry_bar"]
-        signals.append(sig)
+        if sig["entry_bar"] - last_kept["entry_bar"] < min_gap_bars:
+            continue
+        seg_lo = last_kept["touch_bar"] + 1
+        seg_hi = sig["touch_bar"] + 1
+        departed = bool(
+            seg_hi > seg_lo
+            and np.any(close[seg_lo:seg_hi] >= channel_top[seg_lo:seg_hi] * (1 + depart_pct))
+        )
+        deeper = sig["touch_low"] < last_kept["touch_low"] * (1 - deepen_pct)
+        if departed or deeper:
+            signals.append(sig)
+            last_kept = sig
+        # 否则视为同一次回踩的延续，跳过
 
     return signals

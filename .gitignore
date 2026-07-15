@@ -77,3 +77,6 @@ src/data/output/
 
 # 研究过程一次性临时脚本（不入库）
 temp_scripts/
+
+# 本地图表产出（持仓浪结构图等，非 data/output 以免被测试 rmtree 清掉）
+charts/

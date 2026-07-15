@@ -1,6 +1,6 @@
 # Shawn 关注股票列表
 
-> 人工维护，最后更新：2026-07-02
+> 人工维护，最后更新：2026-07-09
 >
 > 重点跟踪标的，兼顾港股、美股与大A。
 
@@ -277,6 +277,7 @@
 | ETN | 伊顿 | 伊顿 |
 | ROG | 罗杰斯 | 罗杰斯 |
 | CC | The Chemours | The Chemours |
+| RAM | 2倍做多DRAM ETF-T-REX | 2倍做多DRAM ETF-T-REX |
 
 ## 大A (CN)
 
