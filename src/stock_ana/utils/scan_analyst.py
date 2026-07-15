@@ -30,6 +30,7 @@ DEFAULT_OUT_DIR = OUTPUT_DIR / "scan_analysis"
 DEFAULT_MODEL = os.environ.get("STOCK_ANA_GEMINI_MODEL") or "gemini-3.1-pro"
 DEFAULT_LLM_BACKEND = "codex"
 DEFAULT_LLM_BATCH_SIZE = 3
+TRUTHY_ENV = {"1", "true", "yes", "on"}
 
 GEMINI_WEB_MODEL_HEADERS: dict[str, dict[str, str]] = {
     # Gemini web internal Pro mode header. Kept separate from gemini_webapi's
@@ -53,6 +54,11 @@ def _env_int(name: str, default: int) -> int:
         logger.warning(f"{name}={raw!r} 不是有效整数，使用默认值 {default}")
         return default
     return value if value > 0 else default
+
+
+def gemini_web_enabled() -> bool:
+    """Return whether Gemini Web cookie-based access is explicitly enabled."""
+    return os.environ.get("STOCK_ANA_ENABLE_GEMINI_WEB", "").strip().lower() in TRUTHY_ENV
 
 
 def resolve_gemini_model(model: str | dict) -> str | dict:
@@ -139,6 +145,11 @@ async def _init_client(model: str = DEFAULT_MODEL):
     若 PSIDTS 已被 Google 服务端轮换（约每 1-3 小时），会自动打开浏览器访问
     Gemini，等 Chrome 拿到新 Cookie 后重新读取并重试（最多 2 次）。
     """
+    if not gemini_web_enabled():
+        raise RuntimeError(
+            "Gemini Web 访问已关闭。若确需临时使用，请设置 STOCK_ANA_ENABLE_GEMINI_WEB=1。"
+        )
+
     from pathlib import Path
 
     from gemini_webapi import GeminiClient

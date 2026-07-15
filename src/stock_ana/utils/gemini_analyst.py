@@ -19,7 +19,7 @@ from gemini_webapi import GeminiClient
 from loguru import logger
 
 from stock_ana.config import OUTPUT_DIR
-from stock_ana.utils.scan_analyst import resolve_gemini_model
+from stock_ana.utils.scan_analyst import gemini_web_enabled, resolve_gemini_model
 
 # ──────── 默认模型 ────────
 DEFAULT_MODEL = os.environ.get("STOCK_ANA_GEMINI_MODEL") or "gemini-3.1-pro"
@@ -73,6 +73,11 @@ async def _init_client(model: str = DEFAULT_MODEL) -> GeminiClient:
     避免 cron 等非 GUI session 下 browser-cookie3 无法访问 Keychain 的问题。
     若环境变量未设置，回退到 browser-cookie3 自动读取（仅限交互式 session）。
     """
+    if not gemini_web_enabled():
+        raise RuntimeError(
+            "Gemini Web 访问已关闭。若确需临时使用，请设置 STOCK_ANA_ENABLE_GEMINI_WEB=1。"
+        )
+
     import os
     psid   = os.environ.get("GEMINI_PSID", "").strip()
     psidts = os.environ.get("GEMINI_PSIDTS", "").strip()

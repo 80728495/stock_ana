@@ -28,7 +28,6 @@ FEISHU_USER_OPEN_ID = "ou_5489407346c5c13bc4687a83859d619b"
 FEISHU_API = "https://open.feishu.cn/open-apis"
 DAILY_VEGUS_EMAIL_RECIPIENTS = [
     "99772120@qq.com",
-    "80728495@qq.com",
     "185182@qq.com",
     "tsy_fever@163.COM",
 ]
@@ -664,6 +663,9 @@ def main() -> int:
         if not send_post_message(token, title1, blocks1):
             print("❌ 数据更新消息发送失败")
             ok = False
+        if status is None:
+            print("⚠️ 今日 daily_update status.json 不存在，跳过扫描结果通知，避免发送旧结果。")
+            return 0 if ok else 1
 
     # Notification 2 & 3: 美股 + 港股扫描（combined 模式）；如仅有一个则单独发
     summary_us_path = _find_today_file(DAILY_SCAN_DIR, "summary_us.json")

@@ -17,7 +17,8 @@
 用法：
     python daily_update.py              # 全部更新（0-5 含Futu同步+CN）
     python daily_update.py --futu       # 仅同步 Futu 自选股列表
-    python daily_update.py --us         # 仅更新美股 OHLCV
+    python daily_update.py --us         # 仅更新美股科技池 OHLCV（Vegas Mid 关键路径）
+    python daily_update.py --us-non-tech # 仅更新美股非科技 universe OHLCV（低优先级补充）
     python daily_update.py --ndx        # 仅更新纳指100 OHLCV
     python daily_update.py --hk         # 仅更新港股 OHLCV
     python daily_update.py --cn         # 仅更新A股 OHLCV
@@ -389,6 +390,31 @@ def update_us_non_tech() -> dict:
             "error": str(e),
             "source": "akshare_sina",
         }
+
+
+def _load_today_status_results() -> dict:
+    """Load today's status.json steps as a results dict, keyed by step name."""
+    today = date.today().isoformat()
+    path = PROJECT_ROOT / "data" / "output" / "daily_update" / today / "status.json"
+    if not path.exists():
+        return {}
+    try:
+        status = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning(f"读取已有 status.json 失败，跳过合并: {exc}")
+        return {}
+
+    merged: dict = {}
+    for step in status.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        name = step.get("name")
+        if not name:
+            continue
+        item = dict(step)
+        item.pop("name", None)
+        merged[str(name)] = item
+    return merged
 
 
 def update_ndx() -> dict:
@@ -873,7 +899,8 @@ def main():
     """Run the daily update CLI for OHLCV, indicators, waves, and list sync tasks."""
     parser = argparse.ArgumentParser(description="每日股票数据更新")
     parser.add_argument("--futu",       action="store_true", help="仅同步 Futu 自选股列表")
-    parser.add_argument("--us",         action="store_true", help="仅更新美股 OHLCV")
+    parser.add_argument("--us",         action="store_true", help="仅更新美股科技池 OHLCV（Vegas Mid 关键路径）")
+    parser.add_argument("--us-non-tech", action="store_true", help="仅更新美股非科技 universe OHLCV（低优先级补充）")
     parser.add_argument("--ndx",        action="store_true", help="仅更新纳指100 OHLCV")
     parser.add_argument("--hk",         action="store_true", help="仅更新港股 OHLCV")
     parser.add_argument("--cn",         action="store_true", help="仅更新A股 OHLCV")
@@ -888,7 +915,8 @@ def main():
     args = parser.parse_args()
 
     # 若无任何参数，执行全流程（含 Futu 同步）
-    run_all = not any([args.futu, args.us, args.ndx, args.hk, args.cn,
+    run_all = not any([args.futu, args.us, getattr(args, "us_non_tech", False),
+                       args.ndx, args.hk, args.cn,
                        getattr(args, "cn_hightech", False),
                        args.benchmarks, args.rs,
                        args.indicators, args.waves, args.smc,
@@ -898,9 +926,11 @@ def main():
     logger.info(f"  每日数据更新 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"{'=' * 60}")
 
-    # ── Cookie 刷新（Chrome 未开时自动更新 .env）──
     logger.info(f"启动来源: {_launch_context()}")
-    _refresh_gemini_cookies()
+    if os.environ.get("STOCK_ANA_ENABLE_GEMINI_WEB", "").strip().lower() in {"1", "true", "yes", "on"}:
+        _refresh_gemini_cookies()
+    else:
+        logger.info("Gemini Web 访问已关闭（设置 STOCK_ANA_ENABLE_GEMINI_WEB=1 可临时启用）")
 
     t_total = time.time()
     results = {}
@@ -916,7 +946,7 @@ def main():
     # ── Step 1-3：扫描关键 OHLCV 数据更新 ──
     # 美股拆分为：
     #   1) us_tech_list.md：每日 Vegas Mid 依赖，优先使用 Futu OpenD；
-    #   2) universe 中非 tech 标的：低优先级 AkShare 补充，放在关键校验后执行。
+    #   2) universe 中非 tech 标的：低优先级 AkShare 补充，仅在 run_all 或 --us-non-tech 时执行。
     if run_all or args.us:
         results["美股科技OHLCV"] = update_us_tech()
 
@@ -954,7 +984,7 @@ def main():
         results["多市场RS"] = update_relative_strength()
 
     # ── 非关键 OHLCV 补充：美股 universe 中 tech list 之外的标的 ──
-    if run_all or args.us:
+    if run_all or getattr(args, "us_non_tech", False):
         results["美股非科技OHLCV"] = update_us_non_tech()
 
     # ── Step 4：技术指标 ──
@@ -976,6 +1006,11 @@ def main():
     # ── 列表同步（需显式指定 --lists）──
     if args.lists:
         results["列表同步"] = sync_lists()
+
+    if getattr(args, "us_non_tech", False) and not run_all:
+        # Standalone post-scan supplement should preserve the scan-critical status
+        # written by the morning update instead of replacing it with one low-priority step.
+        results = {**_load_today_status_results(), **results}
 
     elapsed = time.time() - t_total
     logger.info(f"\n{'=' * 60}")

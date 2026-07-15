@@ -65,26 +65,6 @@ if (Test-Path $StampFile) {
 
 Write-Host "[daily-scan] New data detected, starting scan..."
 
-# Wait for Google/Gemini to be reachable (proxy may need a moment to become active)
-$maxWaitSec = 180   # 最多等 3 分钟
-$intervalSec = 20
-$elapsed = 0
-$reachable = $false
-while (-not $reachable -and $elapsed -lt $maxWaitSec) {
-    try {
-        $null = Invoke-WebRequest -Uri "https://gemini.google.com" -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-        $reachable = $true
-        Write-Host "[daily-scan] gemini.google.com reachable."
-    } catch {
-        Write-Host "[daily-scan] gemini.google.com unreachable, waiting ${intervalSec}s... (${elapsed}/${maxWaitSec}s)"
-        Start-Sleep -Seconds $intervalSec
-        $elapsed += $intervalSec
-    }
-}
-if (-not $reachable) {
-    Write-Host "[daily-scan] WARNING: gemini.google.com still unreachable after ${maxWaitSec}s, proceeding anyway..."
-}
-
 # Ensure log dir exists
 $logDir = Join-Path $ProjectDir "data\logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
@@ -134,7 +114,7 @@ try {
 & $PythonBin notify_daily_scan_result.py --market cn --skip-update --no-email --scan-exit-code $cnScanExit
 
 # 5) SMC OB 飞书通知（有事件才发）
-Write-Host "[daily-scan] Step 5/7: SMC OB 飞书通知..."
+Write-Host "[daily-scan] Step 5/8: SMC OB 飞书通知..."
 try {
     & $PythonBin notify_smc_ob.py
 } catch {
@@ -142,7 +122,7 @@ try {
 }
 
 # 6) 持仓顶部逃顶信号飞书通知（有事件才发）
-Write-Host "[daily-scan] Step 6/7: 持仓顶部逃顶信号飞书通知..."
+Write-Host "[daily-scan] Step 6/8: 持仓顶部逃顶信号飞书通知..."
 try {
     & $PythonBin notify_top_escape.py
 } catch {
@@ -150,10 +130,18 @@ try {
 }
 
 # 7) 三市场合并邮件（各市场飞书已单独发完，此处只发一封合并 PDF 邮件）
-Write-Host "[daily-scan] Step 7/7: 发送合并邮件..."
+Write-Host "[daily-scan] Step 7/8: 发送合并邮件..."
 & $PythonBin notify_daily_scan_result.py --send-combined-email
 
-# 8) Update timestamp
+# 8) 低优先级补充：扫描完成后再更新美股非科技 universe，不阻塞 Vegas 结果
+Write-Host "[daily-scan] Step 8/8: 美股非科技 universe 补充更新..."
+try {
+    & $PythonBin daily_update.py --us-non-tech
+} catch {
+    Write-Host "[daily-scan] US non-tech supplement error: $_"
+}
+
+# 9) Update timestamp
 Set-Content -Path $StampFile -Value (Get-Date -Format "o") -Encoding ASCII
 
 # 整体退出码：任一非零则返回非零
