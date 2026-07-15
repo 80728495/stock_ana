@@ -28,15 +28,15 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from stock_ana.config import OUTPUT_DIR  # noqa: E402
+from stock_ana.research.top_reversal.eval_watchlist_oos import (  # noqa: E402
+    auc,
+    load_watchlist_members,
+    topk,
+    usable_features,
+)
 from stock_ana.research.vegas_pullback.feature_registry import (  # noqa: E402
     REALTIME_FEATURE_COLS,
     feature_group_for,
-)
-from stock_ana.research.top_reversal.eval_watchlist_oos import (  # noqa: E402
-    auc,
-    topk,
-    usable_features,
-    load_watchlist_members,
 )
 
 OUT_DIR = OUTPUT_DIR / "vegas_pullback_research"
@@ -70,14 +70,17 @@ EXCLUDE_GROUPS: tuple = ()
 
 # ── LR / lgbm：fit=train / score=test，正类可配置 ────────────────────────────
 
-def _fit_logistic(train: pd.DataFrame, feats: list[str]) -> dict:
+def _fit_logistic(train: pd.DataFrame, feats: list[str],
+                  target_col: str | None = None, pos: str | None = None) -> dict:
+    tcol = target_col if target_col is not None else TARGET_COL
+    plab = pos if pos is not None else POS_LABEL
     xdf = train[feats].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
     med = xdf.median()
     xdf = xdf.fillna(med).fillna(0.0)
     mean = xdf.mean()
     std = xdf.std(ddof=0).replace(0, 1)
     x = np.clip(((xdf - mean) / std).to_numpy(float), -8.0, 8.0)
-    y = (train[TARGET_COL] == POS_LABEL).astype(float).to_numpy()
+    y = (train[tcol] == plab).astype(float).to_numpy()
     xb = np.column_stack([np.ones(len(x)), x])
     beta = np.zeros(xb.shape[1])
     lr, l2 = 0.04, 0.05
@@ -100,10 +103,13 @@ def _predict_logistic(bundle: dict, df: pd.DataFrame) -> np.ndarray:
     return 1 / (1 + np.exp(-np.clip(txb @ beta, -30, 30)))
 
 
-def _fit_lightgbm(train: pd.DataFrame, feats: list[str]):
+def _fit_lightgbm(train: pd.DataFrame, feats: list[str],
+                  target_col: str | None = None, pos: str | None = None):
     import lightgbm as lgb
+    tcol = target_col if target_col is not None else TARGET_COL
+    plab = pos if pos is not None else POS_LABEL
     x_tr = train[feats].apply(pd.to_numeric, errors="coerce").to_numpy(float)
-    y_tr = (train[TARGET_COL] == POS_LABEL).astype(float).to_numpy()
+    y_tr = (train[tcol] == plab).astype(float).to_numpy()
     # 不用 scale_pos_weight：bounce/breakdown 类别本就接近平衡，加权只会压偏概率
     # 校准（持仓回测实测平均 P 0.37→0.43、AUC 0.649→0.661），不改善排序。
     params = dict(objective="binary", verbose=-1, num_threads=4, max_depth=3, num_leaves=7,

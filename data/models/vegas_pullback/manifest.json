@@ -1,0 +1,87 @@
+{
+  "models": {
+    "mid_buy_US.json": {
+      "n_train": 6424,
+      "n_pos": 3049,
+      "n_features": 103,
+      "trained_at": "2026-07-15T03:36:46Z"
+    },
+    "mid_buy_HK.json": {
+      "n_train": 5255,
+      "n_pos": 2182,
+      "n_features": 100,
+      "trained_at": "2026-07-15T03:36:49Z"
+    },
+    "mid_buy_CN.json": {
+      "n_train": 8961,
+      "n_pos": 3796,
+      "n_features": 103,
+      "trained_at": "2026-07-15T03:36:53Z"
+    },
+    "long_buy_US.json": {
+      "n_train": 3306,
+      "n_pos": 1500,
+      "n_features": 103,
+      "trained_at": "2026-07-15T03:36:56Z"
+    },
+    "long_buy_HK.json": {
+      "n_train": 2984,
+      "n_pos": 1217,
+      "n_features": 100,
+      "trained_at": "2026-07-15T03:36:59Z"
+    },
+    "long_buy_CN.json": {
+      "n_train": 4610,
+      "n_pos": 2035,
+      "n_features": 103,
+      "trained_at": "2026-07-15T03:37:01Z"
+    },
+    "long_buy_big_US.json": {
+      "n_train": 2964,
+      "n_pos": 1141,
+      "n_features": 103,
+      "trained_at": "2026-07-15T03:37:04Z"
+    },
+    "long_buy_big_HK.json": {
+      "n_train": 2814,
+      "n_pos": 1014,
+      "n_features": 100,
+      "trained_at": "2026-07-15T03:37:06Z"
+    },
+    "long_buy_big_CN.json": {
+      "n_train": 4377,
+      "n_pos": 1698,
+      "n_features": 103,
+      "trained_at": "2026-07-15T03:37:09Z"
+    },
+    "long_w2_chain_US.json": {
+      "n_train": 835,
+      "n_pos": 140,
+      "n_features": 90,
+      "trained_at": "2026-07-15T03:37:11Z"
+    },
+    "long_w2_chain_HK.json": {
+      "n_train": 642,
+      "n_pos": 93,
+      "n_features": 89,
+      "trained_at": "2026-07-15T03:37:12Z"
+    },
+    "long_w2_chain_CN.json": {
+      "n_train": 970,
+      "n_pos": 190,
+      "n_features": 91,
+      "trained_at": "2026-07-15T03:37:14Z"
+    }
+  },
+  "default_targets": {
+    "mid": [
+      "buy"
+    ],
+    "long": [
+      "buy",
+      "buy_big",
+      "w2_chain"
+    ]
+  },
+  "built_at": "2026-07-15T03:37:14Z"
+}

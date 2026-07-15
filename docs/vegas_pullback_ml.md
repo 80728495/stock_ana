@@ -454,5 +454,12 @@ OOS AUC 与召回的边际影响。
 - v1 已跑通端到端；标签在连续升浪（华虹/心动）全 bounce、独立行情深破
   （LUNR/AAOI）全 breakdown，与人工判读一致。
 - 待办：按市场调参；加纯因果口径（去估值/HK·CN 增长快照）对照看泄漏幅度；
-  接入每日扫描给实时回踩点打 bounce 概率、落盘模型 bundle 供生产复用。
+  接入每日扫描给实时回踩点打 bounce 概率。
+- **模型持久化（2026-07-14，已完成）**：`vegas_model.py`（对标 top_reversal.discovery_model）
+  训练/持久化/加载/预测。按 support×market×target 分离，落盘可移植 JSON
+  （lgb=model_to_string，LR=med/mean/std/beta）到 `data/models/vegas_pullback/`（入 git）。
+  训练口径复用 eval_oos 的 `_fit_logistic`/`_fit_lightgbm`（加了可选 target 参数，零漂移，
+  加载预测与内存现训位级一致）。默认落盘 mid/buy + long/{buy,buy_big,w2_chain}=12 个模型。
+  重训：`python -m stock_ana.research.vegas_pullback.vegas_model --train`。
+  加载：`load_vegas_models(support, target)` + `predict_vegas(models, 候选)`→ 列 score(=lgb 概率)。
 - 待办（顶部发现移植）：见上「可移植到顶部发现项目的特征」，按 1→5 优先级。
